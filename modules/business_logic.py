@@ -102,40 +102,47 @@ class BusinessLogic(BaseModule):
         well. Absence is still recorded so the operator knows the write
         test has nothing to aim at.
         """
-        target = await self._self_endpoint(harness, attacker, cfg)
-        if not target:
-            return []
-        record = await self._get_json(harness, attacker.name, target)
-        if not isinstance(record, dict):
-            return []
-        present = sorted(f for f in PRIVILEGE_FIELDS if f in record)
+        found: dict[str, list] = {}
+        for target in await self._self_endpoints(harness, attacker, cfg):
+            record = await self._get_json(harness, attacker.name, target)
+            if not isinstance(record, dict):
+                continue
+            present = sorted({f for cand in self._records(record)
+                              for f in PRIVILEGE_FIELDS if f in cand})
+            if present:
+                found[target] = present
         self.state.add_asset(
             "logic_surface",
             f"logic_surface:{self.domain}",
             self.domain,
             confidence="CONFIRMED",
             sources=[self.id],
-            attrs={"self_endpoint": target,
-                   "privilege_fields": present},
+            attrs={"self_endpoints": sorted(found),
+                   "privilege_fields": sorted(
+                       {f for fields in found.values() for f in fields})},
         )
-        if not present:
+        if not found:
             return []
+        total = sum(len(fields) for fields in found.values())
         return [{
-            "title": f"Mass-assignment surface: {len(present)} privilege "
-                     f"field(s) on the caller's own record",
+            "title": f"Mass-assignment surface: {total} privilege "
+                     f"field(s) on the caller's own record(s)",
             "severity": "INFO",
             "confidence": "FIRM",
             "category": "Business Logic",
             "description": (
-                f"The caller's own record at {target} contains "
-                f"{len(present)} privilege-bearing field(s): "
-                f"{', '.join(present)}. Presence is not a bug — the "
-                f"endpoint may whitelist writes — but it is where the "
-                f"mass_assignment write test applies. Enable "
-                f"modules.mass_assignment.enabled to test binding."
+                f"{len(found)} readable self-record(s) contain "
+                f"privilege-bearing fields: "
+                + "; ".join(f"{url}: {', '.join(fields)}"
+                            for url, fields in sorted(found.items()))
+                + ". Presence is not a bug — the endpoint may whitelist "
+                f"writes — but it is where the mass_assignment write test "
+                f"applies. Enable modules.mass_assignment.enabled to test "
+                f"binding."
             ),
-            "evidence": [f"{target}: {', '.join(present)}"],
-            "asset_keys": [f"url:{target}"],
+            "evidence": [f"{url}: {', '.join(fields)}"
+                         for url, fields in sorted(found.items())],
+            "asset_keys": [f"url:{url}" for url in sorted(found)],
             "remediation": "No action unless the write test confirms "
                            "binding; then allowlist update fields.",
         }]
@@ -181,7 +188,7 @@ class BusinessLogic(BaseModule):
                            label: str, field: str, hostile) -> dict | None:
         """Send one hostile value, compare, restore, verify restore."""
         base_total = self._total_of(baseline)
-        probe = await self._post_json(
+        probe = await self._write_json(
             harness, attacker.name, endpoint, {field: hostile})
         if not isinstance(probe, dict):
             return None
@@ -190,7 +197,8 @@ class BusinessLogic(BaseModule):
                                             baseline)
         if not self._moved_in_attacker_favour(base_total, new_total,
                                               label, hostile,
-                                              probe.get("quantity")):
+                                              self._field_of(probe,
+                                                             "quantity")):
             return None
         if not restored:
             self.log(f"  WARNING: cart restore unverified after {label} "
@@ -229,15 +237,39 @@ class BusinessLogic(BaseModule):
     # ── Proof rules ───────────────────────────────────────────────
 
     @staticmethod
-    def _total_of(cart: dict) -> object:
+    def _records(cart: dict) -> list:
+        """The record plus one envelope level beneath it.
+
+        APIs wrap payloads ({"status":..,"data":{..}}); the commercial
+        fields live in the inner dict. Top level first, then each
+        nested dict — one level covers the envelope convention without
+        chasing arbitrary depth.
+        """
+        if not isinstance(cart, dict):
+            return []
+        return [cart] + [v for v in cart.values()
+                         if isinstance(v, dict)]
+
+    @classmethod
+    def _field_of(cls, cart: dict, *names):
+        """First matching field across the envelope, else None."""
+        for record in cls._records(cart):
+            for name in names:
+                if name in record:
+                    return record[name]
+        return None
+
+    @classmethod
+    def _total_of(cls, cart: dict) -> object:
         """The payable figure, or a marker that none was found."""
         if not isinstance(cart, dict):
             return "<absent>"
         for key in ("total", "amount", "grand_total", "payable",
                     "total_price", "order_total"):
-            if key in cart and isinstance(cart[key], (int, float)):
-                return cart[key]
-        items = cart.get("items")
+            value = cls._field_of(cart, key)
+            if isinstance(value, (int, float)):
+                return value
+        items = cls._field_of(cart, "items")
         if isinstance(items, list) and items:
             first = items[0] if isinstance(items[0], dict) else {}
             for key in ("total", "price", "amount", "quantity"):
@@ -249,25 +281,35 @@ class BusinessLogic(BaseModule):
     def _moved_in_attacker_favour(before: object, after: object,
                                   label: str, hostile,
                                   echoed=None) -> bool:
-        """Did the total move the attacker's way? Numbers only: a total
-        that vanishes, turns textual, or stays put is not proof. Bulk
-        additionally requires the server to have taken the quantity —
-        an unchanged total on an ignored probe is a rejection, not a
-        missing upper bound."""
+        """Did the hostile value take effect against the attacker's
+        interest? Two shapes: totals that moved the attacker's way
+        (price/amount/total/discount), and invalid quantities the server
+        stored (zero/negative — storing them is the flaw even before any
+        total recomputes). Bulk additionally requires the server to have
+        taken the quantity, and the total not to have scaled with it. A
+        total that vanishes, turns textual, or stays put is not proof —
+        except a stored zero/negative quantity, which is proof by
+        itself."""
+        if label in ("zero-quantity", "negative-quantity"):
+            return echoed == hostile
         if not isinstance(before, (int, float)) or \
                 not isinstance(after, (int, float)):
             return False
         if label == "bulk-quantity":
-            # 999999 items at the single-item price means no upper bound —
-            # but only when the response shows the quantity stuck.
             return echoed == hostile and after <= before and before > 0
         return after < before
 
     # ── Discovery & plumbing ──────────────────────────────────────
 
     def _cart_endpoints(self, cfg: dict) -> list[str]:
-        """Configured endpoints, then recon api_endpoints with cart
-        tokens, then a small conventional guess list. Capped."""
+        """Configured endpoints, recon api_endpoints with cart tokens,
+        then the conventional guess list — always, capped at 8.
+
+        The guesses run even when recon found something: a discovered
+        page like /order-history is not a cart API, and skipping the
+        guesses because a page matched would leave the known shapes
+        untested.
+        """
         found: list[str] = []
         for candidate in cfg.get("endpoints") or []:
             url = self._absolute(str(candidate))
@@ -283,21 +325,22 @@ class BusinessLogic(BaseModule):
             if any(token in lowered for token in CART_TOKENS):
                 if value not in found:
                     found.append(value)
-        if not found:
-            for path in CART_PATHS:
-                url = self._absolute(path)
-                if url and url not in found:
-                    found.append(url)
+        for path in CART_PATHS:
+            if len(found) >= 8:
+                break
+            url = self._absolute(path)
+            if url and url not in found:
+                found.append(url)
         return found[:8]
 
     async def _cart_state(self, harness: AuthHarness, attacker: Identity,
                           endpoint: str) -> dict | None:
-        """GET the cart; POST {} when GET is not JSON (some carts are
+        """GET the cart; empty write when GET is not JSON (some carts are
         write-only views). None means no readable state to compare."""
         result = await self._get_json(harness, attacker.name, endpoint)
         if isinstance(result, dict):
             return result
-        return await self._post_json(harness, attacker.name, endpoint, {})
+        return await self._write_json(harness, attacker.name, endpoint, {})
 
     async def _restore_cart(self, harness: AuthHarness, attacker: Identity,
                             endpoint: str, baseline: dict) -> bool:
@@ -311,43 +354,68 @@ class BusinessLogic(BaseModule):
         the test account by hand.
         """
         try:
-            replay = {k: baseline[k] for k in
-                      ("quantity", "price", "amount", "total", "discount",
-                       "items") if k in baseline}
+            # Envelope-aware: the baseline's quantity may live under
+            # "data" while the write endpoint takes it top-level (Juice
+            # reads {"quantity"} and returns {"status","data"}). Replay
+            # flat; verification below compares across the envelope.
+            replay = {}
+            for key in ("quantity", "price", "amount", "total",
+                        "discount", "items"):
+                value = self._field_of(baseline, key)
+                if value is not None:
+                    replay[key] = value
             if replay:
-                await self._post_json(harness, attacker.name, endpoint,
-                                      replay)
+                await self._write_json(harness, attacker.name, endpoint,
+                                       replay)
             state = await self._cart_state(harness, attacker, endpoint)
             if not isinstance(state, dict):
                 return False
             for key in ("total", "quantity"):
-                if key in baseline and state.get(key) != baseline[key]:
+                if self._field_of(baseline, key) is not None and \
+                        self._field_of(state, key) != \
+                        self._field_of(baseline, key):
                     return False
             # Keys the probe introduced that the baseline never had stay
             # behind: replay cannot delete what the API has no delete
             # for, and a lingering amount/discount can poison the next
             # item added. Non-empty leftovers fail the restore openly.
-            for key in ("price", "amount", "total", "discount",
-                        "quantity"):
-                if key not in baseline and key in state:
-                    value = state.get(key)
-                    if value not in (None, "", 0, 0.0, [], {}):
-                        return False
+            # Compared across the envelope, like everything else here.
+            base_keys = set()
+            for record in self._records(baseline):
+                base_keys.update(record.keys())
+            for record in self._records(state):
+                for key in ("price", "amount", "total", "discount",
+                            "quantity"):
+                    if key not in base_keys and key in record:
+                        value = record.get(key)
+                        if value not in (None, "", 0, 0.0, [], {}):
+                            return False
             return True
         except Exception:
             return False
 
-    async def _self_endpoint(self, harness: AuthHarness, attacker: Identity,
-                             cfg: dict) -> str:
+    async def _self_endpoints(self, harness: AuthHarness, attacker: Identity,
+                              cfg: dict) -> list[str]:
+        """Readable self-record URLs: configured ones first, then the
+        usual /me shapes. All of them, not just the first hit — a cart
+        endpoint answers 200 without carrying any privilege fields."""
+        found = []
         from modules.mass_assignment import SELF_PATHS
-        for path in SELF_PATHS:
-            url = self._absolute(path)
-            if not url:
+        candidates = [self._absolute(str(c))
+                      for c in cfg.get("endpoints") or []]
+        candidates += [self._absolute(path) for path in SELF_PATHS]
+        for url in candidates:
+            if not url or url in found:
                 continue
             result = await self._get(harness, attacker.name, url)
             if result.get("status") == 200 and result.get("body"):
-                return url
-        return ""
+                found.append(url)
+        return found
+
+    async def _self_endpoint(self, harness: AuthHarness, attacker: Identity,
+                             cfg: dict) -> str:
+        endpoints = await self._self_endpoints(harness, attacker, cfg)
+        return endpoints[0] if endpoints else ""
 
     def _base_url(self) -> str:
         return str(self.target.get("base_url")
@@ -379,21 +447,34 @@ class BusinessLogic(BaseModule):
         except (TypeError, ValueError):
             return None
 
+    async def _write_json(self, harness: AuthHarness, identity_name: str,
+                          url: str, payload: dict):
+        """POST, then PUT when POST yields nothing carts accept.
+
+        Cart updates speak PUT as often as POST (/api/Baskets/:id), and
+        trying only one verb mistakes a method mismatch for a whitelist.
+        The fallback costs one extra request per hostile value, inside
+        the same probe budget.
+        """
+        for method in ("POST", "PUT"):
+            result = await harness.request(
+                identity_name, url, method=method,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(payload),
+            )
+            if result.get("status", 0) in self._waf_codes():
+                self.state.record_waf_block(url, result.get("status", 0))
+            if result.get("status", 0) >= 400 or not result.get("body"):
+                continue
+            try:
+                return json.loads(result["body"])
+            except (TypeError, ValueError):
+                continue
+        return None
+
     async def _post_json(self, harness: AuthHarness, identity_name: str,
                          url: str, payload: dict):
-        result = await harness.request(
-            identity_name, url, method="POST",
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(payload),
-        )
-        if result.get("status", 0) in self._waf_codes():
-            self.state.record_waf_block(url, result.get("status", 0))
-        if result.get("status", 0) >= 400 or not result.get("body"):
-            return None
-        try:
-            return json.loads(result["body"])
-        except (TypeError, ValueError):
-            return None
+        return await self._write_json(harness, identity_name, url, payload)
 
     def _waf_codes(self) -> set:
         codes = (self.waf_config or {}).get("block_codes") or [429, 503]

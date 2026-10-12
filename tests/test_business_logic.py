@@ -103,6 +103,54 @@ def test_surface_lists_privilege_fields(monkeypatch):
     assert "credits" in notes[0]["description"]
 
 
+def test_surface_sees_through_api_envelopes(monkeypatch):
+    """Records like {"status":..,"data":{"role":..}} carry the fields
+    one level down — the Juice shape that the top-level-only check
+    missed live."""
+    shop = FakeShop(record={"status": "success",
+                            "data": {"email": "a@b.c", "role": "admin"}})
+    result, state, _ = _run(monkeypatch, shop=shop)
+
+    assert result == "done"
+    notes = [f for f in state.findings["findings"]
+             if f["title"].startswith("Mass-assignment surface")]
+    assert len(notes) == 1
+    assert "role" in notes[0]["description"]
+
+
+def test_surface_unions_across_endpoints(monkeypatch):
+    """A cart endpoint answers 200 without privilege fields; the user
+    record behind it still counts. First-hit-wins missed Juice live."""
+
+    class TwoRecords(FakeShop):
+        async def request(self, identity, url, method="GET", headers=None,
+                          data=None):
+            if url.endswith("/api/cart"):
+                return {"status": 200,
+                        "body": '{"items": [], "total": 0}'}
+            return await super().request(identity, url, method=method,
+                                         headers=headers, data=data)
+
+    import modules.business_logic as logic_module
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(f"{tmpdir}/run/example.com")
+    shop = TwoRecords(record={"name": "alice", "role": "user"})
+    config = {"target": {"domain": "example.com",
+                         "base_url": "https://example.com"},
+              "modules": {"business_logic": {
+                  "endpoints": ["https://example.com/api/cart",
+                                "https://example.com/api/me"]}}}
+    monkeypatch.setattr(logic_module, "AuthHarness",
+                        lambda config: FakeHarness(shop, [FakeIdentity()]))
+    result = asyncio.run(BusinessLogic(state, config).run())
+
+    assert result == "done"
+    notes = [f for f in state.findings["findings"]
+             if f["title"].startswith("Mass-assignment surface")]
+    assert len(notes) == 1
+    assert "role" in notes[0]["description"]
+
+
 def test_surface_without_fields_files_nothing(monkeypatch):
     result, state, _ = _run(monkeypatch)
 
