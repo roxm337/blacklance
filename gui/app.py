@@ -1028,10 +1028,26 @@ class MainWindow(QMainWindow):
         self.kr_max_targets_spin.setToolTip(
             "Base URL plus api_endpoint origins, capped."
         )
+        self.kr_delay_spin = QSpinBox()
+        self.kr_delay_spin.setRange(0, 60000)
+        self.kr_delay_spin.setValue(100)
+        self.kr_delay_spin.setSuffix(" ms")
+        self.kr_delay_spin.setToolTip(
+            "Delay between requests to one host. Use 1000 with 1 "
+            "connection (~1 req/s) against live scopes."
+        )
+        self.kr_connections_spin = QSpinBox()
+        self.kr_connections_spin.setRange(1, 10)
+        self.kr_connections_spin.setValue(3)
+        self.kr_connections_spin.setToolTip(
+            "Parallel connections per host. Use 1 on live scopes."
+        )
         kr_form.addRow("", self.kr_enabled_check)
         kr_form.addRow("Wordlist", self.kr_wordlist_input)
         kr_form.addRow("Max routes", self.kr_max_routes_spin)
         kr_form.addRow("Max targets", self.kr_max_targets_spin)
+        kr_form.addRow("Delay", self.kr_delay_spin)
+        kr_form.addRow("Connections", self.kr_connections_spin)
         layout.addWidget(kr_box)
 
         semgrep_box = QGroupBox("Semgrep SAST")
@@ -1106,6 +1122,158 @@ class MainWindow(QMainWindow):
         logic_form.addRow("", self.logic_enabled_check)
         logic_form.addRow("Max probes", self.logic_max_probes_spin)
         layout.addWidget(logic_box)
+
+        idor_box = QGroupBox("IDOR (cross-account)")
+        idor_form = QFormLayout(idor_box)
+        idor_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.idor_endpoints_text = QPlainTextEdit()
+        self.idor_endpoints_text.setPlaceholderText("Object endpoints, one per line (empty = derive from recon)")
+        self.idor_endpoints_text.setMaximumHeight(70)
+        self.idor_max_probes_spin = QSpinBox()
+        self.idor_max_probes_spin.setRange(1, 100)
+        self.idor_max_probes_spin.setValue(15)
+        self.idor_max_probes_spin.setToolTip("Cross-account probes per endpoint template.")
+        self.idor_object_probe_check = QCheckBox("Probe unlisted object shapes")
+        self.idor_object_probe_check.setChecked(True)
+        self.idor_object_probe_check.setToolTip("Fetch disclosed references against shapes with no listing endpoint.")
+        self.idor_probe_collections_check = QCheckBox("Probe built-in collection wordlist")
+        self.idor_probe_collections_check.setChecked(True)
+        self.idor_max_collections_spin = QSpinBox()
+        self.idor_max_collections_spin.setRange(0, 500)
+        self.idor_max_collections_spin.setValue(60)
+        self.idor_test_anonymous_check = QCheckBox("Also test with no session")
+        self.idor_test_anonymous_check.setToolTip("Widens the surface beyond your accounts. Off by default.")
+        self.idor_write_methods_text = QLineEdit()
+        self.idor_write_methods_text.setPlaceholderText("e.g. PATCH, PUT (empty = read-only)")
+        self.idor_write_methods_text.setToolTip("Mutating verbs echoed back safely; DELETE is never sent without the flag below.")
+        self.idor_allow_destructive_check = QCheckBox("Allow DELETE (destructive)")
+        self.idor_allow_destructive_check.setToolTip("Sends real DELETEs. Only with explicit authorisation.")
+        self.idor_id_probing_check = QCheckBox("Probe neighbouring IDs (other people's records)")
+        self.idor_id_probing_check.setToolTip("Opt-in and bounded; reaches data belonging to accounts you do not control.")
+        idor_form.addRow("Endpoints", self.idor_endpoints_text)
+        idor_form.addRow("Max probes/template", self.idor_max_probes_spin)
+        idor_form.addRow("", self.idor_object_probe_check)
+        idor_form.addRow("", self.idor_probe_collections_check)
+        idor_form.addRow("Max collections", self.idor_max_collections_spin)
+        idor_form.addRow("", self.idor_test_anonymous_check)
+        idor_form.addRow("Write methods", self.idor_write_methods_text)
+        idor_form.addRow("", self.idor_allow_destructive_check)
+        idor_form.addRow("", self.idor_id_probing_check)
+        layout.addWidget(idor_box)
+
+        mass_box = QGroupBox("Mass Assignment (own account writes)")
+        mass_form = QFormLayout(mass_box)
+        mass_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.mass_enabled_check = QCheckBox("Enable write probes")
+        self.mass_enabled_check.setToolTip("Writes to YOUR account only, then restores. Off unless you turn it on.")
+        self.mass_endpoints_text = QPlainTextEdit()
+        self.mass_endpoints_text.setPlaceholderText("Object URLs, one per line (empty = /me shapes)")
+        self.mass_endpoints_text.setMaximumHeight(70)
+        self.mass_write_endpoint_input = QLineEdit()
+        self.mass_write_endpoint_input.setPlaceholderText("Optional separate update URL")
+        self.mass_method_combo = QComboBox()
+        self.mass_method_combo.addItems(["PATCH", "PUT", "POST"])
+        self.mass_fields_text = QLineEdit()
+        self.mass_fields_text.setPlaceholderText("Comma-separated (empty = privilege-bearing defaults)")
+        self.mass_probe_type_combo = QComboBox()
+        self.mass_probe_type_combo.addItems(["bool", "int", "string"])
+        mass_form.addRow("", self.mass_enabled_check)
+        mass_form.addRow("Endpoints", self.mass_endpoints_text)
+        mass_form.addRow("Write endpoint", self.mass_write_endpoint_input)
+        mass_form.addRow("Method", self.mass_method_combo)
+        mass_form.addRow("Fields", self.mass_fields_text)
+        mass_form.addRow("Probe type", self.mass_probe_type_combo)
+        layout.addWidget(mass_box)
+
+        proto_box = QGroupBox("Prototype Pollution")
+        proto_form = QFormLayout(proto_box)
+        proto_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.proto_enabled_check = QCheckBox("Send canary properties")
+        self.proto_enabled_check.setChecked(True)
+        self.proto_enabled_check.setToolTip("Inert canary, unique per run; a handful of POSTs.")
+        self.proto_endpoints_text = QPlainTextEdit()
+        self.proto_endpoints_text.setPlaceholderText("JSON endpoints, one per line (empty = usual shapes)")
+        self.proto_endpoints_text.setMaximumHeight(70)
+        proto_form.addRow("", self.proto_enabled_check)
+        proto_form.addRow("Endpoints", self.proto_endpoints_text)
+        layout.addWidget(proto_box)
+
+        smuggling_box = QGroupBox("HTTP Smuggling")
+        smuggling_form = QFormLayout(smuggling_box)
+        self.smuggling_enabled_check = QCheckBox("Run smuggler corroboration")
+        self.smuggling_enabled_check.setChecked(True)
+        self.smuggling_enabled_check.setToolTip("Results stay TENTATIVE: single-host checks cannot prove desync.")
+        self.smuggling_max_targets_spin = QSpinBox()
+        self.smuggling_max_targets_spin.setRange(1, 100)
+        self.smuggling_max_targets_spin.setValue(10)
+        smuggling_form.addRow("", self.smuggling_enabled_check)
+        smuggling_form.addRow("Max targets", self.smuggling_max_targets_spin)
+        layout.addWidget(smuggling_box)
+
+        redirect_box = QGroupBox("Open Redirect")
+        redirect_form = QFormLayout(redirect_box)
+        redirect_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.redirect_enabled_check = QCheckBox("Test redirect parameters")
+        self.redirect_enabled_check.setChecked(True)
+        self.redirect_params_text = QLineEdit()
+        self.redirect_params_text.setPlaceholderText("Comma-separated (empty = common names + recon)")
+        self.redirect_endpoints_text = QPlainTextEdit()
+        self.redirect_endpoints_text.setPlaceholderText("Endpoints, one per line (empty = recon + sign-in shapes)")
+        self.redirect_endpoints_text.setMaximumHeight(70)
+        self.redirect_max_targets_spin = QSpinBox()
+        self.redirect_max_targets_spin.setRange(1, 200)
+        self.redirect_max_targets_spin.setValue(40)
+        self.redirect_max_targets_spin.setToolTip("Endpoint/parameter pairs — the real request bound.")
+        redirect_form.addRow("", self.redirect_enabled_check)
+        redirect_form.addRow("Params", self.redirect_params_text)
+        redirect_form.addRow("Endpoints", self.redirect_endpoints_text)
+        redirect_form.addRow("Max targets", self.redirect_max_targets_spin)
+        layout.addWidget(redirect_box)
+
+        cms_box = QGroupBox("CMS Deep Scan")
+        cms_form = QFormLayout(cms_box)
+        self.cms_enabled_check = QCheckBox("Run WPScan/droopescan")
+        self.cms_enabled_check.setChecked(True)
+        self.cms_enabled_check.setToolTip("Slow: up to five minutes per scanner per target.")
+        self.cms_max_targets_spin = QSpinBox()
+        self.cms_max_targets_spin.setRange(1, 20)
+        self.cms_max_targets_spin.setValue(5)
+        cms_form.addRow("", self.cms_enabled_check)
+        cms_form.addRow("Max targets", self.cms_max_targets_spin)
+        layout.addWidget(cms_box)
+
+        content_box = QGroupBox("Content Discovery")
+        content_form = QFormLayout(content_box)
+        self.content_enabled_check = QCheckBox("Run ffuf + kiterunner passes")
+        self.content_enabled_check.setChecked(True)
+        content_form.addRow("", self.content_enabled_check)
+        layout.addWidget(content_box)
+
+        cors_box = QGroupBox("CORS Audit")
+        cors_form = QFormLayout(cors_box)
+        cors_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.cors_enabled_check = QCheckBox("Probe origins")
+        self.cors_enabled_check.setChecked(True)
+        self.cors_endpoints_text = QPlainTextEdit()
+        self.cors_endpoints_text.setPlaceholderText("Endpoints, one per line (empty = recon + common shapes)")
+        self.cors_endpoints_text.setMaximumHeight(70)
+        self.cors_max_endpoints_spin = QSpinBox()
+        self.cors_max_endpoints_spin.setRange(1, 100)
+        self.cors_max_endpoints_spin.setValue(20)
+        cors_form.addRow("", self.cors_enabled_check)
+        cors_form.addRow("Endpoints", self.cors_endpoints_text)
+        cors_form.addRow("Max endpoints", self.cors_max_endpoints_spin)
+        layout.addWidget(cors_box)
+
+        auth_box = QGroupBox("Auth (opt-in writes)")
+        auth_form = QFormLayout(auth_box)
+        self.auth_test_password_check = QCheckBox("Prove missing-current-password flaws by writing")
+        self.auth_test_password_check.setToolTip("Writes to your test account. Off unless you turn it on.")
+        self.auth_test_register_check = QCheckBox("Registration oracle (creates one real account)")
+        self.auth_test_register_check.setToolTip("User-enumeration differential. Creates an account — needs authorisation.")
+        auth_form.addRow("", self.auth_test_password_check)
+        auth_form.addRow("", self.auth_test_register_check)
+        layout.addWidget(auth_box)
 
         fast_scan_box = QGroupBox("Fast Exposure Scan")
         fast_scan_form = QFormLayout(fast_scan_box)
@@ -3061,6 +3229,15 @@ class MainWindow(QMainWindow):
                 self.kr_max_targets_spin.setValue(int(kr_cfg.get("max_targets", 2) or 2))
             except (TypeError, ValueError):
                 self.kr_max_targets_spin.setValue(2)
+            if hasattr(self, "kr_delay_spin"):
+                try:
+                    self.kr_delay_spin.setValue(int(kr_cfg.get("delay_ms", 100) or 0))
+                except (TypeError, ValueError):
+                    self.kr_delay_spin.setValue(100)
+                try:
+                    self.kr_connections_spin.setValue(int(kr_cfg.get("connections", 3) or 3))
+                except (TypeError, ValueError):
+                    self.kr_connections_spin.setValue(3)
 
         sast_cfg = config.get("semgrep", {})
         sast_cfg = sast_cfg if isinstance(sast_cfg, dict) else {}
@@ -3100,6 +3277,71 @@ class MainWindow(QMainWindow):
                 self.logic_max_probes_spin.setValue(int(logic_cfg.get("max_probes", 12) or 12))
             except (TypeError, ValueError):
                 self.logic_max_probes_spin.setValue(12)
+
+        if hasattr(self, "idor_endpoints_text"):
+            idor_cfg = self._module_section(config, "idor")
+            self.idor_endpoints_text.setPlainText(self._list_to_text(idor_cfg.get("endpoints", [])))
+            self._set_spin(self.idor_max_probes_spin, idor_cfg.get("max_probes_per_template"), 15)
+            obj_probe = idor_cfg.get("object_probe", {})
+            obj_probe = obj_probe if isinstance(obj_probe, dict) else {}
+            self.idor_object_probe_check.setChecked(bool(obj_probe.get("enabled", True)))
+            self.idor_probe_collections_check.setChecked(bool(idor_cfg.get("probe_collections", True)))
+            self._set_spin(self.idor_max_collections_spin, idor_cfg.get("max_collections"), 60)
+            self.idor_test_anonymous_check.setChecked(bool(idor_cfg.get("test_anonymous", False)))
+            methods = idor_cfg.get("test_write_methods", [])
+            self.idor_write_methods_text.setText(", ".join(str(m) for m in (methods or [])))
+            self.idor_allow_destructive_check.setChecked(bool(idor_cfg.get("allow_destructive", False)))
+            id_probing = idor_cfg.get("id_probing", {})
+            id_probing = id_probing if isinstance(id_probing, dict) else {}
+            self.idor_id_probing_check.setChecked(bool(id_probing.get("enabled", False)))
+
+        if hasattr(self, "mass_enabled_check"):
+            mass_cfg = self._module_section(config, "mass_assignment")
+            self.mass_enabled_check.setChecked(bool(mass_cfg.get("enabled", False)))
+            self.mass_endpoints_text.setPlainText(self._list_to_text(mass_cfg.get("endpoints", [])))
+            self.mass_write_endpoint_input.setText(str(mass_cfg.get("write_endpoint", "") or ""))
+            self._set_combo_value(self.mass_method_combo, str(mass_cfg.get("method", "PATCH") or "PATCH"))
+            fields = mass_cfg.get("fields", [])
+            self.mass_fields_text.setText(", ".join(str(f) for f in (fields or [])))
+            self._set_combo_value(self.mass_probe_type_combo, str(mass_cfg.get("probe_type", "bool") or "bool"))
+
+        if hasattr(self, "proto_enabled_check"):
+            proto_cfg = self._module_section(config, "prototype_pollution")
+            self.proto_enabled_check.setChecked(bool(proto_cfg.get("enabled", True)))
+            self.proto_endpoints_text.setPlainText(self._list_to_text(proto_cfg.get("endpoints", [])))
+
+        if hasattr(self, "smuggling_enabled_check"):
+            smuggling_cfg = self._module_section(config, "http_smuggling")
+            self.smuggling_enabled_check.setChecked(bool(smuggling_cfg.get("enabled", True)))
+            self._set_spin(self.smuggling_max_targets_spin, smuggling_cfg.get("max_targets"), 10)
+
+        if hasattr(self, "redirect_enabled_check"):
+            redirect_cfg = self._module_section(config, "open_redirect")
+            self.redirect_enabled_check.setChecked(bool(redirect_cfg.get("enabled", True)))
+            params = redirect_cfg.get("params", [])
+            self.redirect_params_text.setText(", ".join(str(p) for p in (params or [])))
+            self.redirect_endpoints_text.setPlainText(self._list_to_text(redirect_cfg.get("endpoints", [])))
+            self._set_spin(self.redirect_max_targets_spin, redirect_cfg.get("max_targets"), 40)
+
+        if hasattr(self, "cms_enabled_check"):
+            cms_cfg = self._module_section(config, "cms_deep_scan")
+            self.cms_enabled_check.setChecked(bool(cms_cfg.get("enabled", True)))
+            self._set_spin(self.cms_max_targets_spin, cms_cfg.get("max_targets"), 5)
+
+        if hasattr(self, "content_enabled_check"):
+            content_cfg = self._module_section(config, "content_discovery")
+            self.content_enabled_check.setChecked(bool(content_cfg.get("enabled", True)))
+
+        if hasattr(self, "cors_enabled_check"):
+            cors_cfg = self._module_section(config, "cors_audit")
+            self.cors_enabled_check.setChecked(bool(cors_cfg.get("enabled", True)))
+            self.cors_endpoints_text.setPlainText(self._list_to_text(cors_cfg.get("endpoints", [])))
+            self._set_spin(self.cors_max_endpoints_spin, cors_cfg.get("max_endpoints"), 20)
+
+        if hasattr(self, "auth_test_password_check"):
+            auth_cfg = self._module_section(config, "auth_audit")
+            self.auth_test_password_check.setChecked(bool(auth_cfg.get("test_password_change", False)))
+            self.auth_test_register_check.setChecked(bool(auth_cfg.get("test_registration_oracle", False)))
 
         sqli_scan = config.get("modules", {}).get("sqli_scan", {})
         if hasattr(self, "sqli_oast_check") and isinstance(sqli_scan, dict):
@@ -3283,6 +3525,11 @@ class MainWindow(QMainWindow):
                 "max_routes": self.kr_max_routes_spin.value(),
                 "max_targets": self.kr_max_targets_spin.value(),
             }
+            if hasattr(self, "kr_delay_spin"):
+                cd_cfg["kiterunner"].update({
+                    "delay_ms": self.kr_delay_spin.value(),
+                    "connections": self.kr_connections_spin.value(),
+                })
 
         if hasattr(self, "semgrep_enabled_check"):
             config.setdefault("semgrep", {})
@@ -3330,6 +3577,92 @@ class MainWindow(QMainWindow):
             logic_cfg.update({
                 "enabled": self.logic_enabled_check.isChecked(),
                 "max_probes": self.logic_max_probes_spin.value(),
+            })
+
+        if hasattr(self, "idor_endpoints_text"):
+            idor_cfg = self._ensure_module_section(config, "idor")
+            idor_cfg.update({
+                "endpoints": self._text_to_list(self.idor_endpoints_text.toPlainText()),
+                "max_probes_per_template": self.idor_max_probes_spin.value(),
+                "probe_collections": self.idor_probe_collections_check.isChecked(),
+                "max_collections": self.idor_max_collections_spin.value(),
+                "test_anonymous": self.idor_test_anonymous_check.isChecked(),
+                "test_write_methods": [m.strip().upper() for m in
+                                       self.idor_write_methods_text.text().split(",")
+                                       if m.strip()],
+                "allow_destructive": self.idor_allow_destructive_check.isChecked(),
+            })
+            obj_probe = idor_cfg.get("object_probe")
+            if not isinstance(obj_probe, dict):
+                obj_probe = idor_cfg["object_probe"] = {}
+            obj_probe["enabled"] = self.idor_object_probe_check.isChecked()
+            id_probing = idor_cfg.get("id_probing")
+            if not isinstance(id_probing, dict):
+                id_probing = idor_cfg["id_probing"] = {}
+            id_probing["enabled"] = self.idor_id_probing_check.isChecked()
+
+        if hasattr(self, "mass_enabled_check"):
+            mass_cfg = self._ensure_module_section(config, "mass_assignment")
+            mass_cfg.update({
+                "enabled": self.mass_enabled_check.isChecked(),
+                "endpoints": self._text_to_list(self.mass_endpoints_text.toPlainText()),
+                "write_endpoint": self.mass_write_endpoint_input.text().strip(),
+                "method": self.mass_method_combo.currentText(),
+                "fields": [f.strip() for f in
+                           self.mass_fields_text.text().split(",") if f.strip()],
+                "probe_type": self.mass_probe_type_combo.currentText(),
+            })
+
+        if hasattr(self, "proto_enabled_check"):
+            proto_cfg = self._ensure_module_section(config, "prototype_pollution")
+            proto_cfg.update({
+                "enabled": self.proto_enabled_check.isChecked(),
+                "endpoints": self._text_to_list(self.proto_endpoints_text.toPlainText()),
+            })
+
+        if hasattr(self, "smuggling_enabled_check"):
+            smuggling_cfg = self._ensure_module_section(config, "http_smuggling")
+            smuggling_cfg.update({
+                "enabled": self.smuggling_enabled_check.isChecked(),
+                "max_targets": self.smuggling_max_targets_spin.value(),
+            })
+
+        if hasattr(self, "redirect_enabled_check"):
+            redirect_cfg = self._ensure_module_section(config, "open_redirect")
+            redirect_cfg.update({
+                "enabled": self.redirect_enabled_check.isChecked(),
+                "params": [p.strip() for p in
+                           self.redirect_params_text.text().split(",") if p.strip()],
+                "endpoints": self._text_to_list(self.redirect_endpoints_text.toPlainText()),
+                "max_targets": self.redirect_max_targets_spin.value(),
+            })
+
+        if hasattr(self, "cms_enabled_check"):
+            cms_cfg = self._ensure_module_section(config, "cms_deep_scan")
+            cms_cfg.update({
+                "enabled": self.cms_enabled_check.isChecked(),
+                "max_targets": self.cms_max_targets_spin.value(),
+            })
+
+        if hasattr(self, "content_enabled_check"):
+            content_cfg = self._ensure_module_section(config, "content_discovery")
+            content_cfg.update({
+                "enabled": self.content_enabled_check.isChecked(),
+            })
+
+        if hasattr(self, "cors_enabled_check"):
+            cors_cfg = self._ensure_module_section(config, "cors_audit")
+            cors_cfg.update({
+                "enabled": self.cors_enabled_check.isChecked(),
+                "endpoints": self._text_to_list(self.cors_endpoints_text.toPlainText()),
+                "max_endpoints": self.cors_max_endpoints_spin.value(),
+            })
+
+        if hasattr(self, "auth_test_password_check"):
+            auth_cfg = self._ensure_module_section(config, "auth_audit")
+            auth_cfg.update({
+                "test_password_change": self.auth_test_password_check.isChecked(),
+                "test_registration_oracle": self.auth_test_register_check.isChecked(),
             })
 
         if self._write_config(config):
@@ -3480,6 +3813,34 @@ class MainWindow(QMainWindow):
             combo.setCurrentIndex(index)
         elif combo.isEditable():
             combo.setCurrentText(value)
+
+    @staticmethod
+    def _module_section(config: dict, name: str) -> dict:
+        """The modules.<name> mapping, or {} when absent or malformed."""
+        section = (config.get("modules", {}) or {}).get(name, {})
+        return section if isinstance(section, dict) else {}
+
+    @staticmethod
+    def _ensure_module_section(config: dict, name: str) -> dict:
+        """The modules.<name> mapping, created when missing."""
+        config.setdefault("modules", {})
+        modules_cfg = config["modules"]
+        if not isinstance(modules_cfg, dict):
+            modules_cfg = config["modules"] = {}
+        section = modules_cfg.get(name)
+        if not isinstance(section, dict):
+            section = modules_cfg[name] = {}
+        return section
+
+    @staticmethod
+    def _set_spin(spin: QSpinBox, value, default: int):
+        if value in (None, ""):
+            spin.setValue(default)
+            return
+        try:
+            spin.setValue(int(value))
+        except (TypeError, ValueError):
+            spin.setValue(default)
 
     def _headers_to_text(self, headers: dict) -> str:
         if not isinstance(headers, dict):

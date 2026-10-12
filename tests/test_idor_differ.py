@@ -65,7 +65,7 @@ def _jwt(claims: dict) -> str:
 
 def _build_app(vulnerable: bool, *, write_vulnerable: bool = False,
                public_ids=(), third_party=(), csrf: bool = False,
-               orphaned=()):
+               orphaned=(), write_allowed=("PATCH", "PUT", "DELETE")):
     """An app with two accounts and a per-invoice endpoint.
 
     Invoices 100/200 belong to alice/bob. When `vulnerable`, the object
@@ -201,6 +201,8 @@ def _build_app(vulnerable: bool, *, write_vulnerable: bool = False,
         inv = DB.get(request.match_info["id"])
         if not inv:
             raise web.HTTPNotFound(text="not found")
+        if request.method not in write_allowed:
+            raise web.HTTPForbidden(text="method not allowed here")
         if not write_vulnerable and not owns(user, inv):
             raise web.HTTPForbidden(text="forbidden")
         if request.method == "DELETE":
@@ -1014,6 +1016,16 @@ class TestWriteAuthorisation:
         after = await curl(f"{env.base}/api/invoices/200", identity="bob",
                            output="body")
         assert after["status"] == 200, "an unconsented DELETE destroyed the record"
+
+    @variant(write_vulnerable=True, write_allowed=("PATCH",))
+    async def test_configured_write_methods_are_honored(self, env):
+        """The operator asked for PUT only on a PATCH-only endpoint: no
+        finding. Before the fix the configured list was ignored and the
+        PATCH/PUT/DELETE fallback fired PATCH instead."""
+        env.config["modules"]["idor"]["test_write_methods"] = ["PUT"]
+        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        assert await env.run_module() == "done"
+        assert not [f for f in env.findings() if "can modify" in f["title"]]
 
     @served
     async def test_enforced_server_rejects_cross_account_writes(self, env):

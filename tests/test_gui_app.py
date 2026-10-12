@@ -133,6 +133,34 @@ def test_gui_saves_scanner_settings(tmp_path):
     window.crawl_max_pages_spin.setValue(12)
     window.crawl_depth_spin.setValue(2)
     window.crawl_max_identities_spin.setValue(3)
+    window.kr_delay_spin.setValue(1000)
+    window.kr_connections_spin.setValue(1)
+    window.idor_endpoints_text.setPlainText("https://api.example.com/orders/{id}")
+    window.idor_max_probes_spin.setValue(7)
+    window.idor_object_probe_check.setChecked(False)
+    window.idor_test_anonymous_check.setChecked(True)
+    window.idor_write_methods_text.setText("PATCH")
+    window.idor_allow_destructive_check.setChecked(False)
+    window.idor_id_probing_check.setChecked(True)
+    window.mass_enabled_check.setChecked(True)
+    window.mass_endpoints_text.setPlainText("https://api.example.com/users/me")
+    window.mass_write_endpoint_input.setText("/api/users/me")
+    window.mass_method_combo.setCurrentText("PUT")
+    window.mass_fields_text.setText("role, is_admin")
+    window.mass_probe_type_combo.setCurrentText("string")
+    window.proto_enabled_check.setChecked(False)
+    window.proto_endpoints_text.setPlainText("https://api.example.com/api/profile")
+    window.smuggling_enabled_check.setChecked(False)
+    window.smuggling_max_targets_spin.setValue(3)
+    window.redirect_params_text.setText("next, target")
+    window.redirect_endpoints_text.setPlainText("https://example.com/login")
+    window.redirect_max_targets_spin.setValue(11)
+    window.cms_max_targets_spin.setValue(2)
+    window.content_enabled_check.setChecked(False)
+    window.cors_endpoints_text.setPlainText("https://api.example.com/data")
+    window.cors_max_endpoints_spin.setValue(9)
+    window.auth_test_password_check.setChecked(True)
+    window.auth_test_register_check.setChecked(True)
     window.nuclei_full_cve_check.setChecked(False)
     window.nuclei_update_check.setChecked(True)
     window.nuclei_max_age_spin.setValue(14)
@@ -154,6 +182,8 @@ def test_gui_saves_scanner_settings(tmp_path):
     assert "dalfox_rate_limit: 10" in saved
     assert "kiterunner:" in saved
     assert "max_routes: 500" in saved
+    assert "delay_ms: 1000" in saved
+    assert "connections: 1" in saved
     assert "semgrep:" in saved
     assert "ssrf_scan:" in saved
     assert "max_points: 9" in saved
@@ -163,6 +193,22 @@ def test_gui_saves_scanner_settings(tmp_path):
     assert "max_targets: 12" in saved
     assert "depth: 2" in saved
     assert "max_identities: 3" in saved
+    assert "max_probes_per_template: 7" in saved
+    assert "test_anonymous: true" in saved
+    assert "allow_destructive: false" in saved
+    assert "mass_assignment:" in saved
+    assert "write_endpoint: /api/users/me" in saved
+    assert "probe_type: string" in saved
+    assert "prototype_pollution:" in saved
+    assert "http_smuggling:" in saved
+    assert "open_redirect:" in saved
+    assert "cms_deep_scan:" in saved
+    assert "content_discovery:" in saved
+    assert "cors_audit:" in saved
+    assert "max_endpoints: 9" in saved
+    assert "auth_audit:" in saved
+    assert "test_password_change: true" in saved
+    assert "test_registration_oracle: true" in saved
     assert "full_cve_on_confirmed_apex: false" in saved
     assert "update_templates: true" in saved
     assert "max_age_days: 14" in saved
@@ -173,6 +219,26 @@ def test_gui_saves_scanner_settings(tmp_path):
     assert "max_paths: 12" in saved
     assert "callback_domain: oob.example.test" in saved
     assert "poll_timeout: 44" in saved
+
+    # And back: reload must restore the safety-critical switches as set,
+    # not as their defaults.
+    window._load_settings_form()
+    assert window.mass_enabled_check.isChecked()
+    assert window.mass_method_combo.currentText() == "PUT"
+    assert window.idor_max_probes_spin.value() == 7
+    assert window.idor_test_anonymous_check.isChecked()
+    assert not window.idor_object_probe_check.isChecked()
+    assert window.idor_id_probing_check.isChecked()
+    assert not window.proto_enabled_check.isChecked()
+    assert not window.smuggling_enabled_check.isChecked()
+    assert window.redirect_max_targets_spin.value() == 11
+    assert window.cms_max_targets_spin.value() == 2
+    assert not window.content_enabled_check.isChecked()
+    assert window.cors_max_endpoints_spin.value() == 9
+    assert window.auth_test_password_check.isChecked()
+    assert window.auth_test_register_check.isChecked()
+    assert window.kr_delay_spin.value() == 1000
+    assert window.ssrf_max_points_spin.value() == 9
 
     window.close()
     app.processEvents()

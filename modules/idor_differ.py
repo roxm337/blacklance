@@ -1113,8 +1113,8 @@ class IdorDiffer(BaseModule):
         someone's data.
         """
         results: list[CrossResult] = []
-        methods = [m.upper() for m in (self._cfg().get("write_methods")
-                                       or ["PATCH", "PUT", "DELETE"])]
+        methods = [str(m).upper() for m in (self._cfg().get("test_write_methods")
+                                            or ["PATCH", "PUT", "DELETE"])]
         attacker = harness.usable[0]
         others = [i for i in harness.usable if i.name != attacker.name]
         attacker_own = owned.get(attacker.name, set())
