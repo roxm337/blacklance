@@ -114,7 +114,13 @@ class VerificationAgent(BaseAgent):
                            hypothesis: Hypothesis) -> dict:
         interactsh = InteractshClient()
         corr_id = await interactsh.register_callback(f"verify-{hypothesis.id}")
-        oob_url = f"http://{corr_id}.burpcollaborator.net/verify"
+        oob_url = interactsh.callback_url(corr_id, "/verify")
+        if not interactsh.enabled or not corr_id or "oob.invalid" in oob_url:
+            hypothesis.status = "rejected"
+            return {"status": "rejected",
+                    "verdict": None, "success": False,
+                    "reason": "OOB not configured; blind SSRF untestable "
+                              "without a callback channel"}
 
         test_url = _inject_param(url, param, oob_url)
         await __import__("tools.wrappers", fromlist=["curl"]).curl(test_url)

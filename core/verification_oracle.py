@@ -54,9 +54,12 @@ class DifferentialAnalyzer:
     """Compare baseline vs payload responses to detect injection."""
 
     SIGNAL_KEYS = [
-        "status", "body_length", "body_hash", "response_time_ms",
+        "status", "body_length", "body_hash",
         "word_count", "line_count",
     ]
+    # response_time_ms deliberately excluded: normal jitter trips any
+    # percent-change threshold and mints flaky FIRM verdicts. Timing
+    # belongs to TimingOracle, which uses means and stdevs.
 
     # Identifiers, not measurements: a hash that differs at all means the
     # bytes differ, and a percent-change on two hash magnitudes is noise.
@@ -114,7 +117,15 @@ class DifferentialAnalyzer:
                     details[key] = {"baseline": str(b)[:200], "test": str(t)[:200]}
                 continue
             if isinstance(b, (int, float)) and isinstance(t, (int, float)):
-                if b == 0:
+                if b == 0 and t == 0:
+                    continue  # errored identically — no signal either way
+                if b == 0 or t == 0:
+                    # Transport error vs a real response is divergence, not
+                    # a reason to skip: the old `b == 0: continue` dropped
+                    # baseline-zero signals into false negatives.
+                    diff_count += 1
+                    details[key] = {"baseline": b, "test": t,
+                                    "change": "zero-vs-nonzero"}
                     continue
                 change = abs(t - b) / max(abs(b), 1)
                 details[key] = {"baseline": b, "test": t, "change_pct": round(change, 3)}
@@ -142,7 +153,6 @@ class DifferentialAnalyzer:
             "status": result.get("status", 0),
             "body_length": len(body),
             "body_hash": hash(body[:10000]),
-            "response_time_ms": result.get("time_ms", 0),
             "word_count": len(body.split()),
             "line_count": len(body.splitlines()),
             "headers": result.get("headers", {}),
@@ -262,12 +272,22 @@ class InteractshClient:
         self.token = token or cfg.get("token") or os.environ.get("INTERACTSH_TOKEN", "")
         self.poll_interval = float(cfg.get("poll_interval", poll_interval))
         self.poll_timeout = float(cfg.get("poll_timeout", poll_timeout))
-        self.enabled = bool(self.callback_domain or self.server_url or self.poll_url)
+        if isinstance(cfg, dict) and cfg.get("enabled") is False:
+            # Operator kill-switch: oob.enabled:false stops OOB egress even
+            # for direct VerificationOracle() constructions, not just
+            # modules going through BaseModule.oob().
+            self.enabled = False
+        else:
+            self.enabled = bool(self.callback_domain or self.server_url or self.poll_url)
 
     async def register_callback(self, payload: str) -> str:
-        """Register an OOB payload and return the unique callback identifier."""
-        import hashlib
-        corr_id = hashlib.md5(f"{time.time()}:{payload}".encode()).hexdigest()[:12]
+        """Register an OOB payload and return the unique callback identifier.
+
+        CSPRNG hex, not md5(time:payload): predictable ids collide under
+        parallel probes and misattribute a callback to the wrong URL.
+        """
+        import secrets
+        corr_id = secrets.token_hex(6)
         if self.server_url:
             registered = await self._api_request(
                 "POST",
@@ -400,9 +420,17 @@ class VerificationOracle:
     async def verify_xss(self, url: str, param: str, payload: str) -> Verdict:
         test_url = _inject_param(url, param, payload)
         result = await curl(test_url, output="full")
-        body = result.get("body", "")
+        body = result.get("body", "") or ""
 
         if payload in body:
+            if not _reflection_is_html(result.get("headers", "")):
+                return Verdict(Confidence.TENTATIVE, 0.2,
+                               evidence={"reflected": {
+                                   "payload": payload, "found_in_body": True,
+                                   "context": "non-HTML"}},
+                               reason="payload reflected into a non-HTML "
+                                      "context (JSON/API): not executable on "
+                                      "direct navigation")
             repro = await self.reproducibility.check(
                 lambda: curl(test_url, output="full")
             )
@@ -429,6 +457,31 @@ class VerificationOracle:
             Confidence.TENTATIVE: 30,
         }
         return mapping.get(verdict.confidence, 0)
+
+
+def _reflection_is_html(headers: object) -> bool:
+    """Is the reflection context one a browser would execute?
+
+    A payload echoed inside application/json (or any non-HTML body) is
+    inert on direct navigation — filing it FIRM is how entity-encoded
+    echoes become fake CONFIRMEDs. Missing headers are treated as HTML:
+    mocks and minimal clients often return a body alone, and refusing to
+    grade those would blind the oracle, not sharpen it.
+    """
+    if not headers:
+        return True
+    if isinstance(headers, dict):
+        content_type = str(headers.get("content-type", "")
+                           or headers.get("Content-Type", ""))
+    else:
+        content_type = ""
+        for line in str(headers).splitlines():
+            if line.lower().startswith("content-type:"):
+                content_type = line.split(":", 1)[1]
+                break
+        if not content_type:
+            return True
+    return "html" in content_type.lower()
 
 
 def looks_unsanitized(body: str, payload: str, marker: str) -> bool:

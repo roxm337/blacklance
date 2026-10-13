@@ -23,17 +23,21 @@ from modules.base import BaseModule
 # Fields a client has no business setting on itself. Split by what an accepted
 # write actually means, because "I can set my own nickname" and "I can make
 # myself an admin" are not the same report.
-PRIVILEGE_FIELDS = {
-    "admin": True, "is_admin": True, "role": True, "roles": True,
-    "is_staff": True, "staff": True, "superuser": True, "is_superuser": True,
-    "permissions": True, "is_verified": True,
-    "verified": True, "email_verified": True, "account_type": True,
-    "plan": True, "subscription": True, "tier": True, "is_premium": True,
-    "premium": True, "credits": True, "balance": True, "quota": True,
-    "limit": True, "seats": True, "discount": True, "price_cents": True,
-    "owner_id": True, "user_id": True, "tenant_id": True, "org_id": True,
-    "account_id": True, "group_id": True,
+CRITICAL_FIELDS = {
+    "admin", "is_admin", "role", "roles",
+    "is_staff", "staff", "superuser", "is_superuser",
+    "permissions", "owner_id", "user_id", "tenant_id", "org_id",
+    "account_id", "group_id",
 }
+# Billing/verification knobs: real money or trust impact when writable,
+# but not identity takeover — these file HIGH, not CRITICAL.
+HIGH_FIELDS = {
+    "is_verified", "verified", "email_verified", "account_type",
+    "plan", "subscription", "tier", "is_premium", "premium",
+    "credits", "balance", "quota", "limit", "seats", "discount",
+    "price_cents",
+}
+PRIVILEGE_FIELDS = CRITICAL_FIELDS | HIGH_FIELDS
 
 # Sentinels per JSON type. Each is chosen to be obviously synthetic so that a
 # response echoing it back cannot be mistaken for real data.
@@ -227,7 +231,7 @@ class MassAssignment(BaseModule):
     def _finding(self, field: str, probe, before: dict, after: dict,
                  restored: dict, write_url: str, method: str,
                  target: str) -> dict:
-        elevated = field in PRIVILEGE_FIELDS
+        elevated = field in CRITICAL_FIELDS
         title = (f"Mass assignment: {field} is writable on the caller's own "
                  f"account ({write_url})")
         description = (

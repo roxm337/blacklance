@@ -345,3 +345,35 @@ def test_fast_exposure_scan_detects_exposed_env(monkeypatch):
     assert result == "done"
     assert "Exposed Environment File" in titles
     assert "Permissive CORS Behavior" in titles
+
+
+def test_fast_scan_skips_cors_when_audit_covers_it(monkeypatch):
+    """The fast single-origin CORS probe must not double-file what
+    cors_audit grades: enabled audit means no fast CORS finding."""
+    import modules.fast_exposure_scan as fast_module
+
+    async def fake_curl(url, **kwargs):
+        if kwargs.get("output") == "headers" and kwargs.get("headers"):
+            return {"status": 200, "body": "HTTP/2 200\nAccess-Control-Allow-Origin: https://attacker.invalid\n"}
+        return {"status": 200, "body": "HTTP/2 200\nserver: nginx\n"}
+
+    async def fake_curl_with_status(url, **kwargs):
+        return {"status": 404, "body": ""}
+
+    monkeypatch.setattr(fast_module, "curl", fake_curl)
+    monkeypatch.setattr(fast_module, "curl_with_status", fake_curl_with_status)
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    result = asyncio.run(FastExposureScan(
+        state,
+        {
+            "target": {"domain": "example.com"},
+            "modules": {"fast_exposure_scan":
+                        {"paths": ["/missing"], "timeout": 1,
+                         "concurrency": 2}},
+        },
+    ).run())
+
+    assert result == "done"
+    assert "Permissive CORS Behavior" not in \
+        {finding["title"] for finding in state.findings["findings"]}

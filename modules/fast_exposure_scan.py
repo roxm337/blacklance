@@ -131,7 +131,20 @@ class FastExposureScan(BaseModule):
         )
 
         header_findings = await self._check_headers(base_url, timeout)
-        cors_finding = await self._check_cors(base_url, timeout)
+        # CORS belongs to cors_audit (credentialed probes, null origin,
+        # Vary analysis): running this single-origin probe too files the
+        # same misconfiguration twice at different grades. Skip it when
+        # the graded audit is enabled; run it as the only coverage when
+        # the operator turned cors_audit off.
+        cors_cfg = self.config.get("modules", {}).get("cors_audit", {})
+        cors_covered = not isinstance(cors_cfg, dict) or \
+            cors_cfg.get("enabled", True) is not False
+        if cors_covered:
+            self.log("  CORS covered by the cors_audit module; skipping "
+                     "the fast single-origin probe")
+            cors_finding = None
+        else:
+            cors_finding = await self._check_cors(base_url, timeout)
         health_finding = await self._check_health(base_url, timeout)
         path_findings = await self._check_paths(base_url, paths, concurrency, timeout)
         all_findings = header_findings + ([cors_finding] if cors_finding else []) + ([health_finding] if health_finding else []) + path_findings

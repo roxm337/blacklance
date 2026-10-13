@@ -214,8 +214,10 @@ def test_severity_stays_modest_without_impact_words():
 def test_severity_ignores_evidence_vocabulary():
     """Severity comes from the graph's impact score, not from sniffing the
     evidence text for words like "admin" — vocabulary inflation filed
-    HIGHs for findings that merely mentioned a token."""
-    _register("test.probe", "LOW", evidence={"impact": "root access obtained"})
+    HIGHs for findings that merely mentioned a token. TENTATIVE confidence
+    keeps the floor out of the way so this tests vocabulary alone."""
+    _register("test.probe", "LOW", confidence="TENTATIVE",
+              evidence={"impact": "root access obtained"})
     state = _state()
     ex = ChainExecutor(state, {})
     asyncio_run(ex.execute([_chain(action_id="test.probe", impact=0.5)]))
@@ -617,3 +619,53 @@ def test_execution_window_covers_every_planned_probe(tmp_path):
 def asyncio_run(coro):
     import asyncio
     return asyncio.run(coro)
+
+
+def test_promote_empty_evidence_files_unverified_tentative():
+    """A successful action returning no evidence must not mint a verified
+    finding: success without data is a lead, not proof."""
+    from actions.registry import ActionResult
+    calls = []
+
+    async def fn(ctx):
+        calls.append(ctx)
+        return ActionResult(success=True, confidence="CONFIRMED",
+                            evidence={}, error="", data=None)
+
+    ActionRegistry.register(
+        ActionMeta(id="test.empty", risk="LOW", detectability="low",
+                   description="fake", category="test",
+                   requires=["url"], produces="Finding"),
+        fn,
+    )
+    state = _state()
+    ex = ChainExecutor(state, {})
+    report = asyncio_run(ex.execute([_chain(action_id="test.empty")]))
+    assert report.ran and calls
+    finding = _findings(state)[0]
+    assert finding["verified"] is False, finding
+    assert finding["confidence"] == "TENTATIVE", finding
+
+
+def test_promote_confirmed_rce_reaches_critical():
+    """A CONFIRMED result on a top-impact edge must be able to file
+    CRITICAL; the old cap held every proven finding at HIGH."""
+    _register("test.probe", "LOW")
+    state = _state()
+    ex = ChainExecutor(state, {})
+    report = asyncio_run(ex.execute(
+        [_chain(action_id="test.probe", impact=0.97)]))
+    assert report.ran
+    assert _findings(state)[0]["severity"] == "CRITICAL"
+
+
+def test_promote_confirmed_floors_at_medium():
+    """A CONFIRMED proven exploit on a low-impact edge files at least
+    MEDIUM: something executed, even if the graph scored it LOW."""
+    _register("test.probe", "LOW")
+    state = _state()
+    ex = ChainExecutor(state, {})
+    report = asyncio_run(ex.execute(
+        [_chain(action_id="test.probe", impact=0.1)]))
+    assert report.ran
+    assert _findings(state)[0]["severity"] == "MEDIUM"

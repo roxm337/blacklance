@@ -77,12 +77,14 @@ class SQLiScan(BaseModule):
         for item in total:
             # A callback proves the injection that triggered it and nothing
             # else, so a per-request OAST flag must not promote the findings
-            # from the URLs that stayed in-band. Unconfirmed stays HIGH:
-            # CRITICAL is reserved for executed queries.
+            # from the URLs that stayed in-band. Unconfirmed stays MEDIUM:
+            # CRITICAL is reserved for executed queries, and HIGH for
+            # differential proof — a tool claim on identical responses is
+            # neither.
             confirmed = bool(item.get("url")) and item["url"] in oast_urls
             self.state.add_finding(
                 title="SQLMap SQL Injection Candidate",
-                severity="CRITICAL" if confirmed else "HIGH",
+                severity="CRITICAL" if confirmed else "MEDIUM",
                 confidence="CONFIRMED" if confirmed else "FIRM",
                 category="SQL Injection",
                 description=(

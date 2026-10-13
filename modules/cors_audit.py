@@ -175,6 +175,7 @@ class CORSAudit(BaseModule):
             finding = self._finding(
                 url, record,
                 severity="LOW", confidence="FIRM",
+                verified=False,
                 title="CORS: wildcard origin combined with Allow-Credentials",
                 body=(
                     f"{url} answers with Access-Control-Allow-Origin: * together "
@@ -240,7 +241,8 @@ class CORSAudit(BaseModule):
         return {"observations": [record], "finding": finding}
 
     def _finding(self, url: str, record: dict, *, severity: str,
-                 confidence: str, title: str, body: str) -> dict:
+                 confidence: str, title: str, body: str,
+                 verified: bool = True) -> dict:
         return {
             "title": title,
             "severity": severity,
@@ -254,7 +256,7 @@ class CORSAudit(BaseModule):
                 "credentials with a reflected or wildcard origin, and return "
                 "Vary: Origin so caches do not cross-serve the header."
             ),
-            "verified": True,
+            "verified": verified,
         }
 
     async def _corsy_corroboration(self, urls: list):

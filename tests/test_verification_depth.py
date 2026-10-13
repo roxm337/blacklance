@@ -1021,3 +1021,139 @@ def test_rest_api_docs_exposed_is_verified():
     match = next(f for f in state.findings["findings"]
                  if "API Documentation Exposed" in f["title"])
     assert match["verified"] is True
+
+
+# ── oracle integrity (audit Phase 4a) ──
+
+def test_compare_counts_transport_error_vs_response_as_divergence():
+    """status 0 (fetch failed) vs 200 with identical empty bodies must
+    record the divergence: the old `b == 0: continue` dropped every
+    baseline-zero signal without a trace."""
+    from core.verification_oracle import Confidence, DifferentialAnalyzer
+
+    analyzer = DifferentialAnalyzer()
+    base = {"status": 0, "body_length": 0, "body_hash": 1,
+            "word_count": 0, "line_count": 0}
+    test = {"status": 200, "body_length": 0, "body_hash": 1,
+            "word_count": 0, "line_count": 0}
+    verdict = analyzer.compare(base, test)
+    assert "status" in verdict.evidence.get("differential", {}), verdict
+
+
+def test_compare_ignores_timing_jitter():
+    """response_time_ms is not a content signal (timing belongs to
+    TimingOracle): identical bodies with different timings diverge 0.0."""
+    from core.verification_oracle import Confidence, DifferentialAnalyzer
+
+    analyzer = DifferentialAnalyzer()
+    body_hash = 12345
+    base = {"status": 200, "body_length": 10, "body_hash": body_hash,
+            "word_count": 2, "line_count": 1, "response_time_ms": 100}
+    test = dict(base, response_time_ms=400)
+    verdict = analyzer.compare(base, test)
+    assert verdict.confidence == Confidence.TENTATIVE, verdict
+    assert verdict.score == 0.0, verdict
+    assert "response_time_ms" not in str(verdict.evidence)
+
+
+def _xss_curl(body, content_type="text/html"):
+    async def fake_curl(url, **kwargs):
+        return {"status": 200, "body": body,
+                "headers": f"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n"}
+    return fake_curl
+
+
+def test_verify_xss_json_reflection_is_not_firm(monkeypatch):
+    """A payload reflected inside a JSON body is not executable on direct
+    navigation: old `payload in body` filed FIRM regardless of context."""
+    import core.verification_oracle as oracle_mod
+    from core.verification_oracle import Confidence, VerificationOracle
+
+    payload = '"><svg onload=alert(1)>'
+    monkeypatch.setattr(oracle_mod, "curl",
+                        _xss_curl(f'{{"echo": "{payload}"}}',
+                                  "application/json"))
+
+    verdict = _run(VerificationOracle().verify_xss(
+        "http://h.test/?q=1", "q", payload))
+    assert verdict.confidence == Confidence.TENTATIVE, verdict
+    assert "non-HTML" in verdict.reason, verdict
+
+
+def test_verify_xss_html_reflection_stays_firm(monkeypatch):
+    import core.verification_oracle as oracle_mod
+    from core.verification_oracle import Confidence, VerificationOracle
+
+    payload = '"><svg onload=alert(1)>'
+    monkeypatch.setattr(oracle_mod, "curl",
+                        _xss_curl(f"<html>{payload}</html>"))
+    verdict = _run(VerificationOracle().verify_xss(
+        "http://h.test/?q=1", "q", payload))
+    assert verdict.confidence in (Confidence.FIRM, Confidence.CONFIRMED), \
+        verdict
+
+
+def test_oob_kill_switch_disables_oracle_client(monkeypatch):
+    """oob.enabled:false must stop OOB egress even for direct
+    VerificationOracle() constructions (BaseModule.oob() is not the only
+    caller)."""
+    import core.verification_oracle as oracle_mod
+    from core.verification_oracle import VerificationOracle, configure_oob
+
+    saved = dict(oracle_mod._OOB_CONFIG)
+    try:
+        configure_oob({"oob": {"enabled": False,
+                               "server_url": "https://oob.example.test",
+                               "callback_domain": "oob.example.test"}})
+        assert VerificationOracle().interactsh.enabled is False
+        configure_oob({"oob": {"enabled": True,
+                               "server_url": "https://oob.example.test"}})
+        assert VerificationOracle().interactsh.enabled is True
+    finally:
+        oracle_mod._OOB_CONFIG.clear()
+        oracle_mod._OOB_CONFIG.update(saved)
+
+
+def test_corr_ids_are_unpredictable():
+    """md5(time:payload)[:12] is guessable and collides under parallel
+    probes; callbacks must attribute to the right URL."""
+    import asyncio as _asyncio
+    from core.verification_oracle import InteractshClient
+
+    async def go():
+        client = InteractshClient()
+        return {await client.register_callback("same-payload")
+                for _ in range(20)}
+
+    ids = _asyncio.new_event_loop().run_until_complete(go())
+    assert len(ids) == 20, ids
+    assert all(len(i) == 12 for i in ids)
+
+
+def test_headers_audit_default_src_covers_missing_object_src():
+    """Per the CSP spec a missing object-src falls back to default-src:
+    flagging it under a restrictive default is a false positive."""
+    import modules.headers_audit as ha
+    from modules.headers_audit import HeadersAudit
+    state = _state()
+    state.add_asset("url", "url:https://example.test/",
+                    "https://example.test/", confidence="FIRM",
+                    sources=["test"])
+    module = HeadersAudit(state, _config())
+
+    async def fake_curl(url, **kwargs):
+        if kwargs.get("method") == "OPTIONS":
+            return {"status": 200, "headers": "Allow: GET, HEAD",
+                    "body": ""}
+        return {"status": 200,
+                "headers": ("HTTP/1.1 200 OK\n"
+                            "Content-Security-Policy: default-src 'self'; "
+                            "script-src 'self'\n"),
+                "body": "<html></html>"}
+
+    with patch.object(ha, "curl", new=fake_curl):
+        assert _run(module.run()) == "done"
+    assert "Weak Content-Security-Policy" not in \
+        [f["title"] for f in state.findings["findings"]]
+
+

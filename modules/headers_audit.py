@@ -25,6 +25,16 @@ _SESSION_COOKIE_HINTS = (
 _CSP_UNSAFE = ("unsafe-inline", "unsafe-eval")
 
 
+def _default_src_covers_plugins(default_src: list) -> bool:
+    """A missing object-src falls back to default-src per the CSP spec:
+    flagging it when default-src already restricts plugins is a false
+    positive. Only a missing or wildcard/data: default leaves plugins
+    unrestricted."""
+    if not default_src:
+        return False
+    return not any(token in ("*", "data:") for token in default_src)
+
+
 class HeadersAudit(BaseModule):
     id = "headers_audit"
     name = "HTTP Header Audit"
@@ -109,7 +119,8 @@ class HeadersAudit(BaseModule):
                 token for token in script_src if token in _CSP_UNSAFE))
         if "*" in script_src or "data:" in script_src:
             problems.append("script-src allows wildcard/data: sources")
-        if "object-src" not in directives:
+        if "object-src" not in directives and not _default_src_covers_plugins(
+                directives.get("default-src", [])):
             problems.append("no object-src directive (plugins unrestricted)")
         if problems:
             self.state.add_finding(

@@ -101,6 +101,13 @@ async def ssrf_oob_detect(ctx: ActionContext) -> ActionResult:
     corr_id = await interactsh.register_callback(f"ssrf-test-{param}")
 
     oob_url = interactsh.callback_url(corr_id, "/test")
+    if not interactsh.enabled or not corr_id or "oob.invalid" in oob_url:
+        # Unconfigured OOB: injecting a *.oob.invalid host would cost a
+        # request against the target and prove nothing. Stay honest.
+        return ActionResult(False, error="OOB not configured; blind SSRF "
+                                        "untestable without a callback channel",
+                            confidence="TENTATIVE",
+                            data={"correlation_id": corr_id})
     test_url = inject_param(url, param, oob_url)
 
     await curl(test_url, method=method, output="status")

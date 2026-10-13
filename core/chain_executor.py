@@ -499,6 +499,12 @@ class ChainExecutor:
         evidence = dict(getattr(result, "evidence", {}) or {})
         impact = evidence.get("impact") or evidence.get("summary") or ""
         data = getattr(result, "data", None)
+        # Success without data is a lead, not proof: a buggy action
+        # returning success + empty evidence must not mint verified
+        # findings. Downgrade, don't drop — the action did run.
+        has_proof = bool(evidence) or data is not None
+        if not has_proof:
+            confidence = "TENTATIVE"
 
         evidence_lines = [
             f"Action: {planned.action_id} ({planned.reason})",
@@ -511,7 +517,7 @@ class ChainExecutor:
 
         finding_id = self.state.add_finding(
             title=f"Proven: {planned.action_id} on {planned.url}",
-            severity=_severity_for(planned.edge, evidence),
+            severity=_severity_for(planned.edge, evidence, confidence),
             confidence=confidence,
             category=_category_for(planned.action_id),
             description=(
@@ -524,7 +530,7 @@ class ChainExecutor:
             evidence=evidence_lines[:20],
             remediation=_remediation_for(planned.action_id),
             asset_keys=[],
-            verified=True,
+            verified=has_proof,
             # The proof, not just the claim. A verified finding that does not
             # record which url, which parameter and what the action actually
             # returned is not reportable: the title is the only place the
@@ -548,16 +554,33 @@ class ChainExecutor:
         )
 
 
-def _severity_for(edge: AttackEdge, evidence: dict) -> str:
+_SEVERITY_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
+def _severity_for(edge: AttackEdge, evidence: dict,
+                  confidence: str = "TENTATIVE") -> str:
     """Impact edge, from the graph's own impact score — not from sniffing
     the evidence text for words like "admin". Substring severity was
     inflation by vocabulary: any finding mentioning a token became HIGH.
+
+    Proof couples back in at the edges: a CONFIRMED execution is at
+    least MEDIUM (something ran, whatever the graph guessed), and a
+    CONFIRMED result on a top-impact edge (RCE-grade goals) files
+    CRITICAL. The old unconditional HIGH cap held every proven finding
+    down and decoupled severity from proof strength entirely.
     """
     if edge.impact >= 0.85:
-        return "HIGH"
-    if edge.impact >= 0.6:
-        return "MEDIUM"
-    return "LOW"
+        filed = "HIGH"
+    elif edge.impact >= 0.6:
+        filed = "MEDIUM"
+    else:
+        filed = "LOW"
+    if str(confidence).upper() == "CONFIRMED":
+        if edge.impact >= 0.95:
+            return "CRITICAL"
+        if _SEVERITY_ORDER[filed] < _SEVERITY_ORDER["MEDIUM"]:
+            return "MEDIUM"
+    return filed
 
 
 def _category_for(action_id: str) -> str:

@@ -1118,6 +1118,13 @@ class IdorDiffer(BaseModule):
         methods = [str(m).upper() for m in (self._cfg().get("test_write_methods")
                                             or ["PATCH", "PUT", "DELETE"])]
         attacker = harness.usable[0]
+        if getattr(attacker, "assumed", False):
+            # Mutating probes with an unproven session prove nothing: a dead
+            # session echoing identical pages for both accounts would read
+            # as signal. Reads still run; writes need proof of session.
+            self.log(f"  {attacker.name}: session assumed, not proven — "
+                     f"skipping write tests")
+            return results
         others = [i for i in harness.usable if i.name != attacker.name]
         attacker_own = owned.get(attacker.name, set())
 

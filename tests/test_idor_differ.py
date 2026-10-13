@@ -23,6 +23,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -1321,3 +1322,71 @@ def test_cross_result_severity_is_schema_uppercase():
     assert _cross(kind="anonymous", attributed=False).severity == "MEDIUM"
 
 
+class TestSessionProof:
+    @standalone
+    async def test_error_page_without_markers_does_not_verify(self):
+        """A 500 page with no anon markers is not a live session: the old
+        gate accepted any non-401/403 marker-free page, including errors."""
+        import core.auth_harness as harness_mod
+        from unittest.mock import patch
+
+        async def fake_curl(url, **kwargs):
+            return {"status": 500, "body": "<html>oops</html>", "url": url}
+
+        with patch.object(harness_mod, "curl", new=fake_curl):
+            identity = Identity(name="e", cookies={"session": "x"},
+                                verify_url="http://h.test/me")
+            assert await identity.verify() is False
+            assert "500" in identity.verification_note
+
+    @standalone
+    async def test_assumed_session_is_flagged_not_proven(self):
+        """Credential presence without a verify_url assumes, never proves:
+        callers must be able to tell the difference."""
+        identity = Identity(name="e", cookies={"session": "x"})
+        assert await identity.verify("") is True
+        assert identity.assumed is True
+
+    @served
+    async def test_login_adopts_fresh_cookie_over_stale_config(self, env):
+        """A successful login's Set-Cookie wins over a stale configured
+        cookie; the old merge let dead config shadow the live session."""
+        identity = Identity(name="carol", cookies={"session": "stale"},
+                            verify_url=f"{env.base}/dashboard",
+                            success_marker="Sign out",
+                            login={"url": f"{env.base}/login",
+                                   "data": {"user": "alice"}})
+        assert await identity.establish() is True
+        assert identity.cookies.get("session") == "sess_alice"
+
+    @standalone
+    async def test_write_tests_need_a_proven_session(self):
+        """Mutating probes with an assumed (unproven) session prove
+        nothing: _test_writes must not fire _probe_write for them."""
+        import tempfile as _tempfile
+        from unittest.mock import AsyncMock, patch
+        from modules.idor_differ import IdorDiffer
+
+        tmp = _tempfile.mkdtemp()
+        state = StateManager(str(Path(tmp) / "run"))
+        config = {"target": {"domain": "h.test",
+                             "base_url": "http://h.test"},
+                  "modules": {"idor_differ": {
+                      "test_write_methods": ["PATCH"],
+                      "endpoints": ["http://h.test/api/o/7"]}}}
+        module = IdorDiffer(state, config)
+        assumed = Identity(name="alice", cookies={"session": "x"})
+        assumed.verified = True
+        assumed.assumed = True
+        victim = Identity(name="bob", cookies={"session": "y"})
+        victim.verified = True
+        harness = SimpleNamespace(usable=[assumed, victim])
+        template = ObjectTemplate(url="http://h.test/api/o/7",
+                                  url_template="http://h.test/api/o/{id}",
+                                  samples={"7": "http://h.test/api/o/7"})
+        probe = AsyncMock(return_value=None)
+        with patch.object(IdorDiffer, "_probe_write", new=probe):
+            results = await module._test_writes(
+                harness, [template], {"bob": {"7"}})
+        assert results == []
+        assert probe.await_count == 0

@@ -11,6 +11,7 @@ import asyncio
 import tempfile
 from collections import Counter
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from actions.registry import ActionContext
 from actions.verify.oracles import verify_composite, verify_reproducible
@@ -149,16 +150,14 @@ def test_compare_counts_body_hash_by_equality_not_magnitude(monkeypatch):
 
     analyzer = DifferentialAnalyzer()
     base = {"status": 200, "body_length": 11, "body_hash": 1000,
-            "response_time_ms": 5, "word_count": 2, "line_count": 1,
-            "headers": {}}
+            "word_count": 2, "line_count": 1, "headers": {}}
     # Same shape, different bytes, hashes within 15% by magnitude.
     test = {"status": 200, "body_length": 11, "body_hash": 1099,
-            "response_time_ms": 5, "word_count": 2, "line_count": 1,
-            "headers": {}}
+            "word_count": 2, "line_count": 1, "headers": {}}
 
     verdict = analyzer.compare(base, test)
 
-    assert verdict.score == 1 / 6
+    assert verdict.score == 1 / 5
     assert verdict.confidence.value == "TENTATIVE"
 
 
@@ -3155,3 +3154,406 @@ def test_module_relation_edges_created():
                    "param:http://example.com/p:q", "HAS_PARAMETER")
     types = Counter(e.get("type") for e in state.assets["edges"])
     assert types["HAS_PARAMETER"] == 1
+
+
+def test_prioritization_verified_tentative_is_discounted():
+    """verified=True with TENTATIVE confidence must not skip the discount:
+    the executor files verified for anything that ran, which is not the
+    same as proof."""
+    from core.prioritization import prioritize_findings
+    findings = [{
+        "id": "F-1", "title": "Ran but weak", "severity": "HIGH",
+        "confidence": "TENTATIVE", "category": "Exploitation",
+        "asset_keys": [], "verified": True, "created_at": "2026-01-01",
+    }]
+    out = prioritize_findings(findings)[0]
+    # Undiscounted HIGH/TENTATIVE would score 75+; discounted must stay low.
+    assert out["risk_score"] < 50, out
+    assert out["priority_factors"]["confidence_discount"] == 0.55, out
+
+
+def test_prioritization_sort_orders_high_before_medium_on_ties():
+    """Score ties must break by severity rank, not string order
+    (lexical MEDIUM > LOW > HIGH misordered triage)."""
+    from core.prioritization import prioritize_findings
+    findings = [
+        {"id": "F-M", "title": "m", "severity": "MEDIUM",
+         "confidence": "CONFIRMED", "category": "X", "asset_keys": [],
+         "risk_score": 95, "created_at": "2026-01-01"},
+        {"id": "F-H", "title": "h", "severity": "HIGH",
+         "confidence": "CONFIRMED", "category": "X", "asset_keys": [],
+         "risk_score": 95, "created_at": "2026-01-01"},
+    ]
+    ordered = prioritize_findings(findings)
+    assert [f["id"] for f in ordered] == ["F-H", "F-M"], ordered
+
+
+def test_kev_requires_exact_category_without_structured_flag():
+    """Only the exact exploit_lookup category counts as KEV; free prose
+    merely containing 'known exploited' must not bypass the discount."""
+    from core.prioritization import prioritize_findings
+    prose = prioritize_findings([{
+        "id": "F-1", "title": "t", "severity": "HIGH",
+        "confidence": "FIRM", "category": "Known exploited in theory blogs",
+        "asset_keys": [], "created_at": "2026-01-01",
+    }])[0]
+    assert prose["priority_factors"]["kev"] is False, prose
+    exact = prioritize_findings([{
+        "id": "F-1", "title": "t", "severity": "HIGH",
+        "confidence": "FIRM", "category": "Known Exploited Vulnerability",
+        "asset_keys": [], "created_at": "2026-01-01",
+    }])[0]
+    assert exact["priority_factors"]["kev"] is True, exact
+
+
+def test_rough_entropy_is_real_shannon_bits():
+    """'aabbccdd' carries 2 bits/char, not 3.5: the old bit_length
+    arithmetic passed nearly everything as structurally_valid."""
+    from core.validators import _rough_entropy, validate_secret
+    assert _rough_entropy("aabbccdd") < 3.0
+    assert _rough_entropy("ghp_qrstuvwxyzQRSTUVWXyzmn98765432109876") >= 3.0
+    assert validate_secret(
+        "github_pat", "aabbccdd")["verdict"] == "weak_match"
+
+
+def test_private_key_header_alone_is_not_a_key():
+    """A bare BEGIN line with no key body is a mention, not a leak:
+    the old pattern graded header presence alone as plausible."""
+    from core.validators import extract_secrets
+    assert extract_secrets(
+        "docs mention -----BEGIN RSA PRIVATE KEY----- here") == []
+
+
+def _unsigned_jwt() -> str:
+    import base64 as _b64
+    import json as _json
+
+    def seg(obj):
+        return _b64.urlsafe_b64encode(
+            _json.dumps(obj).encode()).decode().rstrip("=")
+
+    return (seg({"alg": "none", "typ": "JWT"})
+            + "." + seg({"sub": "user4821", "role": "viewer"}) + ".")
+
+
+def test_alg_none_token_is_unsigned_not_example():
+    """An unsigned live-shaped token is an auth weakness (none
+    acceptance), not documentation: the old tier dismissed it."""
+    from core.validators import analyze_jwt, grade_secret_candidate
+    verdict = analyze_jwt(_unsigned_jwt())
+    assert verdict["tier"] == "unsigned", verdict
+    tier, _ = grade_secret_candidate("jwt_token", _unsigned_jwt(),
+                                     {"verdict": "structurally_valid"})
+    assert tier == "plausible", tier
+
+
+def test_latest_claim_is_not_an_example_marker():
+    """'test' must match on word boundaries: 'latest' is not a docs
+    marker, and dismissing it hides real credentials."""
+    import base64 as _b64
+    import json as _json
+    from core.validators import analyze_jwt
+
+    def seg(obj):
+        return _b64.urlsafe_b64encode(
+            _json.dumps(obj).encode()).decode().rstrip("=")
+
+    token = (seg({"alg": "HS256"})
+             + "." + seg({"sub": "user4821", "last_seen": "latest"})
+             + "." + seg("sig4821"))
+    assert analyze_jwt(token)["tier"] == "live_shaped"
+
+
+def test_is_public_target_ipv6_and_punycode():
+    from core.validators import is_public_target
+    assert is_public_target("2606:4700:4700::1111") is True
+    assert is_public_target("[2606:4700:4700::1111]") is True
+    assert is_public_target("::1") is False
+    assert is_public_target("example.xn--p1ai") is True
+    assert is_public_target("example.test") is False
+
+
+def test_sqlmap_unconfirmed_is_medium_not_high(monkeypatch):
+    """sqlmap output on identical responses admits it is not execution
+    proof: filing it HIGH equates a tool claim with a callback CONFIRMED."""
+    import modules.sqli_scan as sqli_module
+    from modules.sqli_scan import SQLiScan
+
+    async def fake_scan(url, **kwargs):
+        return {"results": [{"url": url,
+                             "evidence": "identical responses"}],
+                "oast": False, "exit_code": 0}
+
+    monkeypatch.setattr(sqli_module, "sqlmap_scan", fake_scan)
+    monkeypatch.setattr(sqli_module, "tool_available", lambda name: True)
+    state = _state()
+    state.add_asset("parameter", "param:id", "id", confidence="FIRM",
+                    sources=["test"],
+                    attrs={"url": "http://example.com/?id=1"})
+    module = SQLiScan(state, {"target": {"domain": "example.com",
+                                         "base_url": "http://example.com"},
+                              "modules": {"sqli_scan": {"escalate": False}}})
+    result = asyncio.run(module.run())
+    assert result == "done"
+    findings = [f for f in state.findings["findings"]
+                if f["title"] == "SQLMap SQL Injection Candidate"]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "MEDIUM", findings[0]
+    assert findings[0]["confidence"] == "FIRM", findings[0]
+
+
+def test_header_witness_replays_the_injected_header(monkeypatch):
+    """A browser witness that loads the bare URL proves nothing about a
+    header vector: the injected header must ride along, or CONFIRMED is
+    a false promotion."""
+    import modules.xss_scan as x_mod
+
+    seen = {}
+
+    async def fake_witness(url, expected, config, extra_headers=None):
+        seen.update(extra_headers or {})
+        return True
+
+    async def fake_curl(url, **kwargs):
+        headers = {k.lower(): v for k, v in (kwargs.get("headers") or {}).items()}
+        injected = next((str(v) for v in headers.values()
+                         if "hxprobe" in str(v)), "")
+        if injected:
+            marker = injected.split("`")[1].split("`")[0] \
+                if "`" in injected else injected
+            return {"status": 200,
+                    "body": f"<html>{injected}</html>",
+                    "headers": ""}
+        return {"status": 200, "body": "<html>clean</html>", "headers": ""}
+
+    monkeypatch.setattr(x_mod, "curl", fake_curl)
+    monkeypatch.setattr(x_mod, "_browser_confirms_execution", fake_witness)
+    monkeypatch.setattr(x_mod, "_playwright_available",
+                        AsyncMock(return_value=True))
+    state = _state()
+    module = x_mod.XSSScan(state, {"target": {"domain": "example.com",
+                                              "base_url": "http://example.com"},
+                                   "modules": {"xss_scan": {}}})
+    findings = asyncio.run(module._test_header_reflection(
+        ["http://example.com/"], True))
+    assert findings, "header reflection should file"
+    assert findings[0]["confidence"] == "CONFIRMED", findings[0]
+    injected = [v for v in seen.values() if "<sVg" in str(v)]
+    assert injected, f"witness never received the payload header: {seen}"
+
+
+def test_cors_browser_rejected_combo_is_unverified(monkeypatch):
+    """ACAO:* + credentials is browser-rejected by construction: the
+    module's own text says it is not exploitable, so verified must not
+    claim proof."""
+    from unittest.mock import AsyncMock
+    from modules.cors_audit import CORSAudit
+
+    async def fake_get(self, harness, identity, url, origin):
+        return {"status": 200, "body": "{}",
+                "headers": {"access-control-allow-origin": "*",
+                            "access-control-allow-credentials": "true"}}
+
+    monkeypatch.setattr(CORSAudit, "_get", fake_get)
+    state = _state()
+    module = CORSAudit(state, {"target": {"domain": "example.com",
+                                          "base_url": "http://example.com"},
+                               "modules": {"cors_audit": {
+                                   "endpoints": ["http://example.com/api"]}}})
+    assert asyncio.run(module.run()) == "done"
+    findings = [f for f in state.findings["findings"]
+                if "wildcard" in f["title"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "LOW", findings[0]
+    assert findings[0]["verified"] is False, findings[0]
+
+
+def test_graphql_batch_and_get_are_low_firm(monkeypatch):
+    """Accepting a 2-query batch or a GET __typename proves neither rate
+    abuse nor authed-mutation CSRF: LOW/FIRM observations, not
+    MEDIUM/CONFIRMED claims."""
+    import modules.graphql_module as gql_module
+    from modules.graphql_module import GraphQLAudit
+
+    async def fake_status(url, **kwargs):
+        return {"status": 400, "body": '{"errors":[{"message":"syntax"}]}',
+                "content_type": "application/json"}
+
+    async def fake_curl(url, **kwargs):
+        if kwargs.get("method") == "POST" and "query" in str(kwargs.get("data", "")):
+            if "batch" in str(kwargs.get("data", "")) or \
+                    str(kwargs.get("data", "")).startswith("["):
+                return {"status": 200,
+                        "body": '[{"data":{"__typename":"Query"}},'
+                                '{"data":{"__typename":"Query"}}]',
+                        "headers": ""}
+            return {"status": 200, "body": '{"data":{"__typename":"Query"}}',
+                    "headers": ""}
+        if "query=" in url:
+            return {"status": 200, "body": '{"data":{"__typename":"Query"}}',
+                    "headers": ""}
+        return {"status": 200, "body": '{"data":{"__typename":"Query"}}',
+                "headers": ""}
+
+    monkeypatch.setattr(gql_module, "curl_with_status", fake_status)
+    monkeypatch.setattr(gql_module, "curl", fake_curl)
+    state = _state()
+    module = GraphQLAudit(state, {"target": {"domain": "example.com",
+                                             "base_url": "http://example.com"}})
+    assert asyncio.run(module.run()) == "done"
+    for finding in state.findings["findings"]:
+        assert finding["severity"] == "LOW", finding
+        assert finding["confidence"] == "FIRM", finding
+
+
+def test_wp_users_without_emails_is_medium(monkeypatch):
+    """A bare author list (slugs only) is user enumeration for later
+    password attacks — MEDIUM. HIGH needs exposed contact data."""
+    import modules.rest_api as rest_module
+
+    async def fake_json(url, **kwargs):
+        if url.endswith("/wp-json/"):
+            return {"namespaces": ["wp/v2"], "routes": {}}
+        return [{"id": 1, "slug": "admin", "name": "Admin"},
+                {"id": 2, "slug": "editor", "name": "Editor"}]
+
+    async def fake_status(url, **kwargs):
+        return {"status": 404, "body": ""}
+
+    monkeypatch.setattr(rest_module, "curl_json", fake_json)
+    monkeypatch.setattr(rest_module, "curl_with_status", fake_status)
+    state = _state()
+    module = rest_module.RestAPIAudit(
+        state, {"target": {"domain": "example.com",
+                           "base_url": "http://example.com"}})
+    asyncio.run(module._audit_wordpress_api("http://example.com"))
+    findings = [f for f in state.findings["findings"] if "Users Enumerated" in f["title"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "MEDIUM", findings[0]
+
+
+def test_wp_users_with_emails_stays_high(monkeypatch):
+    import modules.rest_api as rest_module
+
+    async def fake_json(url, **kwargs):
+        if url.endswith("/wp-json/"):
+            return {"namespaces": ["wp/v2"], "routes": {}}
+        return [{"id": 1, "slug": "admin", "name": "Admin",
+                 "email": "admin@example.com"}]
+
+    async def fake_status(url, **kwargs):
+        return {"status": 404, "body": ""}
+
+    monkeypatch.setattr(rest_module, "curl_json", fake_json)
+    monkeypatch.setattr(rest_module, "curl_with_status", fake_status)
+    state = _state()
+    module = rest_module.RestAPIAudit(
+        state, {"target": {"domain": "example.com",
+                           "base_url": "http://example.com"}})
+    asyncio.run(module._audit_wordpress_api("http://example.com"))
+    findings = [f for f in state.findings["findings"] if "Users Enumerated" in f["title"]]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "HIGH", findings[0]
+
+
+def test_akismet_needs_a_key_shaped_value(monkeypatch):
+    """Any non-empty JSON from akismet/v1/key is not an exposed API key:
+    the response must carry a key-shaped value."""
+    import modules.rest_api as rest_module
+
+    async def fake_curl_json(url, **kwargs):
+        if url.endswith("/wp-json/"):
+            return {"namespaces": ["wp/v2"], "routes": {}}
+        return []
+
+    async def fake_status(url, **kwargs):
+        if "akismet" in url:
+            return {"status": 200, "body": '{"status": "active"}'}
+        if "wp-json" in url and "users" not in url:
+            return {"status": 200, "body": '{"namespaces": ["wp/v2"]}'}
+        return {"status": 404, "body": ""}
+
+    monkeypatch.setattr(rest_module, "curl_with_status", fake_status)
+    monkeypatch.setattr(rest_module, "curl_json", fake_curl_json)
+    state = _state()
+    module = rest_module.RestAPIAudit(
+        state, {"target": {"domain": "example.com",
+                           "base_url": "http://example.com"}})
+    asyncio.run(module._audit_wordpress_api("http://example.com"))
+    assert [f for f in state.findings["findings"]
+            if "Akismet" in f["title"]] == []
+
+
+def test_response_audit_skips_own_record_with_session(monkeypatch):
+    """Your own email coming back to you on /me is what the endpoint is
+    for: token-authenticated self-reads are IDOR's question, not
+    over-sharing. The anonymous probe still runs."""
+    import modules.response_audit as response_module
+    from modules.response_audit import ResponseAudit
+
+    async def fake_curl(url, **kwargs):
+        if kwargs.get("headers"):
+            return {"status": 200,
+                    "body": '{"id": 7, "email": "me@example.com"}',
+                    "time_ms": 5, "url": url}
+        return {"status": 401, "body": "Unauthorized",
+                "time_ms": 5, "url": url}
+
+    monkeypatch.setattr(response_module, "curl", fake_curl)
+    state = _state()
+    state.add_asset("api_endpoint", "api:http://example.com/api/me",
+                    "http://example.com/api/me", confidence="FIRM",
+                    sources=["test"], attrs={})
+    state.add_asset("identity_credential", "cred:alice", "alice",
+                    confidence="FIRM", sources=["test"],
+                    attrs={"token": "sess-alice"})
+    result = asyncio.run(ResponseAudit(
+        state, {"target": {"domain": "example.com",
+                           "base_url": "http://example.com"}}).run())
+    assert result == "done"
+    assert state.findings["findings"] == []
+
+
+def test_upload_svg_served_as_attachment_is_firm(monkeypatch):
+    """Stored intact but served as an attachment cannot execute inline:
+    HIGH/FIRM with the storage proven, not CONFIRMED execution."""
+    import re as _re
+    import modules.upload_audit as upload_module
+    from modules.upload_audit import UploadAudit
+
+    markers = {}
+
+    async def fake_curl(url, **kwargs):
+        if url.endswith("/file-upload") and kwargs.get("method") == "POST":
+            data = kwargs.get("data", b"") or b""
+            raw = data if isinstance(data, bytes) else data.encode()
+            match = _re.search(rb"upl[0-9a-f]{8}", raw)
+            if match:
+                markers["m"] = match.group(0).decode()
+            return {"status": 201,
+                    "body": '{"location": "/uploads/probe.svg"}',
+                    "time_ms": 5, "url": url}
+        if url.endswith("/uploads/probe.svg"):
+            marker = markers.get("m", "MARK")
+            return {"status": 200,
+                    "body": f"<svg onload=\"x\">{marker}</svg>",
+                    "headers": ("HTTP/1.1 200 OK\r\n"
+                                "Content-Type: image/svg+xml\r\n"
+                                "Content-Disposition: attachment; "
+                                "filename=\"probe.svg\"\r\n"),
+                    "time_ms": 5, "url": url}
+        return {"status": 404, "body": "nope", "time_ms": 5, "url": url}
+
+    monkeypatch.setattr(upload_module, "curl", fake_curl)
+    state = _state()
+    result = asyncio.run(UploadAudit(
+        state, {"target": {"domain": "example.com",
+                           "base_url": "http://example.com"}}).run())
+    assert result == "done"
+    stored = [f for f in state.findings["findings"]
+              if f["title"].startswith("Stored Script via SVG Upload")]
+    assert len(stored) >= 1
+    assert all(f["confidence"] == "FIRM" for f in stored), stored
+    assert all(f["verified"] is False for f in stored), stored
+
+

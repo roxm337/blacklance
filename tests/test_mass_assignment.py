@@ -381,3 +381,17 @@ def test_the_default_field_list_is_privilege_fields_only():
     assert "role" in module_fields and "admin" in module_fields
     assert "email" not in module_fields
     assert "name" not in module_fields
+
+
+def test_a_writable_billing_field_is_high_not_critical():
+    """limit/seats/discount moving money or quota is HIGH: CRITICAL is
+    identity takeover (role/admin), not billing knobs."""
+    status, state, _ = _run(ProfileApp(writable={"limit", "role"}),
+                            {"enabled": True, "endpoints": ["/api/users/7"],
+                             "fields": ["limit", "role"]})
+    severities = {f["title"].split()[2]: f["severity"]
+                  for f in state.findings["findings"]}
+
+    assert status == "done"
+    assert severities["limit"] == "HIGH", severities
+    assert severities["role"] == "CRITICAL", severities

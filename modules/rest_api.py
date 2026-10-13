@@ -62,6 +62,27 @@ def _extract_swagger_doc(body: str) -> dict:
         return {}
 
 
+def _key_shaped(data: object) -> str:
+    """A key-shaped string inside a JSON document, or "".
+
+    Akismet-style endpoints answer 200 with status objects and settings
+    blobs; only a long high-entropy token value counts as an exposed key.
+    """
+    best = ""
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+        elif isinstance(node, str):
+            text = node.strip()
+            if len(text) >= 16 and len(set(text)) >= 8 and len(text) > len(best):
+                best = text
+    return best
+
+
 class RestAPIAudit(BaseModule):
     id = "rest_api_audit"
     name = "REST API Audit"
@@ -164,14 +185,26 @@ class RestAPIAudit(BaseModule):
         users_result = await curl_json(f"{base_url}/wp-json/wp/v2/users?per_page=100")
         if isinstance(users_result, list) and len(users_result) > 0:
             usernames = [u.get("slug", u.get("name", "")) for u in users_result]
+            exposes_contact = any(
+                isinstance(u, dict) and any(
+                    str(v or "").strip() and ("@" in str(v) or re.match(
+                        r"^\+?[\d][\d\s().-]{6,}$", str(v).strip()))
+                    for k, v in u.items()
+                    if k.lower() not in ("slug", "name", "link",
+                                         "avatar_urls", "meta", "_links"))
+                for u in users_result)
             self.state.add_finding(
                 title=f"WP REST API: {len(users_result)} Users Enumerated",
-                severity="HIGH",
+                severity="HIGH" if exposes_contact else "MEDIUM",
                 confidence="CONFIRMED",
                 category="Information Disclosure",
                 description=(
                     f"WordPress REST API exposes {len(users_result)} user accounts "
                     f"without authentication: {usernames[:10]}"
+                    + (" — contact data included, enabling targeted phishing."
+                       if exposes_contact else
+                       " — slugs alone aid password-guessing, but no contact "
+                       "data was exposed.")
                 ),
                 evidence=[
                     f"Endpoint: {base_url}/wp-json/wp/v2/users",
@@ -204,10 +237,13 @@ class RestAPIAudit(BaseModule):
                 if "file_size" in path:
                     await self._check_file_size_ssrf(full_url)
                 elif "akismet/v1/key" in path:
-                    # API key may be in response
+                    # API key may be in response — but only a key-shaped
+                    # value counts. Any non-empty JSON (a status object,
+                    # a settings blob) used to file "key exposed".
                     try:
                         data = json.loads(body)
-                        if data:
+                        key_like = _key_shaped(data)
+                        if key_like:
                             self.state.add_finding(
                                 title="Akismet API Key Exposed via REST",
                                 severity="MEDIUM",
@@ -508,6 +544,14 @@ class RestAPIAudit(BaseModule):
                     description = (
                         f"Live-shaped JWT in API response at {base_url}{path}. "
                         f"May allow account takeover if secret is weak.")
+                elif tier == "unsigned":
+                    severity, confidence = "HIGH", "FIRM"
+                    description = (
+                        f"Unsigned (alg=none) JWT in API response at "
+                        f"{base_url}{path}. The app issues tokens with no "
+                        f"signature: where acceptance is verified this is an "
+                        f"authentication bypass. Confirm by replaying the "
+                        f"token with a modified claim.")
                 elif tier == "expired":
                     severity, confidence = "LOW", "FIRM"
                     description = (

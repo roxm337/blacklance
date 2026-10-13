@@ -63,6 +63,10 @@ class Identity:
     success_marker: str = ""
     verified: bool = False
     verification_note: str = ""
+    # True when verification was by credential presence, not by proof
+    # (no verify_url configured). Assumed sessions may read, but write
+    # probes need a proven session — see idor_differ._test_writes.
+    assumed: bool = False
     # Who this account is, so a response can be attributed to it. Usually
     # read from the bearer token's own claims; overridden by config.
     email: str = ""
@@ -281,11 +285,12 @@ class Identity:
             return False
 
         # Adopt cookies the server handed us during login so later requests
-        # reuse the session instead of re-authenticating.
+        # reuse the session instead of re-authenticating. Fresh cookies win:
+        # a stale configured cookie must never shadow the live session.
         engine = get_engine()
         harvested = engine.cookies_for(self.name)
         if harvested:
-            self.cookies = {**harvested, **self.cookies}
+            self.cookies = {**self.cookies, **harvested}
 
         if spec.get("extract_token", True):
             token = _extract_token(result.get("body", ""))
@@ -328,6 +333,7 @@ class Identity:
         url = self.verify_url or base_url
         if not url:
             self.verified = self.has_credentials()
+            self.assumed = bool(self.verified)
             self.verification_note = (
                 "assumed authenticated — no verify_url configured"
                 if self.verified else "no credentials and no verify_url"
@@ -344,6 +350,7 @@ class Identity:
             )
         except Exception as exc:
             self.verified = False
+            self.assumed = False
             self.verification_note = f"verify raised: {exc}"
             return False
 
@@ -353,35 +360,48 @@ class Identity:
 
         if status in (401, 403):
             self.verified = False
+            self.assumed = False
             self.verification_note = f"server returned {status}"
             return False
         if status == 0:
             self.verified = False
+            self.assumed = False
             self.verification_note = f"transport error: {result.get('error', 'unknown')}"
+            return False
+        if status >= 400:
+            # Error pages carry no session proof: the old gate accepted
+            # any non-401/403 marker-free page, including 404/500 bodies.
+            self.verified = False
+            self.assumed = False
+            self.verification_note = f"verify page returned HTTP {status}"
             return False
 
         # Redirected back to a login page means the session never took.
         path = urlparse(final_url).path.lower()
         if any(hint in path for hint in _LOGIN_PATH_HINTS):
             self.verified = False
+            self.assumed = False
             self.verification_note = f"redirected to {path}"
             return False
 
         for marker in _ANON_MARKERS:
             if marker in body:
                 self.verified = False
+                self.assumed = False
                 self.verification_note = f"anonymous marker present: {marker!r}"
                 return False
 
         if self.success_marker:
             if self.success_marker.lower() not in body:
                 self.verified = False
+                self.assumed = False
                 self.verification_note = (
                     f"success marker {self.success_marker!r} absent"
                 )
                 return False
 
         self.verified = True
+        self.assumed = False
         self.verification_note = f"verified against {final_url} (HTTP {status})"
         return True
 

@@ -30,6 +30,24 @@ XXE_PROBE_BODY = (
 )
 
 
+def _served_executable(content_type: str, disposition: str) -> bool:
+    """Can a stored SVG execute when framed inline?
+
+    No content-type header means browsers sniff: executable. An explicit
+    safe type (text/plain, octet-stream) or an attachment disposition
+    denies inline execution — storage is proven, execution is not.
+    """
+    ctype = (content_type or "").lower()
+    disp = (disposition or "").lower()
+    if "attachment" in disp:
+        return False
+    if not ctype:
+        return True
+    if "svg" in ctype or "html" in ctype or "xml" in ctype:
+        return True
+    return False
+
+
 class UploadAudit(BaseModule):
     id = "upload_audit"
     name = "File Upload Audit"
@@ -105,26 +123,53 @@ class UploadAudit(BaseModule):
         location = await self._multipart(
             url, "probe.svg", svg.encode(), "image/svg+xml")
         if location:
-            served = await self._fetch_text(location)
+            served, content_type, disposition = await self._fetch_served(
+                location)
             if served and marker in served and "<svg" in served.lower():
-                self.state.add_finding(
-                    title=f"Stored Script via SVG Upload: {url}",
-                    severity="HIGH",
-                    confidence="CONFIRMED",
-                    category="Stored XSS",
-                    description=(
-                        f"SVG uploaded to {url} is served back with script "
-                        f"content intact at {location}: attacker markup "
-                        f"executes in victims' browsers."),
-                    evidence=[f"Upload: {url}", f"Served at: {location}",
-                              f"Marker reflected: {marker}"],
-                    remediation="Re-encode uploads to inert formats, serve "
-                                "user files with Content-Disposition: attachment "
-                                "and a non-executing content type.",
-                    asset_keys=[f"url:{url}"],
-                    verified=True,
-                    verification={"method": "svg_served_intact", "url": location},
-                )
+                executable = _served_executable(content_type, disposition)
+                if executable:
+                    self.state.add_finding(
+                        title=f"Stored Script via SVG Upload: {url}",
+                        severity="HIGH",
+                        confidence="CONFIRMED",
+                        category="Stored XSS",
+                        description=(
+                            f"SVG uploaded to {url} is served back with script "
+                            f"content intact at {location}: attacker markup "
+                            f"executes in victims' browsers."),
+                        evidence=[f"Upload: {url}", f"Served at: {location}",
+                                  f"Marker reflected: {marker}",
+                                  f"Served as: {content_type or 'sniffable (no content-type)'}"],
+                        remediation="Re-encode uploads to inert formats, serve "
+                                    "user files with Content-Disposition: attachment "
+                                    "and a non-executing content type.",
+                        asset_keys=[f"url:{url}"],
+                        verified=True,
+                        verification={"method": "svg_served_intact", "url": location},
+                    )
+                else:
+                    self.state.add_finding(
+                        title=f"Stored Script via SVG Upload: {url}",
+                        severity="HIGH",
+                        confidence="FIRM",
+                        category="Stored XSS",
+                        description=(
+                            f"SVG uploaded to {url} is stored intact at "
+                            f"{location}, but served as {content_type or 'unknown'} "
+                            f"{disposition or ''}: execution needs inline "
+                            f"framing, which this response denies."),
+                        evidence=[f"Upload: {url}", f"Served at: {location}",
+                                  f"Marker reflected: {marker}",
+                                  f"Served as: {content_type} {disposition}"],
+                        remediation="Re-encode uploads to inert formats, serve "
+                                    "user files with Content-Disposition: attachment "
+                                    "and a non-executing content type.",
+                        asset_keys=[f"url:{url}"],
+                        verified=False,
+                        verification={"method": "svg_stored_not_executable",
+                                      "url": location},
+                    )
+                await self._cleanup_uploads(stored)
                 return True
 
         # 2. XXE canary: entity expansion without touching the filesystem.
@@ -237,3 +282,25 @@ class UploadAudit(BaseModule):
         if result.get("status", 0) not in (200, 201):
             return ""
         return result.get("body", "") or ""
+
+    async def _fetch_served(self, url: str) -> tuple:
+        """(body, content_type, content_disposition) for a stored upload."""
+        try:
+            result = await curl(url, output="full", timeout=15)
+        except Exception:
+            return "", "", ""
+        if result.get("status", 0) not in (200, 201):
+            return "", "", ""
+        headers = result.get("headers", "") or ""
+        content_type, disposition = "", ""
+        if isinstance(headers, dict):
+            content_type = str(headers.get("content-type", "") or "")
+            disposition = str(headers.get("content-disposition", "") or "")
+        else:
+            for line in str(headers).splitlines():
+                low = line.lower()
+                if low.startswith("content-type:"):
+                    content_type = line.split(":", 1)[1].strip()
+                elif low.startswith("content-disposition:"):
+                    disposition = line.split(":", 1)[1].strip()
+        return result.get("body", "") or "", content_type, disposition

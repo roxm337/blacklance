@@ -37,15 +37,30 @@ def is_public_target(host: str) -> bool:
     name = str(host or "").strip().lower().rstrip(".")
     if not name:
         return False
+    # Literal IPs first, brackets and zone ids stripped: the old
+    # split(":")[0] turned every global IPv6 address into "2606" and
+    # missed it, and punycode TLDs failed the alpha check below.
+    candidate = name.strip("[]").split("%")[0]
+    try:
+        if ipaddress.ip_address(candidate).is_global:
+            return True
+    except ValueError:
+        pass
     try:
         if ipaddress.ip_address(name.split(":")[0].split("/")[0]).is_global:
             return True
     except ValueError:
         pass
-    if "." not in name:
+    if "." not in name or ":" in name:
         return False
     tld = name.rsplit(".", 1)[-1]
-    if not tld.isalpha() or len(tld) < 2 or tld in _NON_PUBLIC_TLDS:
+    if tld.startswith("xn--"):
+        if len(tld) <= 4 or not all(
+                ch.isalnum() or ch == "-" for ch in tld[4:]):
+            return False
+    elif not tld.isalpha() or len(tld) < 2:
+        return False
+    if tld in _NON_PUBLIC_TLDS:
         return False
     return True
 
@@ -82,18 +97,16 @@ RESPONSE_SENSITIVE_KEYS = {
     "backup_code": "MEDIUM",
 }
 
-_RESPONSE_DOCS_MARKERS = ("example", "test", "demo", "sample", "xxx",
-                          "null", "undefined", "***", "redacted",
-                          "hidden", "xxx-")
-
-
 def looks_real_value(value) -> bool:
     """A value shaped like a genuine secret, not a placeholder."""
     text = str(value or "")
     if len(text) < 8:
         return False
     lowered = text.lower()
-    if any(marker in lowered for marker in _RESPONSE_DOCS_MARKERS):
+    if _has_example_marker(text):
+        return False
+    if any(marker in lowered for marker in
+           ("null", "undefined", "***", "redacted", "hidden")):
         return False
     if len(set(text)) < 5:
         return False
@@ -163,9 +176,16 @@ def extract_secrets(text: str) -> list[dict]:
     """Extract potential secrets with redacted values."""
     results = []
     seen = set()
+    body = text or ""
     for secret_type, pattern in SECRET_PATTERNS:
-        for match in pattern.findall(text or ""):
-            value = match if isinstance(match, str) else match[0]
+        for match in pattern.finditer(body):
+            value = match.group(1) if match.groups() else match.group(0)
+            if secret_type == "private_key":
+                # A bare BEGIN line is a mention, not a leak: without a
+                # key body and END marker there is nothing to rotate.
+                tail = body[match.end():match.end() + 8192]
+                if "-----END" not in tail:
+                    continue
             key = (secret_type, value)
             if key in seen:
                 continue
@@ -228,14 +248,16 @@ def grade_secret_candidate(secret_type: str, value: str,
     Returns (tier, reason).
     """
     text = str(value or "")
-    lowered = text.lower()
-    if any(marker in lowered for marker in SECRET_EXAMPLE_MARKERS):
+    if _has_example_marker(text):
         return "weak", "example/test marker in value"
     if validation and validation.get("verdict") not in (
             None, "structurally_valid"):
         return "weak", f"structural verdict: {validation.get('verdict')}"
     if secret_type == "jwt_token":
         verdict = analyze_jwt(text)
+        if verdict["tier"] == "unsigned":
+            return "plausible", ("unsigned token (alg=none): acceptance "
+                                 "where verified is an auth bypass")
         if verdict["tier"] != "live_shaped":
             return "weak", verdict["reason"]
         return "plausible", "JWT decodes, unexpired, non-example"
@@ -260,9 +282,11 @@ def analyze_jwt(value: str) -> dict:
     """Read-only JWT triage shared by secret mining and API audits.
 
     Returns {"tier", "reason", "claims", "expired"}. Tiers: "example"
-    (docs/sample token), "expired", "live_shaped" (decodes, unexpired,
-    non-example), "malformed". Nothing here proves the key behind the
-    signature — that takes a replay, not a read.
+    (docs/sample token), "expired", "unsigned" (alg=none — an auth
+    weakness where acceptance is verified, not documentation),
+    "live_shaped" (decodes, unexpired, non-example), "malformed".
+    Nothing here proves the key behind the signature — that takes a
+    replay, not a read.
     """
     text = str(value or "").strip()
     claims: dict = {}
@@ -278,14 +302,11 @@ def analyze_jwt(value: str) -> dict:
     except Exception:
         return {"tier": "malformed", "reason": "payload does not decode",
                 "claims": {}, "expired": False}
-    lowered = text.lower()
     try:
         claims_text = json.dumps(claims).lower()
     except Exception:
         claims_text = ""
-    if any(marker in lowered or marker in claims_text for marker in (
-            "example", "sample", "test", "demo", "xxx", "abcdef",
-            "john doe", "1234567890")):
+    if _has_example_marker(text, claims_text):
         return {"tier": "example", "reason": "docs/sample marker in token",
                 "claims": claims, "expired": False}
     header_b64 = parts[0] + "=" * (-len(parts[0]) % 4)
@@ -294,7 +315,8 @@ def analyze_jwt(value: str) -> dict:
     except Exception:
         header = {}
     if isinstance(header, dict) and header.get("alg") == "none":
-        return {"tier": "example", "reason": "unsigned (alg=none) token",
+        return {"tier": "unsigned",
+                "reason": "unsigned (alg=none) token — verify acceptance",
                 "claims": claims, "expired": False}
     exp = claims.get("exp")
     if isinstance(exp, (int, float)):
@@ -307,7 +329,11 @@ def analyze_jwt(value: str) -> dict:
 
 
 def _rough_entropy(value: str) -> float:
+    """Shannon entropy in bits per character."""
+    import math
+    from collections import Counter
     if not value:
         return 0.0
-    unique = len(set(value))
-    return min(8.0, unique.bit_length() + len(value).bit_length() / 8)
+    counts = Counter(str(value))
+    total = sum(counts.values())
+    return -sum((n / total) * math.log2(n / total) for n in counts.values())

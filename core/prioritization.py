@@ -13,9 +13,11 @@ SEVERITY_FROM_SCORE = (
 # Confidence is about proof on THIS host. A TENTATIVE guess must never
 # outrank a CONFIRMED hit, no matter what its raw score says. KEV
 # membership bypasses the discount: CISA KEV means exploited in the wild,
-# which is confirmation — just not on this host. (Keyword-matched KEV
-# without version proof is a matcher bug, fixed in exploit_lookup, not
-# something the scorer can see.)
+# which is confirmation — just not on this host. The KEV signal is the
+# exact exploit_lookup category (or a structured flag), never a substring:
+# any prose containing "known exploited" used to bypass the discount, cap,
+# and unlock CRITICAL promotion on vocabulary alone.
+KEV_CATEGORY = "known exploited vulnerability"
 CONFIDENCE_DISCOUNT = {
     "CONFIRMED": 1.0,
     "FIRM": 0.85,
@@ -47,7 +49,7 @@ def prioritize_findings(findings: list[dict], scoring_config: dict | None = None
         kev = bool(
             intelligence.get("kev")
             or finding.get("kev")
-            or "known exploited" in str(finding.get("category", "")).lower()
+            or str(finding.get("category", "")).lower() == KEV_CATEGORY
         )
         exposure = _exposure_score(finding)
 
@@ -71,8 +73,13 @@ def prioritize_findings(findings: list[dict], scoring_config: dict | None = None
         score = max(existing_score, score)
 
         confidence = str(finding.get("confidence", "TENTATIVE")).upper()
+        # verified means "something ran", not "proof is strong": the
+        # executor files verified for any successful action, including
+        # TENTATIVE ones. Only verified + real confidence skips the
+        # discount; verified + TENTATIVE is still a guess.
         confirmed = (
-            bool(finding.get("verified"))
+            (bool(finding.get("verified"))
+             and confidence in ("CONFIRMED", "FIRM"))
             or confidence == "CONFIRMED"
             or kev
         )
@@ -114,7 +121,7 @@ def prioritize_findings(findings: list[dict], scoring_config: dict | None = None
         key=lambda item: (
             bool(item.get("verified")),
             int(item.get("risk_score") or 0),
-            str(item.get("severity", "")),
+            _SEVERITY_RANK.get(str(item.get("severity", "")).upper(), 0),
             str(item.get("created_at", "")),
         ),
         reverse=True,
@@ -122,10 +129,17 @@ def prioritize_findings(findings: list[dict], scoring_config: dict | None = None
     return prioritized
 
 
+_SEVERITY_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
 def _exposure_score(finding: dict) -> float:
     asset_keys = finding.get("asset_keys", []) or []
     category = str(finding.get("category", "")).lower()
     score = 0.0
+    # The blanket +0.35 for any asset key is crude, but it funds the KEV
+    # promotion path (a 9.8/0.8/kev intel set needs exposure >= ~0.7 to
+    # reach P0), and pinned tests depend on it. Redesign exposure as a
+    # real Internet-facing measure separately; don't starve promotion here.
     if asset_keys:
         score += 0.35
     if any(str(key).startswith(("webapp:", "url:", "ip:", "bucket:", "cloud:")) for key in asset_keys):

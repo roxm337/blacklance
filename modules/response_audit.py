@@ -22,6 +22,16 @@ from modules.base import BaseModule
 from tools.wrappers import curl
 
 
+_SELF_PATH_HINTS = ("/me", "/profile", "/account", "/self", "/users/me")
+
+
+def _looks_self_endpoint(url: str) -> bool:
+    """Is this the caller's own record (your email coming back to you)?"""
+    from urllib.parse import urlparse
+    path = urlparse(str(url or "")).path.lower().rstrip("/")
+    return any(path == hint or path.endswith(hint) for hint in _SELF_PATH_HINTS)
+
+
 class ResponseAudit(BaseModule):
     id = "response_audit"
     name = "API Response Key Audit"
@@ -93,6 +103,14 @@ class ResponseAudit(BaseModule):
 
     async def _audit_url(self, url: str, token: str | None) -> bool:
         headers = {"Authorization": f"Bearer {token}"} if token else None
+        if token and _looks_self_endpoint(url):
+            # An authenticated read of your own record (/me, /profile) is
+            # authorization's question, not over-sharing: your own email
+            # coming back to you is what the endpoint is for. That
+            # comparison needs two accounts, which is IDOR's job — the
+            # anonymous probe above still runs, so a /me answering
+            # without auth files as it should.
+            return False
         try:
             result = await curl(url, headers=headers, output="body",
                                 timeout=15)

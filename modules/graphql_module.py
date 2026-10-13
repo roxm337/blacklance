@@ -233,12 +233,14 @@ class GraphQLAudit(BaseModule):
                 if isinstance(b3_data, list) and len(b3_data) > 1:
                     self.state.add_finding(
                         title=f"GraphQL Batch Queries Enabled: {endpoint}",
-                        severity="MEDIUM",
-                        confidence="CONFIRMED",
+                        severity="LOW",
+                        confidence="FIRM",
                         category="API Security",
                         description="GraphQL endpoint accepts batched queries. "
-                                    "Can be used to bypass rate limiting by multiplexing many "
-                                    "queries in a single request.",
+                                    "Batching alone is not rate-limit abuse: "
+                                    "no flood was sent and no authenticated "
+                                    "mutation was driven. Harden before it "
+                                    "becomes a multiplexing oracle.",
                         evidence=[f"Batch response: {str(b3_data)[:300]}"],
                         remediation="Limit batch query size or disable batching in production.",
                         verified=True,
@@ -258,12 +260,13 @@ class GraphQLAudit(BaseModule):
         if '"data"' in b4 or "__typename" in b4:
             self.state.add_finding(
                 title=f"GraphQL Query via GET (CSRF Risk): {endpoint}",
-                severity="MEDIUM",
-                confidence="CONFIRMED",
+                severity="LOW",
+                confidence="FIRM",
                 category="API Security",
-                description="GraphQL endpoint accepts queries via GET request. "
-                            "This enables CSRF attacks against authenticated mutations "
-                            "and may bypass CORS restrictions.",
+                description="GraphQL endpoint answers queries via GET. That "
+                            "is a CSRF shape, not a CSRF proof: no "
+                            "authenticated mutation was driven, so this is "
+                            "hardening, not an exploited state change.",
                 evidence=[f"GET query response: {b4[:200]}"],
                 remediation="Only accept POST requests for GraphQL mutations; "
                             "disable query execution via GET.",

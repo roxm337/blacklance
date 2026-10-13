@@ -318,7 +318,8 @@ class XSSScan(BaseModule):
                 if browser_available:
                     from urllib.parse import quote
                     witness = await _browser_confirms_execution(
-                        url, marker * 2, self.config)
+                        url, marker * 2, self.config,
+                        extra_headers={header_name: payload})
                     if witness:
                         confidence = "CONFIRMED"
                         evidence = (f"Browser DOM contained execution marker "
@@ -393,7 +394,15 @@ async def _playwright_available() -> bool:
         return False
 
 
-async def _browser_confirms_execution(url: str, expected: str, config: dict) -> bool:
+async def _browser_confirms_execution(url: str, expected: str,
+                                        config: dict,
+                                        extra_headers: dict | None = None) -> bool:
+    """Load the URL in headless Chromium and look for the execution marker.
+
+    extra_headers replays the injection vector (e.g. the reflected header):
+    a witness on the bare URL proves nothing about a header-borne payload,
+    and promoting that to CONFIRMED is a false proof.
+    """
     from playwright.async_api import async_playwright
 
     auth = config.get("auth", {}) or {}
@@ -402,6 +411,9 @@ async def _browser_confirms_execution(url: str, expected: str, config: dict) -> 
         for k, v in (auth.get("headers") or {}).items()
         if k and v is not None and str(v) != "" and str(k).lower() != "cookie"
     }
+    for k, v in (extra_headers or {}).items():
+        if k and v is not None:
+            headers[str(k)] = str(v)
     bearer = auth.get("bearer_token") or auth.get("token")
     if bearer and "Authorization" not in headers:
         headers["Authorization"] = f"Bearer {bearer}"
