@@ -993,9 +993,21 @@ class MainWindow(QMainWindow):
         self.nuclei_max_age_spin.setValue(30)
         self.nuclei_max_age_spin.setSuffix(" d")
         self.nuclei_max_age_spin.setToolTip("Warn past this template age.")
+        self.nuclei_batch_seconds_spin = QSpinBox()
+        self.nuclei_batch_seconds_spin.setRange(30, 1200)
+        self.nuclei_batch_seconds_spin.setValue(150)
+        self.nuclei_batch_seconds_spin.setSuffix(" s")
+        self.nuclei_batch_seconds_spin.setToolTip("Time-box per template batch.")
+        self.nuclei_max_seconds_spin = QSpinBox()
+        self.nuclei_max_seconds_spin.setRange(0, 3600)
+        self.nuclei_max_seconds_spin.setValue(0)
+        self.nuclei_max_seconds_spin.setSuffix(" s")
+        self.nuclei_max_seconds_spin.setToolTip("Whole-pass time-box (0 = module deadline minus 60s).")
         nuclei_form.addRow("", self.nuclei_full_cve_check)
         nuclei_form.addRow("", self.nuclei_update_check)
         nuclei_form.addRow("Max template age", self.nuclei_max_age_spin)
+        nuclei_form.addRow("Batch seconds", self.nuclei_batch_seconds_spin)
+        nuclei_form.addRow("Max seconds (0=auto)", self.nuclei_max_seconds_spin)
         layout.addWidget(nuclei_box)
 
         sqli_box = QGroupBox("Blind SQLi (OAST)")
@@ -1101,10 +1113,16 @@ class MainWindow(QMainWindow):
         self.crawl_max_identities_spin = QSpinBox()
         self.crawl_max_identities_spin.setRange(0, 5)
         self.crawl_max_identities_spin.setValue(2)
+        self.crawl_wait_ms_spin = QSpinBox()
+        self.crawl_wait_ms_spin.setRange(0, 10000)
+        self.crawl_wait_ms_spin.setValue(1500)
+        self.crawl_wait_ms_spin.setSuffix(" ms")
+        self.crawl_wait_ms_spin.setToolTip("Render wait per page (clamped at 10s).")
         crawl_form.addRow("", self.crawl_enabled_check)
         crawl_form.addRow("Max pages", self.crawl_max_pages_spin)
         crawl_form.addRow("Depth", self.crawl_depth_spin)
         crawl_form.addRow("Max identities", self.crawl_max_identities_spin)
+        crawl_form.addRow("Render wait", self.crawl_wait_ms_spin)
         layout.addWidget(crawl_box)
 
         logic_box = QGroupBox("Business Logic")
@@ -1119,8 +1137,12 @@ class MainWindow(QMainWindow):
         self.logic_max_probes_spin = QSpinBox()
         self.logic_max_probes_spin.setRange(1, 40)
         self.logic_max_probes_spin.setValue(12)
+        self.logic_endpoints_text = QPlainTextEdit()
+        self.logic_endpoints_text.setPlaceholderText("Cart/order endpoints, one per line (empty = recon)")
+        self.logic_endpoints_text.setMaximumHeight(70)
         logic_form.addRow("", self.logic_enabled_check)
         logic_form.addRow("Max probes", self.logic_max_probes_spin)
+        logic_form.addRow("Endpoints", self.logic_endpoints_text)
         layout.addWidget(logic_box)
 
         idor_box = QGroupBox("IDOR (cross-account)")
@@ -1150,15 +1172,57 @@ class MainWindow(QMainWindow):
         self.idor_allow_destructive_check.setToolTip("Sends real DELETEs. Only with explicit authorisation.")
         self.idor_id_probing_check = QCheckBox("Probe neighbouring IDs (other people's records)")
         self.idor_id_probing_check.setToolTip("Opt-in and bounded; reaches data belonging to accounts you do not control.")
+        self.idor_probe_radius_spin = QSpinBox()
+        self.idor_probe_radius_spin.setRange(1, 50)
+        self.idor_probe_radius_spin.setValue(3)
+        self.idor_probe_radius_spin.setToolTip("How far from each known reference to try.")
+        self.idor_probe_max_spin = QSpinBox()
+        self.idor_probe_max_spin.setRange(1, 500)
+        self.idor_probe_max_spin.setValue(20)
+        self.idor_probe_max_spin.setToolTip("Hard ceiling on neighbouring-ID requests.")
+        self.idor_refs_spin = QSpinBox()
+        self.idor_refs_spin.setRange(1, 100)
+        self.idor_refs_spin.setValue(12)
+        self.idor_refs_spin.setToolTip("References tried per unlisted shape.")
+        self.idor_fetches_spin = QSpinBox()
+        self.idor_fetches_spin.setRange(1, 200)
+        self.idor_fetches_spin.setValue(24)
+        self.idor_total_fetches_spin = QSpinBox()
+        self.idor_total_fetches_spin.setRange(1, 2000)
+        self.idor_total_fetches_spin.setValue(240)
+        self.idor_misses_spin = QSpinBox()
+        self.idor_misses_spin.setRange(1, 100)
+        self.idor_misses_spin.setValue(6)
+        self.idor_misses_spin.setToolTip("Consecutive unknown IDs, then move on.")
+        self.idor_collection_paths_text = QPlainTextEdit()
+        self.idor_collection_paths_text.setPlaceholderText("Extra collection paths, one per line")
+        self.idor_collection_paths_text.setMaximumHeight(60)
+        self.idor_api_prefixes_text = QLineEdit()
+        self.idor_api_prefixes_text.setPlaceholderText("e.g. /api, /api/v1 (empty = built-in)")
+        self.idor_account_endpoint_text = QLineEdit()
+        self.idor_account_endpoint_text.setPlaceholderText("Page identifying the requesting account")
+        self.idor_resources_text = QPlainTextEdit()
+        self.idor_resources_text.setPlaceholderText("Resource names, one per line (empty = built-in)")
+        self.idor_resources_text.setMaximumHeight(60)
         idor_form.addRow("Endpoints", self.idor_endpoints_text)
         idor_form.addRow("Max probes/template", self.idor_max_probes_spin)
         idor_form.addRow("", self.idor_object_probe_check)
+        idor_form.addRow("Probe refs/shape", self.idor_refs_spin)
+        idor_form.addRow("Fetches/shape", self.idor_fetches_spin)
+        idor_form.addRow("Total fetches", self.idor_total_fetches_spin)
+        idor_form.addRow("Stop after misses", self.idor_misses_spin)
         idor_form.addRow("", self.idor_probe_collections_check)
         idor_form.addRow("Max collections", self.idor_max_collections_spin)
+        idor_form.addRow("Collection paths", self.idor_collection_paths_text)
+        idor_form.addRow("API prefixes", self.idor_api_prefixes_text)
+        idor_form.addRow("Resources", self.idor_resources_text)
+        idor_form.addRow("Account endpoint", self.idor_account_endpoint_text)
         idor_form.addRow("", self.idor_test_anonymous_check)
         idor_form.addRow("Write methods", self.idor_write_methods_text)
         idor_form.addRow("", self.idor_allow_destructive_check)
         idor_form.addRow("", self.idor_id_probing_check)
+        idor_form.addRow("Probe radius", self.idor_probe_radius_spin)
+        idor_form.addRow("Probe max", self.idor_probe_max_spin)
         layout.addWidget(idor_box)
 
         mass_box = QGroupBox("Mass Assignment (own account writes)")
@@ -1194,9 +1258,72 @@ class MainWindow(QMainWindow):
         self.proto_endpoints_text = QPlainTextEdit()
         self.proto_endpoints_text.setPlaceholderText("JSON endpoints, one per line (empty = usual shapes)")
         self.proto_endpoints_text.setMaximumHeight(70)
+        self.proto_reflect_input = QLineEdit()
+        self.proto_reflect_input.setPlaceholderText("Proof endpoint returning a fresh object")
+        self.proto_methods_text = QLineEdit()
+        self.proto_methods_text.setPlaceholderText("e.g. POST, PUT (empty = defaults)")
+        self.proto_payloads_text = QPlainTextEdit()
+        self.proto_payloads_text.setPlaceholderText("Payloads, one per line (empty = built-in)")
+        self.proto_payloads_text.setMaximumHeight(60)
         proto_form.addRow("", self.proto_enabled_check)
         proto_form.addRow("Endpoints", self.proto_endpoints_text)
+        proto_form.addRow("Reflect endpoint", self.proto_reflect_input)
+        proto_form.addRow("Methods", self.proto_methods_text)
+        proto_form.addRow("Payloads", self.proto_payloads_text)
         layout.addWidget(proto_box)
+
+        misconfig_box = QGroupBox("Misconfiguration Probes")
+        misconfig_form = QFormLayout(misconfig_box)
+        self.misconfig_timeout_spin = QSpinBox()
+        self.misconfig_timeout_spin.setRange(1, 60)
+        self.misconfig_timeout_spin.setValue(5)
+        self.misconfig_timeout_spin.setSuffix(" s")
+        self.misconfig_concurrency_spin = QSpinBox()
+        self.misconfig_concurrency_spin.setRange(1, 50)
+        self.misconfig_concurrency_spin.setValue(12)
+        self.misconfig_max_paths_spin = QSpinBox()
+        self.misconfig_max_paths_spin.setRange(1, 2000)
+        self.misconfig_max_paths_spin.setValue(160)
+        self.misconfig_max_empty_spin = QSpinBox()
+        self.misconfig_max_empty_spin.setRange(1, 500)
+        self.misconfig_max_empty_spin.setValue(60)
+        self.misconfig_max_empty_spin.setToolTip("Stop after N consecutive misses.")
+        self.misconfig_progress_spin = QSpinBox()
+        self.misconfig_progress_spin.setRange(1, 500)
+        self.misconfig_progress_spin.setValue(25)
+        self.misconfig_progress_spin.setToolTip("Log progress every N paths.")
+        misconfig_form.addRow("Timeout", self.misconfig_timeout_spin)
+        misconfig_form.addRow("Concurrency", self.misconfig_concurrency_spin)
+        misconfig_form.addRow("Max paths", self.misconfig_max_paths_spin)
+        misconfig_form.addRow("Max empty", self.misconfig_max_empty_spin)
+        misconfig_form.addRow("Progress every", self.misconfig_progress_spin)
+        layout.addWidget(misconfig_box)
+
+        injection_box = QGroupBox("Injection Probes (SSTI/NoSQL/DOM/Params)")
+        injection_form = QFormLayout(injection_box)
+        self.ssti_max_points_spin = QSpinBox()
+        self.ssti_max_points_spin.setRange(1, 200)
+        self.ssti_max_points_spin.setValue(40)
+        self.nosql_max_points_spin = QSpinBox()
+        self.nosql_max_points_spin.setRange(1, 200)
+        self.nosql_max_points_spin.setValue(40)
+        self.dom_max_pages_spin = QSpinBox()
+        self.dom_max_pages_spin.setRange(1, 200)
+        self.dom_max_pages_spin.setValue(25)
+        self.param_seed_check = QCheckBox("Seed reflection probes when none discovered")
+        self.param_seed_check.setChecked(True)
+        self.param_seed_targets_spin = QSpinBox()
+        self.param_seed_targets_spin.setRange(1, 100)
+        self.param_seed_targets_spin.setValue(10)
+        self.param_seed_params_text = QLineEdit()
+        self.param_seed_params_text.setPlaceholderText("Extra names, comma-separated")
+        injection_form.addRow("SSTI max points", self.ssti_max_points_spin)
+        injection_form.addRow("NoSQL max points", self.nosql_max_points_spin)
+        injection_form.addRow("DOM max pages", self.dom_max_pages_spin)
+        injection_form.addRow("", self.param_seed_check)
+        injection_form.addRow("Seed targets", self.param_seed_targets_spin)
+        injection_form.addRow("Seed params", self.param_seed_params_text)
+        layout.addWidget(injection_box)
 
         smuggling_box = QGroupBox("HTTP Smuggling")
         smuggling_form = QFormLayout(smuggling_box)
@@ -3214,6 +3341,15 @@ class MainWindow(QMainWindow):
                     self.nuclei_max_age_spin.setValue(int(nuclei.get("max_age_days", 30) or 30))
                 except (TypeError, ValueError):
                     self.nuclei_max_age_spin.setValue(30)
+            if hasattr(self, "nuclei_batch_seconds_spin"):
+                try:
+                    self.nuclei_batch_seconds_spin.setValue(int(nuclei.get("batch_seconds", 150) or 150))
+                except (TypeError, ValueError):
+                    self.nuclei_batch_seconds_spin.setValue(150)
+                try:
+                    self.nuclei_max_seconds_spin.setValue(int(nuclei.get("max_seconds") or 0))
+                except (TypeError, ValueError):
+                    self.nuclei_max_seconds_spin.setValue(0)
 
         kr_cfg = ((config.get("modules", {}) or {}).get("content_discovery", {})
                   or {}).get("kiterunner", {})
@@ -3262,7 +3398,8 @@ class MainWindow(QMainWindow):
             for widget, key, default in (
                     (self.crawl_max_pages_spin, "max_targets", 8),
                     (self.crawl_depth_spin, "depth", 1),
-                    (self.crawl_max_identities_spin, "max_identities", 2)):
+                    (self.crawl_max_identities_spin, "max_identities", 2),
+                    (self.crawl_wait_ms_spin, "wait_ms", 1500)):
                 try:
                     widget.setValue(int(crawl_cfg.get(key, default) or default))
                 except (TypeError, ValueError):
@@ -3277,16 +3414,18 @@ class MainWindow(QMainWindow):
                 self.logic_max_probes_spin.setValue(int(logic_cfg.get("max_probes", 12) or 12))
             except (TypeError, ValueError):
                 self.logic_max_probes_spin.setValue(12)
+            if hasattr(self, "logic_endpoints_text"):
+                self.logic_endpoints_text.setPlainText(self._list_to_text(logic_cfg.get("endpoints", [])))
 
         if hasattr(self, "idor_endpoints_text"):
             idor_cfg = self._module_section(config, "idor_differ")
             self.idor_endpoints_text.setPlainText(self._list_to_text(idor_cfg.get("endpoints", [])))
-            self._set_spin(self.idor_max_probes_spin, idor_cfg.get("max_probes_per_template"), 15)
+            self._note_spin_clamp(self._set_spin(self.idor_max_probes_spin, idor_cfg.get("max_probes_per_template"), 15), "idor max_probes_per_template")
             obj_probe = idor_cfg.get("object_probe", {})
             obj_probe = obj_probe if isinstance(obj_probe, dict) else {}
             self.idor_object_probe_check.setChecked(bool(obj_probe.get("enabled", True)))
             self.idor_probe_collections_check.setChecked(bool(idor_cfg.get("probe_collections", True)))
-            self._set_spin(self.idor_max_collections_spin, idor_cfg.get("max_collections"), 60)
+            self._note_spin_clamp(self._set_spin(self.idor_max_collections_spin, idor_cfg.get("max_collections"), 60), "idor max_collections")
             self.idor_test_anonymous_check.setChecked(bool(idor_cfg.get("test_anonymous", False)))
             methods = idor_cfg.get("test_write_methods", [])
             self.idor_write_methods_text.setText(", ".join(str(m) for m in (methods or [])))
@@ -3294,6 +3433,24 @@ class MainWindow(QMainWindow):
             id_probing = idor_cfg.get("id_probing", {})
             id_probing = id_probing if isinstance(id_probing, dict) else {}
             self.idor_id_probing_check.setChecked(bool(id_probing.get("enabled", False)))
+            if hasattr(self, "idor_probe_radius_spin"):
+                try:
+                    self.idor_probe_radius_spin.setValue(int(id_probing.get("radius", 3) or 3))
+                except (TypeError, ValueError):
+                    self.idor_probe_radius_spin.setValue(3)
+                try:
+                    self.idor_probe_max_spin.setValue(int(id_probing.get("max", 20) or 20))
+                except (TypeError, ValueError):
+                    self.idor_probe_max_spin.setValue(20)
+                self._note_spin_clamp(self._set_spin(self.idor_refs_spin, obj_probe.get("max_refs"), 12), "idor object_probe.max_refs")
+                self._note_spin_clamp(self._set_spin(self.idor_fetches_spin, obj_probe.get("max_fetches"), 24), "idor object_probe.max_fetches")
+                self._note_spin_clamp(self._set_spin(self.idor_total_fetches_spin, obj_probe.get("max_total_fetches"), 240), "idor object_probe.max_total_fetches")
+                self._note_spin_clamp(self._set_spin(self.idor_misses_spin, obj_probe.get("stop_after_misses"), 6), "idor object_probe.stop_after_misses")
+                self.idor_collection_paths_text.setPlainText(self._list_to_text(idor_cfg.get("collection_paths", [])))
+                prefixes = idor_cfg.get("api_prefixes", [])
+                self.idor_api_prefixes_text.setText(", ".join(str(p) for p in (prefixes or [])))
+                self.idor_account_endpoint_text.setText(str(idor_cfg.get("account_endpoint", "") or ""))
+                self.idor_resources_text.setPlainText(self._list_to_text(idor_cfg.get("resources", [])))
 
         if hasattr(self, "mass_enabled_check"):
             mass_cfg = self._module_section(config, "mass_assignment")
@@ -3309,11 +3466,54 @@ class MainWindow(QMainWindow):
             proto_cfg = self._module_section(config, "prototype_pollution")
             self.proto_enabled_check.setChecked(bool(proto_cfg.get("enabled", True)))
             self.proto_endpoints_text.setPlainText(self._list_to_text(proto_cfg.get("endpoints", [])))
+            if hasattr(self, "proto_reflect_input"):
+                self.proto_reflect_input.setText(str(proto_cfg.get("reflect_endpoint", "") or ""))
+                methods = proto_cfg.get("methods", [])
+                self.proto_methods_text.setText(", ".join(str(m) for m in (methods or [])))
+                self.proto_payloads_text.setPlainText(self._list_to_text(proto_cfg.get("payloads", [])))
+
+        if hasattr(self, "misconfig_timeout_spin"):
+            mis_cfg = self._module_section(config, "misconfig_probes")
+            for widget, key, default in (
+                    (self.misconfig_timeout_spin, "timeout", 5),
+                    (self.misconfig_concurrency_spin, "concurrency", 12),
+                    (self.misconfig_max_paths_spin, "max_paths", 160),
+                    (self.misconfig_max_empty_spin, "max_consecutive_empty", 60),
+                    (self.misconfig_progress_spin, "progress_every", 25)):
+                try:
+                    widget.setValue(int(mis_cfg.get(key, default) or default))
+                except (TypeError, ValueError):
+                    widget.setValue(default)
+
+        if hasattr(self, "ssti_max_points_spin"):
+            ssti_cfg = self._module_section(config, "ssti_scan")
+            nosql_cfg = self._module_section(config, "nosql_scan")
+            dom_cfg = self._module_section(config, "dom_xss_scan")
+            param_cfg = self._module_section(config, "parameter_discovery")
+            try:
+                self.ssti_max_points_spin.setValue(int(ssti_cfg.get("max_points", 40) or 40))
+            except (TypeError, ValueError):
+                self.ssti_max_points_spin.setValue(40)
+            try:
+                self.nosql_max_points_spin.setValue(int(nosql_cfg.get("max_points", 40) or 40))
+            except (TypeError, ValueError):
+                self.nosql_max_points_spin.setValue(40)
+            try:
+                self.dom_max_pages_spin.setValue(int(dom_cfg.get("max_pages", 25) or 25))
+            except (TypeError, ValueError):
+                self.dom_max_pages_spin.setValue(25)
+            self.param_seed_check.setChecked(bool(param_cfg.get("seed_when_empty", True)))
+            try:
+                self.param_seed_targets_spin.setValue(int(param_cfg.get("seed_targets", 10) or 10))
+            except (TypeError, ValueError):
+                self.param_seed_targets_spin.setValue(10)
+            seed_params = param_cfg.get("seed_params", [])
+            self.param_seed_params_text.setText(", ".join(str(p) for p in (seed_params or [])))
 
         if hasattr(self, "smuggling_enabled_check"):
             smuggling_cfg = self._module_section(config, "http_smuggling")
             self.smuggling_enabled_check.setChecked(bool(smuggling_cfg.get("enabled", True)))
-            self._set_spin(self.smuggling_max_targets_spin, smuggling_cfg.get("max_targets"), 10)
+            self._note_spin_clamp(self._set_spin(self.smuggling_max_targets_spin, smuggling_cfg.get("max_targets"), 10), "http_smuggling max_targets")
 
         if hasattr(self, "redirect_enabled_check"):
             redirect_cfg = self._module_section(config, "open_redirect")
@@ -3321,12 +3521,12 @@ class MainWindow(QMainWindow):
             params = redirect_cfg.get("params", [])
             self.redirect_params_text.setText(", ".join(str(p) for p in (params or [])))
             self.redirect_endpoints_text.setPlainText(self._list_to_text(redirect_cfg.get("endpoints", [])))
-            self._set_spin(self.redirect_max_targets_spin, redirect_cfg.get("max_targets"), 40)
+            self._note_spin_clamp(self._set_spin(self.redirect_max_targets_spin, redirect_cfg.get("max_targets"), 40), "open_redirect max_targets")
 
         if hasattr(self, "cms_enabled_check"):
             cms_cfg = self._module_section(config, "cms_deep_scan")
             self.cms_enabled_check.setChecked(bool(cms_cfg.get("enabled", True)))
-            self._set_spin(self.cms_max_targets_spin, cms_cfg.get("max_targets"), 5)
+            self._note_spin_clamp(self._set_spin(self.cms_max_targets_spin, cms_cfg.get("max_targets"), 5), "cms max_targets")
 
         if hasattr(self, "content_enabled_check"):
             content_cfg = self._module_section(config, "content_discovery")
@@ -3336,7 +3536,7 @@ class MainWindow(QMainWindow):
             cors_cfg = self._module_section(config, "cors_audit")
             self.cors_enabled_check.setChecked(bool(cors_cfg.get("enabled", True)))
             self.cors_endpoints_text.setPlainText(self._list_to_text(cors_cfg.get("endpoints", [])))
-            self._set_spin(self.cors_max_endpoints_spin, cors_cfg.get("max_endpoints"), 20)
+            self._note_spin_clamp(self._set_spin(self.cors_max_endpoints_spin, cors_cfg.get("max_endpoints"), 20), "cors max_endpoints")
 
         if hasattr(self, "auth_test_password_check"):
             auth_cfg = self._module_section(config, "auth_audit")
@@ -3375,6 +3575,7 @@ class MainWindow(QMainWindow):
         self._refresh_key_status()
         self._refresh_tools_status()
         self._update_operation_context()
+        self._report_spin_clamps()
 
     def _save_settings_form(self):
         config = self._read_config()
@@ -3456,26 +3657,36 @@ class MainWindow(QMainWindow):
                 ]
 
         if hasattr(self, "xss_browser_confirm_check"):
-            config["xss"].update({
+            xss_cfg = self._ensure_module_section(config, "xss_scan")
+            xss_cfg.update({
                 "browser_confirm": self.xss_browser_confirm_check.isChecked(),
                 "max_points": self.xss_max_points_spin.value(),
                 "dalfox_timeout": self.xss_dalfox_timeout_spin.value(),
             })
             if hasattr(self, "xss_dalfox_blind_oob_check"):
-                config["xss"].update({
+                xss_cfg.update({
                     "dalfox_blind_oob": self.xss_dalfox_blind_oob_check.isChecked(),
                     "dalfox_rate_limit": self.xss_dalfox_rate_spin.value(),
                 })
 
         if hasattr(self, "nuclei_full_cve_check"):
-            config["nuclei"].update({
+            nuclei_cfg = self._ensure_module_section(config, "nuclei_scan")
+            nuclei_cfg.update({
                 "full_cve_on_confirmed_apex": self.nuclei_full_cve_check.isChecked(),
             })
             if hasattr(self, "nuclei_update_check"):
-                config["nuclei"].update({
+                nuclei_cfg.update({
                     "update_templates": self.nuclei_update_check.isChecked(),
                     "max_age_days": self.nuclei_max_age_spin.value(),
                 })
+            if hasattr(self, "nuclei_batch_seconds_spin"):
+                nuclei_cfg.update({
+                    "batch_seconds": self.nuclei_batch_seconds_spin.value(),
+                })
+                if self.nuclei_max_seconds_spin.value():
+                    nuclei_cfg["max_seconds"] = self.nuclei_max_seconds_spin.value()
+                else:
+                    nuclei_cfg.pop("max_seconds", None)
 
         if hasattr(self, "sqli_oast_check"):
             config.setdefault("modules", {})
@@ -3488,7 +3699,8 @@ class MainWindow(QMainWindow):
             sqli_cfg["oast"] = self.sqli_oast_check.isChecked()
 
         if hasattr(self, "fast_scan_paths_input"):
-            config["fast_scan"].update({
+            fast_cfg = self._ensure_module_section(config, "fast_exposure_scan")
+            fast_cfg.update({
                 "paths": self._text_to_list(self.fast_scan_paths_input.toPlainText()),
                 "timeout": self.fast_scan_timeout_spin.value(),
                 "concurrency": self.fast_scan_concurrency_spin.value(),
@@ -3516,14 +3728,17 @@ class MainWindow(QMainWindow):
             cd_cfg = modules_cfg.get("content_discovery")
             if not isinstance(cd_cfg, dict):
                 cd_cfg = modules_cfg["content_discovery"] = {}
-            cd_cfg["kiterunner"] = {
+            kr_cfg = cd_cfg.get("kiterunner")
+            if not isinstance(kr_cfg, dict):
+                kr_cfg = cd_cfg["kiterunner"] = {}
+            kr_cfg.update({
                 "enabled": self.kr_enabled_check.isChecked(),
                 "wordlist": self.kr_wordlist_input.text().strip() or "apiroutes-260227",
                 "max_routes": self.kr_max_routes_spin.value(),
                 "max_targets": self.kr_max_targets_spin.value(),
-            }
+            })
             if hasattr(self, "kr_delay_spin"):
-                cd_cfg["kiterunner"].update({
+                kr_cfg.update({
                     "delay_ms": self.kr_delay_spin.value(),
                     "connections": self.kr_connections_spin.value(),
                 })
@@ -3562,6 +3777,8 @@ class MainWindow(QMainWindow):
                 "depth": self.crawl_depth_spin.value(),
                 "max_identities": self.crawl_max_identities_spin.value(),
             })
+            if hasattr(self, "crawl_wait_ms_spin"):
+                browser_cfg["wait_ms"] = self.crawl_wait_ms_spin.value()
 
         if hasattr(self, "logic_enabled_check"):
             config.setdefault("modules", {})
@@ -3575,6 +3792,9 @@ class MainWindow(QMainWindow):
                 "enabled": self.logic_enabled_check.isChecked(),
                 "max_probes": self.logic_max_probes_spin.value(),
             })
+            if hasattr(self, "logic_endpoints_text"):
+                logic_cfg["endpoints"] = self._text_to_list(
+                    self.logic_endpoints_text.toPlainText())
 
         if hasattr(self, "idor_endpoints_text"):
             idor_cfg = self._ensure_module_section(config, "idor_differ")
@@ -3593,10 +3813,40 @@ class MainWindow(QMainWindow):
             if not isinstance(obj_probe, dict):
                 obj_probe = idor_cfg["object_probe"] = {}
             obj_probe["enabled"] = self.idor_object_probe_check.isChecked()
+            if hasattr(self, "idor_refs_spin"):
+                obj_probe.update({
+                    "max_refs": self.idor_refs_spin.value(),
+                    "max_fetches": self.idor_fetches_spin.value(),
+                    "max_total_fetches": self.idor_total_fetches_spin.value(),
+                    "stop_after_misses": self.idor_misses_spin.value(),
+                })
+                idor_cfg["collection_paths"] = self._text_to_list(
+                    self.idor_collection_paths_text.toPlainText())
+                prefixes = [p.strip() for p in
+                            self.idor_api_prefixes_text.text().split(",")
+                            if p.strip()]
+                if prefixes:
+                    idor_cfg["api_prefixes"] = prefixes
+                else:
+                    idor_cfg.pop("api_prefixes", None)
+                account = self.idor_account_endpoint_text.text().strip()
+                if account:
+                    idor_cfg["account_endpoint"] = account
+                else:
+                    idor_cfg.pop("account_endpoint", None)
+                resources = self._text_to_list(
+                    self.idor_resources_text.toPlainText())
+                if resources:
+                    idor_cfg["resources"] = resources
+                else:
+                    idor_cfg.pop("resources", None)
             id_probing = idor_cfg.get("id_probing")
             if not isinstance(id_probing, dict):
                 id_probing = idor_cfg["id_probing"] = {}
             id_probing["enabled"] = self.idor_id_probing_check.isChecked()
+            if hasattr(self, "idor_probe_radius_spin"):
+                id_probing["radius"] = self.idor_probe_radius_spin.value()
+                id_probing["max"] = self.idor_probe_max_spin.value()
 
         if hasattr(self, "mass_enabled_check"):
             mass_cfg = self._ensure_module_section(config, "mass_assignment")
@@ -3616,6 +3866,51 @@ class MainWindow(QMainWindow):
                 "enabled": self.proto_enabled_check.isChecked(),
                 "endpoints": self._text_to_list(self.proto_endpoints_text.toPlainText()),
             })
+            if hasattr(self, "proto_reflect_input"):
+                reflect = self.proto_reflect_input.text().strip()
+                if reflect:
+                    proto_cfg["reflect_endpoint"] = reflect
+                else:
+                    proto_cfg.pop("reflect_endpoint", None)
+                methods = [m.strip().upper() for m in
+                           self.proto_methods_text.text().split(",") if m.strip()]
+                if methods:
+                    proto_cfg["methods"] = methods
+                else:
+                    proto_cfg.pop("methods", None)
+                payloads = self._text_to_list(self.proto_payloads_text.toPlainText())
+                if payloads:
+                    proto_cfg["payloads"] = payloads
+                else:
+                    proto_cfg.pop("payloads", None)
+
+        if hasattr(self, "misconfig_timeout_spin"):
+            mis_cfg = self._ensure_module_section(config, "misconfig_probes")
+            mis_cfg.update({
+                "timeout": self.misconfig_timeout_spin.value(),
+                "concurrency": self.misconfig_concurrency_spin.value(),
+                "max_paths": self.misconfig_max_paths_spin.value(),
+                "max_consecutive_empty": self.misconfig_max_empty_spin.value(),
+                "progress_every": self.misconfig_progress_spin.value(),
+            })
+
+        if hasattr(self, "ssti_max_points_spin"):
+            ssti_cfg = self._ensure_module_section(config, "ssti_scan")
+            ssti_cfg["max_points"] = self.ssti_max_points_spin.value()
+            nosql_cfg = self._ensure_module_section(config, "nosql_scan")
+            nosql_cfg["max_points"] = self.nosql_max_points_spin.value()
+            dom_cfg = self._ensure_module_section(config, "dom_xss_scan")
+            dom_cfg["max_pages"] = self.dom_max_pages_spin.value()
+            param_cfg = self._ensure_module_section(config, "parameter_discovery")
+            param_cfg["seed_when_empty"] = self.param_seed_check.isChecked()
+            param_cfg["seed_targets"] = self.param_seed_targets_spin.value()
+            seed_params = [p.strip() for p in
+                           self.param_seed_params_text.text().split(",")
+                           if p.strip()]
+            if seed_params:
+                param_cfg["seed_params"] = seed_params
+            else:
+                param_cfg.pop("seed_params", None)
 
         if hasattr(self, "smuggling_enabled_check"):
             smuggling_cfg = self._ensure_module_section(config, "http_smuggling")
@@ -3830,14 +4125,41 @@ class MainWindow(QMainWindow):
         return section
 
     @staticmethod
-    def _set_spin(spin: QSpinBox, value, default: int):
+    def _set_spin(spin: QSpinBox, value, default: int) -> bool:
+        """Load a value into a spin box. Returns True when the file value
+        fell outside the widget range and was clamped: saving afterwards
+        would otherwise rewrite the config with the clamped value and no
+        warning. Callers stash the note via _note_spin_clamp."""
         if value in (None, ""):
             spin.setValue(default)
-            return
+            return False
         try:
-            spin.setValue(int(value))
+            number = int(value)
         except (TypeError, ValueError):
             spin.setValue(default)
+            return False
+        clamped = number < spin.minimum() or number > spin.maximum()
+        spin.setValue(number)
+        if clamped:
+            spin.setProperty("clamped_from", number)
+        else:
+            spin.setProperty("clamped_from", None)
+        return clamped
+
+    def _note_spin_clamp(self, clamped: bool, label: str) -> None:
+        if clamped:
+            notes = getattr(self, "_spin_clamp_notes", None)
+            if notes is None:
+                notes = self._spin_clamp_notes = []
+            notes.append(label)
+
+    def _report_spin_clamps(self) -> None:
+        notes = getattr(self, "_spin_clamp_notes", []) or []
+        self._spin_clamp_notes = []
+        if notes:
+            self.statusBar().showMessage(
+                f"Config values clamped to widget range: {', '.join(notes)} "
+                f"(file values kept only if you edit them back)", 8000)
 
     def _headers_to_text(self, headers: dict) -> str:
         if not isinstance(headers, dict):
@@ -3846,15 +4168,25 @@ class MainWindow(QMainWindow):
 
     def _text_to_headers(self, text: str) -> dict:
         headers = {}
+        dropped = []
         for line in text.splitlines():
             line = line.strip()
-            if not line or ":" not in line:
+            if not line:
+                continue
+            if ":" not in line:
+                dropped.append(line)
                 continue
             key, value = line.split(":", 1)
             key = key.strip()
             value = value.strip()
             if key and value:
                 headers[key] = value
+            else:
+                dropped.append(line)
+        if dropped:
+            self.statusBar().showMessage(
+                f"Ignored {len(dropped)} header line(s) without "
+                f"'Name: value' shape: {', '.join(dropped[:3])}", 8000)
         return headers
 
     def _list_to_text(self, value) -> str:
@@ -3865,12 +4197,10 @@ class MainWindow(QMainWindow):
         return "\n".join(item for item in items if item)
 
     def _text_to_list(self, text: str) -> list[str]:
-        items = []
-        for line in text.replace(",", "\n").splitlines():
-            item = line.strip()
-            if item:
-                items.append(item)
-        return items
+        # Newlines only: splitting on commas corrupts values that contain
+        # them (URLs with query strings, payload lists).
+        return [item.strip() for item in str(text or "").splitlines()
+                if item.strip()]
 
     def _open_evidence_cell(self, row: int, _col: int):
         item = self.evidence_table.item(row, 4)

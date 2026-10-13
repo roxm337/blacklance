@@ -164,6 +164,34 @@ def test_gui_saves_scanner_settings(tmp_path):
     window.nuclei_full_cve_check.setChecked(False)
     window.nuclei_update_check.setChecked(True)
     window.nuclei_max_age_spin.setValue(14)
+    window.nuclei_batch_seconds_spin.setValue(200)
+    window.nuclei_max_seconds_spin.setValue(900)
+    window.crawl_wait_ms_spin.setValue(2500)
+    window.logic_endpoints_text.setPlainText("https://api.example.com/cart")
+    window.idor_probe_radius_spin.setValue(5)
+    window.idor_probe_max_spin.setValue(30)
+    window.idor_refs_spin.setValue(9)
+    window.idor_fetches_spin.setValue(18)
+    window.idor_total_fetches_spin.setValue(120)
+    window.idor_misses_spin.setValue(4)
+    window.idor_collection_paths_text.setPlainText("/api/v1/orders")
+    window.idor_api_prefixes_text.setText("/api, /v2")
+    window.idor_account_endpoint_text.setText("https://api.example.com/me")
+    window.idor_resources_text.setPlainText("invoices")
+    window.proto_reflect_input.setText("https://api.example.com/reflect")
+    window.proto_methods_text.setText("POST")
+    window.proto_payloads_text.setPlainText("__proto__")
+    window.misconfig_timeout_spin.setValue(7)
+    window.misconfig_concurrency_spin.setValue(9)
+    window.misconfig_max_paths_spin.setValue(100)
+    window.misconfig_max_empty_spin.setValue(40)
+    window.misconfig_progress_spin.setValue(20)
+    window.ssti_max_points_spin.setValue(25)
+    window.nosql_max_points_spin.setValue(22)
+    window.dom_max_pages_spin.setValue(15)
+    window.param_seed_check.setChecked(False)
+    window.param_seed_targets_spin.setValue(7)
+    window.param_seed_params_text.setText("debug, trace")
     window.fast_scan_paths_input.setPlainText("/.env\n/.git/config")
     window.fast_scan_timeout_spin.setValue(3)
     window.fast_scan_concurrency_spin.setValue(6)
@@ -212,6 +240,28 @@ def test_gui_saves_scanner_settings(tmp_path):
     assert "full_cve_on_confirmed_apex: false" in saved
     assert "update_templates: true" in saved
     assert "max_age_days: 14" in saved
+    assert "batch_seconds: 200" in saved
+    assert "max_seconds: 900" in saved
+    assert "wait_ms: 2500" in saved
+    assert "https://api.example.com/cart" in saved
+    assert "radius: 5" in saved
+    assert "max_refs: 9" in saved
+    assert "max_fetches: 18" in saved
+    assert "max_total_fetches: 120" in saved
+    assert "stop_after_misses: 4" in saved
+    assert "/api/v1/orders" in saved
+    assert "https://api.example.com/me" in saved
+    assert "invoices" in saved
+    assert "https://api.example.com/reflect" in saved
+    assert "misconfig_probes:" in saved
+    assert "max_consecutive_empty: 40" in saved
+    assert "progress_every: 20" in saved
+    assert "ssti_scan:" in saved
+    assert "nosql_scan:" in saved
+    assert "dom_xss_scan:" in saved
+    assert "max_pages: 15" in saved
+    assert "seed_when_empty: false" in saved
+    assert "seed_targets: 7" in saved
     assert "/.env" in saved
     assert "/.git/config" in saved
     assert "timeout: 3" in saved
@@ -239,6 +289,20 @@ def test_gui_saves_scanner_settings(tmp_path):
     assert window.auth_test_register_check.isChecked()
     assert window.kr_delay_spin.value() == 1000
     assert window.ssrf_max_points_spin.value() == 9
+    assert window.nuclei_batch_seconds_spin.value() == 200
+    assert window.nuclei_max_seconds_spin.value() == 900
+    assert window.crawl_wait_ms_spin.value() == 2500
+    assert window.idor_probe_radius_spin.value() == 5
+    assert window.idor_probe_max_spin.value() == 30
+    assert window.idor_refs_spin.value() == 9
+    assert window.idor_misses_spin.value() == 4
+    assert window.proto_reflect_input.text() == "https://api.example.com/reflect"
+    assert window.misconfig_max_paths_spin.value() == 100
+    assert window.ssti_max_points_spin.value() == 25
+    assert window.nosql_max_points_spin.value() == 22
+    assert window.dom_max_pages_spin.value() == 15
+    assert not window.param_seed_check.isChecked()
+    assert window.param_seed_targets_spin.value() == 7
 
     window.close()
     app.processEvents()
@@ -1035,3 +1099,24 @@ def test_run_screen_keeps_engagement_widgets_reachable():
 
     window.close()
     app.processEvents()
+
+
+def test_spin_clamp_is_reported_not_silent(tmp_path):
+    from PySide6.QtWidgets import QApplication, QSpinBox
+    app = QApplication.instance() or QApplication([])
+    spin = QSpinBox()
+    spin.setRange(1, 100)
+    window = MainWindow()
+    assert window._set_spin(spin, 1000, 15) is True
+    assert spin.value() == 100
+    assert spin.property("clamped_from") == 1000
+    assert window._set_spin(spin, 7, 15) is False
+    assert spin.value() == 7
+    window.close()
+    app.processEvents()
+
+
+def test_text_to_list_keeps_commas_inside_values():
+    window = MainWindow.__new__(MainWindow)
+    assert window._text_to_list("https://h.test/?a=1,b=2\n/x") == \
+        ["https://h.test/?a=1,b=2", "/x"]

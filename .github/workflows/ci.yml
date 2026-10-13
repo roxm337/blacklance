@@ -23,14 +23,52 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # Lean test deps. GUI tests (PySide6) are excluded below as they need a display.
         run: |
           python -m pip install --upgrade pip
           pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm
           pip install pytest pytest-asyncio
+
+      - name: Compile check (3.10 syntax gate)
+        # Catches version-gated syntax (PEP-701 f-strings, match edge
+        # cases) that 3.12 accepts but the 3.10/3.11 matrix must run.
+        run: |
+          python -m py_compile $(git ls-files '*.py')
+
+      - name: Config YAML lint
+        run: |
+          python -c "import yaml; yaml.safe_load(open('config.yaml')); yaml.safe_load(open('config.example.yaml')); print('configs parse')"
+
+      - name: Config coverage (shipped config must be warning-lean)
+        run: |
+          python orchestrator.py -t example.com --check-config
 
       - name: Run test suite (non-GUI)
         run: |
           python -m pytest -q \
             --ignore=tests/test_gui_app.py \
             --ignore=tests/test_gui_graph.py
+
+  test-gui:
+    # Scanner save/load helpers live in the GUI tests; ignoring them let
+    # config-key drift go undetected. Offscreen platform, no display.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm
+          pip install pytest pytest-asyncio PySide6
+
+      - name: Run GUI tests (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -q tests/test_gui_app.py tests/test_gui_graph.py
