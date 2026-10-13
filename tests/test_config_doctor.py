@@ -83,3 +83,22 @@ def test_check_config_runs_nothing(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Config coverage" in out
     assert "tools.backend" in out
+
+
+def test_shipped_config_has_no_silent_default_blocks():
+    """config.yaml must carry every run-shaping block explicitly — a missing
+    block runs on invisible code defaults (kiterunner politeness, budgets,
+    module timeout, IDOR identities)."""
+    import yaml
+
+    with open(Path(__file__).resolve().parent.parent / "config.yaml") as handle:
+        config = yaml.safe_load(handle)
+
+    kr = config["modules"]["content_discovery"]["kiterunner"]
+    assert kr["delay_ms"] == 100
+    assert kr["connections"] == 3
+    assert config["budget_limits"]["max_concurrent_actions"] == 5
+    assert config["module_timeout"] == 300
+    assert config["auth"]["identities"] == {}
+
+

@@ -20,6 +20,9 @@ class ToolInfo:
     available: bool = False
     version: str = ""
     path: str = ""
+    # Binary on PATH when it differs from the definition name
+    # (e.g. kiterunner ships as `kr`). scan() resolves this, not name.
+    binary: str = ""
 
 
 SCOUT = "brew"
@@ -40,8 +43,9 @@ TOOL_DEFINITIONS: list[ToolInfo] = [
              categories=["web", "xss"],
              install_cmd="download the v3 release from https://github.com/hahwul/dalfox/releases"),
     ToolInfo("kiterunner", "Contextual API content discovery (assetnote wordlists)",
-             categories=["web", "api", "fuzzing"],
-             install_cmd="download kr from https://github.com/assetnote/kiterunner/releases"),
+              categories=["web", "api", "fuzzing"],
+              install_cmd="download kr from https://github.com/assetnote/kiterunner/releases",
+              binary="kr"),
     ToolInfo("semgrep", "Static analysis (SAST) over JS/TS bundles",
              categories=["web", "sast", "js"],
              install_cmd="pipx install semgrep"),
@@ -160,11 +164,12 @@ class ToolManager:
     def scan(self) -> dict[str, ToolInfo]:
         """Scan for available tools."""
         for tool in TOOL_DEFINITIONS:
-            path = shutil.which(tool.name)
+            resolved = tool.binary or tool.name
+            path = shutil.which(resolved)
             tool.available = path is not None
             tool.path = path or ""
             if path:
-                tool.version = self._get_version(tool.name)
+                tool.version = self._get_version(resolved)
             self.tools[tool.name] = tool
         self._scanned = True
         return self.tools

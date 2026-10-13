@@ -56,16 +56,22 @@ macOS / Homebrew where available:
 Go tools:
     go install github.com/projectdiscovery/katana/cmd/katana@latest
     go install github.com/lc/gau/v2/cmd/gau@latest
-    go install github.com/hahwul/dalfox/v2@latest
     go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
+
+dalfox v3 is a Rust rewrite — there is no `go install` for it. Fetch the
+static musl binary from the GitHub release (hahwul/dalfox, asset
+dalfox-<tag>-linux-<x86_64|aarch64>-musl.tar.gz) and place `dalfox` on PATH.
+The v2 Go module (github.com/hahwul/dalfox/v2) is retired: v2 rejects the
+engine's v3 flags (`pipe -S -f jsonl --only-poc v`) and exits non-zero with
+zero findings. See docker/Dockerfile.tools for the pinned install.
 
 Python CLI tools:
     pipx install arjun
     pipx install paramspider
 
 Nuclei templates:
-    nuclei -update
     nuclei -update-templates
+(`-update` is deprecated in nuclei v3; the engine only runs `-update-templates`.)
 
 
 ## 4. Crawling, Discovery, and Content Fuzzing
