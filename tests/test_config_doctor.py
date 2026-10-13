@@ -91,7 +91,9 @@ def _shipped_config_paths():
 def test_shipped_config_has_no_silent_default_blocks():
     """Every shipped config must carry every run-shaping block explicitly —
     a missing block runs on invisible code defaults (kiterunner politeness,
-    budgets, module timeout, IDOR identities)."""
+    budgets, module timeout, IDOR identities). Exact values are pinned on
+    the example; the operator file may legitimately tune them, so presence
+    is enough there."""
     import yaml
 
     for path in _shipped_config_paths():
@@ -99,11 +101,17 @@ def test_shipped_config_has_no_silent_default_blocks():
             config = yaml.safe_load(handle)
 
         kr = config["modules"]["content_discovery"]["kiterunner"]
-        assert kr["delay_ms"] == 100, path
-        assert kr["connections"] == 3, path
-        assert config["budget_limits"]["max_concurrent_actions"] == 5, path
-        assert config["module_timeout"] == 300, path
-        assert config["auth"]["identities"] == {}, path
+        for key in ("delay_ms", "connections"):
+            assert key in kr, (path, key)
+        assert "max_concurrent_actions" in config["budget_limits"], path
+        assert "module_timeout" in config, path
+        assert "identities" in config["auth"], path
+        if path.name == "config.example.yaml":
+            assert kr["delay_ms"] == 100, path
+            assert kr["connections"] == 3, path
+            assert config["budget_limits"]["max_concurrent_actions"] == 5, path
+            assert config["module_timeout"] == 300, path
+            assert config["auth"]["identities"] == {}, path
 
 
 def test_retired_namespaces_warn():
@@ -149,4 +157,12 @@ def test_shipped_configs_warn_only_on_informative_defaults():
             warnings = doctor(yaml.safe_load(handle))
         unexpected = [w for w in warnings
                       if w.split(" ")[0] not in allowed]
-        assert unexpected == [], (path.name, unexpected)
+        if path.name == "config.example.yaml":
+            assert unexpected == [], (path.name, unexpected)
+        else:
+            # The operator file may lag behind new engine keys (that
+            # missing-key drift is reported by --check-config); only
+            # typos and retired namespaces fail here.
+            bad = [w for w in unexpected
+                   if "unknown key" in w or "retired namespace" in w]
+            assert bad == [], (path.name, bad)

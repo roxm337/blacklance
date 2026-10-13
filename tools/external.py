@@ -30,7 +30,7 @@ DOCKER_TOOLS = frozenset({
     "searchsploit", "trufflehog", "testssl.sh", "wpscan",
     "nikto", "whatweb", "gobuster", "feroxbuster",
     "hakrawler", "arjun", "gowitness",
-    "dalfox", "sqlmap", "corsy", "smuggler",
+    "dalfox", "sqlmap", "corsy", "smuggler", "openredirex",
     "subzy", "assetfinder", "waybackurls", "dig", "whois",
     "jsluice", "gxss", "uro", "gitleaks", "graphql-cop",
     "interactsh-client", "kr", "semgrep",

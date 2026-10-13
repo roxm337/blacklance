@@ -205,6 +205,23 @@ class Orchestrator:
                           "cloud_providers": {}},
         }
 
+    def print_preflight(self, context: dict | None = None) -> dict:
+        """Backend/LLM/budget/identity readiness, printed before modules run.
+
+        Called once from main() so every entry path (auto, llm, module,
+        pentest, agent) reports the same readiness block.
+        """
+        from core.preflight import preflight
+        report = preflight(self.config, context)
+        print(f"\n  READINESS")
+        for line in report["warnings"]:
+            print(f"  ⚠ {line}")
+            logger.warning(line)
+        for line in report["notices"]:
+            print(f"  • {line}")
+        print()
+        return report
+
     async def run_all(self):
         """Run all modules in sequence."""
         # Configure rate limiter from config
@@ -265,6 +282,9 @@ class Orchestrator:
         print(f"  Requests: {summary['total_requests']}")
         print(f"  Completed: {len(summary['modules_completed'])} modules")
         print(f"  Report: {self.output_dir / self.target / f'{self.target}_report.md'}")
+        from core.preflight import coverage_lines
+        for line in coverage_lines(self.state):
+            print(f"  {line}")
         print(f"{'='*60}\n")
 
         self.state.save()
@@ -316,6 +336,9 @@ class Orchestrator:
         print(f"  Requests: {summary['total_requests']}")
         print(f"  Completed: {len(summary['modules_completed'])} modules")
         print(f"  Report: {self.output_dir / self.target / f'{self.target}_report.md'}")
+        from core.preflight import coverage_lines
+        for line in coverage_lines(self.state):
+            print(f"  {line}")
         print(f"{'='*60}\n")
 
         self.state.save()
@@ -596,6 +619,12 @@ class Orchestrator:
             return
         await self._run_module(module_id)
 
+    def _last_module_reason(self, module_id: str, key: str) -> str:
+        """Most recent skip/block reason for a module (state holds the why)."""
+        entries = [e for e in self.state.module.get(key, [])
+                   if e.get("module_id") == module_id]
+        return entries[-1].get("reason", "") if entries else ""
+
     async def _run_module(self, module_id: str):
         """Internal: instantiate and run a module."""
         # Seed once per process, whichever entry point got us here. `--module`
@@ -635,20 +664,28 @@ class Orchestrator:
             if result == "done":
                 print(f"  ✓ Complete")
             elif result == "skipped":
-                print(f"  — Skipped")
+                reason = self._last_module_reason(module_id, "skipped")
+                print(f"  — Skipped: {reason}" if reason else "  — Skipped")
+                logger.warning(f"{module_id} skipped: "
+                               f"{reason or 'no reason recorded'}")
             elif result == "blocked":
-                print(f"  ✗ Blocked")
+                reason = self._last_module_reason(module_id, "blocked")
+                print(f"  ✗ Blocked: {reason}" if reason else "  ✗ Blocked")
+                logger.warning(f"{module_id} blocked: "
+                               f"{reason or 'no reason recorded'}")
             self.state.finish_module_run(run_id, result or "unknown")
         except asyncio.TimeoutError:
             # Say the coverage is partial. A timeout recorded as "done" or
             # silently dropped both understate the gap in the same direction.
             print(f"  ⏱ Timed out after {deadline:.0f}s — coverage from this "
                   f"module is incomplete")
+            logger.warning(f"{module_id} timed out after {deadline:.0f}s")
             self.state.finish_module_run(
                 run_id, "timeout",
                 f"exceeded {deadline:.0f}s module deadline")
         except Exception as e:
             print(f"  ✗ Error: {e}")
+            logger.error(f"{module_id} error: {e}")
             import traceback
             traceback.print_exc()
             self.state.block_module(module_id, str(e))
@@ -820,6 +857,15 @@ Examples:
     from core.config_doctor import doctor as _doctor
     for warning in _doctor(orchestrator.config):
         print(f"  config: {warning}")
+
+    # Readiness once, up front, for every entry path (auto, llm, module,
+    # pentest, agent): backend health, LLM posture, budgets, identities.
+    orchestrator.print_preflight({
+        "mode": mode,
+        "execute": bool(args.execute),
+        "max_risk": args.max_risk,
+        "agent": bool(args.agent or args.phase),
+    })
 
     if args.pentest and args.execute and args.max_risk not in ("SAFE", "LOW"):
         print(f"\n  Chain execution enabled, risk ceiling {args.max_risk}.")

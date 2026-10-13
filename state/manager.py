@@ -1,9 +1,12 @@
 """State Manager — typed asset graph with confidence ladders."""
 
 import json
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Union
+
+logger = logging.getLogger("osint-agent")
 
 CONFIDENCE_ORDER = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
 SEVERITY_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
@@ -363,12 +366,14 @@ class StateManager:
     def skip_module(self, module_id: str, reason: str = ""):
         if not any(s.get("module_id") == module_id for s in self.module["skipped"]):
             self.module["skipped"].append({"module_id": module_id, "reason": reason})
+            logger.warning(f"Module {module_id} skipped: {reason or 'no reason recorded'}")
         self.module["current"] = None
         self._dirty = True
 
     def block_module(self, module_id: str, reason: str = ""):
         if not any(b.get("module_id") == module_id for b in self.module["blocked"]):
             self.module["blocked"].append({"module_id": module_id, "reason": reason})
+            logger.warning(f"Module {module_id} blocked: {reason or 'no reason recorded'}")
         self.module["current"] = None
         self._dirty = True
 
