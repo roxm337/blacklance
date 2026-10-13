@@ -11,6 +11,7 @@ import asyncio
 import tempfile
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from actions.registry import ActionContext
@@ -3557,3 +3558,115 @@ def test_upload_svg_served_as_attachment_is_firm(monkeypatch):
     assert all(f["verified"] is False for f in stored), stored
 
 
+def test_idor_write_skips_non_json_records(monkeypatch):
+    """PATCH/PUT replays the victim's bytes as JSON: a form-encoded or
+    XML record replayed with Content-Type: application/json corrupts it.
+    Non-JSON records must be skipped, never replayed."""
+    from unittest.mock import AsyncMock
+    from modules.idor_differ import IdorDiffer, ObjectTemplate
+
+    state = _state()
+    module = IdorDiffer(state, {"target": {"domain": "h.test",
+                                           "base_url": "http://h.test"},
+                                "modules": {"idor_differ": {
+                                    "test_write_methods": ["PATCH"]}}})
+
+    async def fake_fetch(self, harness, name, url, **kwargs):
+        return {"status": 200,
+                "body": "name=bob&role=user",
+                "headers": "Content-Type: application/x-www-form-urlencoded"}
+
+    sent = AsyncMock(return_value={"status": 200, "body": "ok"})
+    monkeypatch.setattr(IdorDiffer, "_fetch", fake_fetch)
+    monkeypatch.setattr(IdorDiffer, "_fetch_with", sent)
+    attacker = SimpleNamespace(name="alice")
+    victim = SimpleNamespace(name="bob")
+    harness = SimpleNamespace(usable=[attacker, victim])
+    outcome = asyncio.run(module._probe_write(
+        harness, attacker, victim, "http://h.test/api/o/7", "7", "PATCH"))
+    assert outcome is None
+    assert sent.await_count == 0
+
+
+def test_idor_write_loop_is_capped_per_template(monkeypatch):
+    """templates x victims x refs x methods is unbounded: cap write
+    probes per template at max_probes_per_template like reads."""
+    from unittest.mock import AsyncMock
+    from modules.idor_differ import IdorDiffer, ObjectTemplate
+
+    state = _state()
+    module = IdorDiffer(state, {"target": {"domain": "h.test",
+                                           "base_url": "http://h.test"},
+                                "modules": {"idor_differ": {
+                                    "test_write_methods": ["PATCH"],
+                                    "allow_destructive": True,
+                                    "max_probes_per_template": 5}}})
+    attacker = SimpleNamespace(name="alice", assumed=False)
+    victim = SimpleNamespace(name="bob", assumed=False)
+    harness = SimpleNamespace(usable=[attacker, victim])
+    template = ObjectTemplate(url="http://h.test/api/o/7",
+                              url_template="http://h.test/api/o/{id}",
+                              samples={str(i): f"http://h.test/api/o/{i}"
+                                       for i in range(30)})
+    probe = AsyncMock(return_value=None)
+    monkeypatch.setattr(IdorDiffer, "_probe_write", probe)
+    asyncio.run(module._test_writes(
+        harness, [template], {"bob": {str(i) for i in range(30)}}))
+    assert probe.await_count <= 5, probe.await_count
+
+
+def test_password_probe_records_recovery(monkeypatch):
+    """Rotating the test password without recording the new value locks
+    the operator out of their own account: the finding must carry it."""
+    import modules.auth_audit as auth_module
+    from modules.auth_audit import AuthAudit
+
+    async def fake_curl(url, **kwargs):
+        return {"status": 200, "body": '{"success": true}',
+                "headers": ""}
+
+    monkeypatch.setattr(auth_module, "curl", fake_curl)
+    state = _state()
+    state.add_asset("api_endpoint", "api:http://example.com/rest/user/change-password",
+                    "http://example.com/rest/user/change-password",
+                    confidence="FIRM", sources=["test"], attrs={})
+    module = AuthAudit(state, {"target": {"domain": "example.com",
+                                          "base_url": "http://example.com"},
+                               "modules": {"auth_audit": {}}})
+    asyncio.run(module._password_change_probe({"token": "tok"}))
+    findings = [f for f in state.findings["findings"] if "Password Change" in f["title"]]
+    assert len(findings) == 1
+    assert any("Rotated-By-Audit-" in str(e) for e in findings[0]["evidence"]), \
+        findings[0]["evidence"]
+
+
+def test_upload_probe_cleans_up_after_itself(monkeypatch):
+    """Probe artifacts must not litter the target: best-effort DELETE on
+    the served location after filing."""
+    import re as _re
+    import modules.upload_audit as upload_module
+    from modules.upload_audit import UploadAudit
+
+    calls = []
+
+    async def fake_curl(url, **kwargs):
+        calls.append((kwargs.get("method", "GET"), url))
+        if url.endswith("/file-upload") and kwargs.get("method") == "POST":
+            return {"status": 201,
+                    "body": '{"location": "/uploads/probe.svg"}',
+                    "time_ms": 5, "url": url}
+        if url.endswith("/uploads/probe.svg"):
+            if kwargs.get("method") == "DELETE":
+                return {"status": 200, "body": "deleted",
+                        "time_ms": 5, "url": url}
+            return {"status": 200, "body": "<svg>upl12345678</svg>",
+                    "headers": "", "time_ms": 5, "url": url}
+        return {"status": 404, "body": "nope", "time_ms": 5, "url": url}
+
+    monkeypatch.setattr(upload_module, "curl", fake_curl)
+    state = _state()
+    result = asyncio.run(UploadAudit(
+        state, {"target": {"domain": "example.com",
+                           "base_url": "http://example.com"}}).run())
+    assert result == "done"
+    assert ("DELETE", "http://example.com/uploads/probe.svg") in calls, calls

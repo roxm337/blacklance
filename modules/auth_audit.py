@@ -254,6 +254,9 @@ class AuthAudit(BaseModule):
         if not second:
             return
         if _reads_registered(first) and _reads_exists(second):
+            self.log(f"  [!] Registration oracle created a real account "
+                     f"{email} — delete it by hand; the app offers no "
+                     f"self-delete the probe could call")
             self.state.add_finding(
                 title="User Enumeration via Registration Oracle",
                 severity="LOW",
@@ -339,6 +342,9 @@ class AuthAudit(BaseModule):
                     if result.get("status", 0) in (200, 201) and any(
                             marker in text.lower() for marker in
                             ("success", "updated", "changed")):
+                        self.log(f"  [!] Password rotated on the test account — "
+                                 f"new value recorded in the finding evidence; "
+                                 f"save it or the account is locked out")
                         self.state.add_finding(
                             title=f"Password Change Without Current Verification: {url}",
                             severity="HIGH",
@@ -350,7 +356,10 @@ class AuthAudit(BaseModule):
                                 f"alone takes the account permanently — test "
                                 f"password set to a rotated value."),
                             evidence=[f"URL: {url}", f"Method: {method}",
-                                      f"Response: {text[:200]}"],
+                                      f"Response: {text[:200]}",
+                                      f"Rotated password (save this or the "
+                                      f"test account is locked out): "
+                                      f"{new_password}"],
                             remediation="Require the current password (or "
                                         "re-authentication) for every "
                                         "credential change.",

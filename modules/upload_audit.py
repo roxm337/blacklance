@@ -115,6 +115,7 @@ class UploadAudit(BaseModule):
         """SVG upload, XXE probes, type confusion. True if anything filed."""
         filed = False
         marker = f"upl{secrets.token_hex(4)}"
+        stored: list[str] = []
 
         # 1. SVG with script-shaped content: stored XSS if served as-is.
         svg = (f'<svg xmlns="http://www.w3.org/2000/svg" onload="document.body.append('
@@ -125,6 +126,8 @@ class UploadAudit(BaseModule):
         if location:
             served, content_type, disposition = await self._fetch_served(
                 location)
+            if served:
+                stored.append(location)
             if served and marker in served and "<svg" in served.lower():
                 executable = _served_executable(content_type, disposition)
                 if executable:
@@ -217,6 +220,8 @@ class UploadAudit(BaseModule):
             XXE_PROBE_BODY.encode(), "application/xml")
         if location and location != url:
             served = await self._fetch_text(location)
+            if served:
+                stored.append(location)
             if served and ("<?xml" in served or XXE_CANARY in served
                            or "&xxe;" in served):
                 self.state.add_finding(
@@ -236,8 +241,28 @@ class UploadAudit(BaseModule):
                     verification={"method": "stored_file_served_intact",
                                   "url": location},
                 )
+                await self._cleanup_uploads(stored)
                 return True
+        await self._cleanup_uploads(stored)
         return filed
+
+    async def _cleanup_uploads(self, locations: list) -> None:
+        """Best-effort DELETE of probe artifacts. Servers without a delete
+        route answer 404/405 and the files stay — logged either way, so
+        the operator knows what litter, if any, is left behind."""
+        for location in dict.fromkeys(locations):
+            try:
+                result = await curl(location, method="DELETE",
+                                    output="status", timeout=10)
+                status = result.get("status", 0)
+            except Exception as exc:
+                self.log(f"  cleanup {location}: request failed ({exc})")
+                continue
+            if status in (200, 201, 202, 204):
+                self.log(f"  cleanup {location}: deleted (HTTP {status})")
+            else:
+                self.log(f"  cleanup {location}: left in place "
+                         f"(HTTP {status or 'no response'})")
 
     async def _multipart(self, url: str, filename: str, content: bytes,
                          content_type: str) -> str:

@@ -1127,10 +1127,16 @@ class IdorDiffer(BaseModule):
             return results
         others = [i for i in harness.usable if i.name != attacker.name]
         attacker_own = owned.get(attacker.name, set())
+        write_cap = self._cap()
 
         for template in templates:
+            sent = 0
             for victim in others:
                 for ref in sorted(owned.get(victim.name, set()) - attacker_own):
+                    if sent >= write_cap:
+                        self.log(f"  write cap hit ({write_cap}/template): "
+                                 f"stopping mutating probes for {template.url}")
+                        break
                     target = template.url_for(ref)
                     if not target:
                         continue
@@ -1138,6 +1144,7 @@ class IdorDiffer(BaseModule):
                         outcome = await self._probe_write(
                             harness, attacker, victim, target, ref, method,
                         )
+                        sent += 1
                         if outcome is not None:
                             results.append(outcome)
                     if not self._destructive_allowed():
@@ -1158,6 +1165,15 @@ class IdorDiffer(BaseModule):
         if method in ("PATCH", "PUT"):
             current = await self._fetch(harness, victim, url)
             if current.get("status", 0) >= 400 or not current.get("body"):
+                return None
+            try:
+                json.loads(current["body"])
+            except (ValueError, TypeError):
+                # The record is not JSON: replaying its bytes with
+                # Content-Type: application/json would corrupt it, not
+                # test authorisation. Skip the verb, don't reshape data.
+                self.log(f"  {method} {url}: victim record is not JSON — "
+                         f"skipping rather than replaying foreign bytes")
                 return None
             body = current["body"]
         elif method == "DELETE" and not self._destructive_allowed():
