@@ -289,9 +289,9 @@ class OriginDiscovery(BaseModule):
         """Differential origin proof. Returns (verdict, proof).
 
         confirmed: the IP serves byte-identical content to the CDN
-        baseline, or presents a certificate covering the domain AND a
-        protected/live HTTP surface. likely: domain cert without content
-        equality. Anything else: not the origin.
+        baseline. likely: domain cert without content equality (shared
+        hosting answers 200 for any SNI name). Anything else: not
+        the origin.
         """
         # Plain HTTP with Host header: no TLS pitfalls.
         http_status, http_body = 0, ""
@@ -319,9 +319,11 @@ class OriginDiscovery(BaseModule):
             return "confirmed", f"TLS body byte-identical to CDN baseline ({len(tls_body)} bytes)"
         domain_covered = self._cert_covers(sans)
         if domain_covered and tls_status in (200, 401, 403):
-            level = "confirmed" if tls_status == 200 else "likely"
-            return level, (f"serves a certificate covering {self.domain} "
-                           f"(HTTP {tls_status} on direct IP)")
+            # Cert plus status is not body proof: shared-cert hosting
+            # answers 200 from a default vhost for any SNI name. Body
+            # byte-equality above is the only "confirmed" path.
+            return "likely", (f"serves a certificate covering {self.domain} "
+                              f"(HTTP {tls_status} on direct IP, body differs)")
         if domain_covered:
             return "likely", f"serves a certificate covering {self.domain}"
         return "unproven", f"HTTP {http_status}, TLS {tls_status}, no cert/body match"
@@ -401,7 +403,7 @@ class OriginDiscovery(BaseModule):
         if not baseline_body:
             return
 
-        for header_dict in CDN_BYPASS_HEADERS[:4]:  # Limit to 4 tests
+        for header_dict in CDN_BYPASS_HEADERS:
             try:
                 result = await curl(
                     base_url,

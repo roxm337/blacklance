@@ -103,6 +103,30 @@ PUBLIC_BY_DESIGN = {
 }
 
 
+def _in_scope_url(url: str, domain: str) -> bool:
+    """Hostname-boundary scope check: evil-example.com is not example.com."""
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(str(url)).hostname or "").lower().strip(".")
+    except ValueError:
+        return False
+    root = str(domain or "").lower().strip(".")
+    return bool(host) and (host == root or host.endswith(f".{root}"))
+
+
+def _looks_javascript(url: str) -> bool:
+    """Script-shaped URLs: .js/.mjs paths, or versioned .js queries."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(str(url))
+    except ValueError:
+        return False
+    path = parsed.path.lower()
+    if path.endswith((".js", ".mjs")):
+        return True
+    return ".js" in parsed.query.lower()
+
+
 def extract_endpoints(js_content: str, base_url: str) -> list:
     """Extract API endpoints and interesting paths from JS source."""
     patterns = [
@@ -449,7 +473,13 @@ class JSAnalysis(BaseModule):
         # would collect the site's own HTML shell as JavaScript.
         if baseline.root is not None:
             for path in js_guess_paths:
-                status, candidate, ct = await probe(path)
+                try:
+                    status, candidate, ct = await probe(path)
+                except Exception as exc:
+                    # One blip must not lose all JS findings: skip the
+                    # path, keep the module.
+                    self.log(f"  guess {path}: probe failed ({exc})")
+                    continue
                 if status != 200 or not candidate:
                     continue
                 if baseline.catch_all(fingerprint(status, candidate, ct)):
@@ -458,7 +488,8 @@ class JSAnalysis(BaseModule):
 
         target_js = [
             url for url in js_urls
-            if self.domain in url and url.endswith(".js")
+            if _in_scope_url(url, self.domain)
+            and _looks_javascript(url)
         ][:50]  # Limit to 50 files
 
         self.log(f"  Analyzing {len(target_js)} JS files...")

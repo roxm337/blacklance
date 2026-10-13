@@ -31,7 +31,17 @@ class KeyedSubdomains(BaseModule):
 
         discovered = set()
         for source_name, source_func, api_key in sources:
-            hostnames = await source_func(self.domain, api_key)
+            try:
+                hostnames = await source_func(self.domain, api_key)
+            except Exception as exc:
+                # One bad key must not kill the other source: record and
+                # move on, so a dead Chaos key still leaves SecurityTrails.
+                self.log(f"  {source_name} failed ({exc}); continuing")
+                self.state.add_evidence(
+                    self.id, "keyed_subdomains", source_name,
+                    {"source": source_name, "error": str(exc)},
+                )
+                continue
             self.state.add_evidence(
                 self.id,
                 "keyed_subdomains",
@@ -39,17 +49,24 @@ class KeyedSubdomains(BaseModule):
                 {"source": source_name, "count": len(hostnames), "hosts": hostnames[:500]},
             )
             for hostname in hostnames:
-                discovered.add(hostname)
+                clean = str(hostname or "").strip().lower().lstrip("*.").strip(".")
+                if not clean:
+                    continue
+                if clean != self.domain and not clean.endswith(f".{self.domain}"):
+                    # Out-of-scope hostnames from a noisy source must not
+                    # become in-scope assets and graph edges.
+                    continue
+                discovered.add(clean)
                 self.state.add_asset(
                     "subdomain",
-                    f"sub:{hostname}",
-                    hostname,
+                    f"sub:{clean}",
+                    clean,
                     confidence="FIRM",
                     sources=[source_name],
                 )
                 self.state.add_edge(
                     f"domain:{self.domain}",
-                    f"sub:{hostname}",
+                    f"sub:{clean}",
                     f"{source_name}_subdomain",
                 )
 

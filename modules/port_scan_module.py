@@ -141,7 +141,11 @@ class PortScan(BaseModule):
             return "skipped"
 
         # Deduplicate and limit to reasonable count
-        targets = list(dict.fromkeys(targets))[:30]
+        targets = list(dict.fromkeys(targets))
+        if len(targets) > 30:
+            self.log(f"  port targets capped: first 30 of {len(targets)} IPs; "
+                     f"the rest are not scanned this run")
+            targets = targets[:30]
         self.log(f"Scanning {len(targets)} IPs...")
         try:
             deadline = float(self.config.get("module_timeout", 300) or 300)

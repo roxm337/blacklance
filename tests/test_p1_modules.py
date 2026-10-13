@@ -141,3 +141,46 @@ def test_subdomain_source_recorder_filters_scope():
 
     assert discovered == {"api.example.com"}
     assert source_map["api.example.com"] == ["certspotter"]
+
+
+def test_wildcard_only_hosts_are_tentative(monkeypatch):
+    """Wildcard DNS must downgrade before storing: hosts resolving only
+    to the wildcard IP are TENTATIVE, never CONFIRMED."""
+    import modules.subdomain as subdomain_module
+
+    async def fake_dig(record_type, domain, server="", follow_cname=False):
+        if domain.startswith("api.") or domain.startswith("www."):
+            return {"answers": ["93.184.216.34"]}
+        return {"answers": ["93.184.216.34"]}
+
+    async def fake_dnsx(hostnames, timeout=60):
+        return {h: ["93.184.216.34"] for h in hostnames}
+
+    for name in ("crtsh", "otx_passive_dns", "hackertarget_hostsearch",
+                 "urlscan_search", "rapiddns", "anubisdb", "certspotter",
+                 "subfinder_scan", "amass_passive"):
+        async def _empty(*args, **kwargs):
+            return []
+        monkeypatch.setattr(subdomain_module, name, _empty)
+    monkeypatch.setattr(subdomain_module, "dig", fake_dig)
+    monkeypatch.setattr(subdomain_module, "dnsx_resolve", fake_dnsx)
+
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    module = SubdomainEnum(
+        state, {"target": {"domain": "example.com"},
+                "wordlists": {"subdomains": ["api", "www"]}})
+    assert asyncio.run(module.run()) == "done"
+    subs = {a["value"]: a for a in state.get_assets_by_type("subdomain")}
+    assert subs, "expected discovered subdomains"
+    assert all(a["confidence"] == "TENTATIVE" for a in subs.values()), subs
+    assert any("Wildcard DNS" in f["title"]
+               for f in state.findings["findings"])
+
+
+def test_looks_ip_accepts_ipv6():
+    from modules.subdomain import _looks_ip
+    assert _looks_ip("2606:4700:4700::1111") is True
+    assert _looks_ip("93.184.216.34") is True
+    assert _looks_ip("not-an-ip") is False
+    assert _looks_ip("") is False

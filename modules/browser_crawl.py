@@ -54,7 +54,18 @@ class BrowserCrawl(BaseModule):
             max_identities = max(0, min(5, int(crawl_cfg.get("max_identities", 2))))
         except (TypeError, ValueError):
             max_identities = 2
-        wait_ms = int(crawl_cfg.get("wait_ms", 1500))
+        try:
+            # Clamped: an unclamped wait_ms stalls every page render
+            # (wait_ms:60000 used to mean 60s per page per context).
+            wait_ms = max(0, min(10000, int(crawl_cfg.get("wait_ms", 1500))))
+        except (TypeError, ValueError):
+            wait_ms = 1500
+        try:
+            _deadline = float(self.config.get("module_timeout", 300) or 300)
+        except (TypeError, ValueError):
+            _deadline = 300.0
+        import time as _time_guard
+        stop_at = _time_guard.monotonic() + max(60.0, _deadline - 30.0)
 
         seeds = self._targets() or [self.base_url]
 
@@ -86,6 +97,9 @@ class BrowserCrawl(BaseModule):
         context_stats: list[dict] = []
 
         for name, cookies, headers, authenticated in contexts:
+            if _time_guard.monotonic() >= stop_at:
+                self.log("  Time-box hit — keeping the pages crawled so far")
+                break
             rendered = await self._crawl_context(
                 name, seeds, depth, max_pages, wait_ms, cookies, headers)
             discovered.update(rendered["links"])
@@ -434,5 +448,10 @@ def _is_http(url: str) -> bool:
 
 
 def _looks_api(url: str) -> bool:
-    path = urlparse(url).path.lower()
-    return any(token in path for token in ("/api/", "/graphql", "/rest/", "/v1/", "/v2/"))
+    """Segment-aware API typing, shared with deep_crawl: substring checks
+    typed /news/v1-intro as an endpoint and split the graph by module."""
+    from modules.deep_crawl import _looks_api as _segment_api
+    try:
+        return bool(_segment_api(url))
+    except Exception:
+        return False

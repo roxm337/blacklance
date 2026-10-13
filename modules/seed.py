@@ -138,7 +138,7 @@ class SeedDiscovery(BaseModule):
             for cert in certs[:200]:
                 name_value = cert.get("name_value", "")
                 for name in name_value.split("\n"):
-                    name = name.strip().lower().lstrip("*.")
+                    name = name.strip().lower().lstrip("*.").strip(".")
                     if name and name not in seen_names:
                         seen_names.add(name)
                         if name.endswith(f".{self.domain}") and name != self.domain:

@@ -1157,3 +1157,24 @@ def test_headers_audit_default_src_covers_missing_object_src():
         [f["title"] for f in state.findings["findings"]]
 
 
+def test_origin_cert_without_body_match_is_likely():
+    """Cert-covers + HTTP 200 without body equality is shared-hosting
+    shaped: only byte-identical content confirms an origin."""
+    from unittest.mock import AsyncMock, patch
+    import modules.origin_discovery as od
+    from modules.origin_discovery import OriginDiscovery
+    state = _state()
+    module = OriginDiscovery(state, _config())
+
+    async def fake_curl(url, **kwargs):
+        return {"status": 200, "body": "default vhost page",
+                "headers": ""}
+
+    async def fake_tls(self, ip):
+        return 200, "default vhost page", ["example.test"]
+
+    with patch.object(od, "curl", new=fake_curl), \
+         patch.object(OriginDiscovery, "_tls_probe", new=fake_tls):
+        level, _proof = _run(module._verify_origin(
+            "93.184.216.34", "different-hash"))
+    assert level == "likely", level

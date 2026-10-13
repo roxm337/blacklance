@@ -70,6 +70,8 @@ class WAFMapping(BaseModule):
 
         # Phase 1: Probe all paths to understand WAF
         self.log("Phase 1: Path classification...")
+        _block = set(self.waf_config.get("block_codes", [503, 429]) or [])
+        _honeypot = set(self.waf_config.get("honeypot_codes", [500]) or [])
         for category, paths in self.PROBE_PATHS.items():
             for path in paths:
                 result = await self.http_get(f"{base_url}{path}",
@@ -77,12 +79,12 @@ class WAFMapping(BaseModule):
                 status = result.get("status", 0)
 
                 # Check for WAF headers
-                if status == 503:
-                    waf_blocks.append({"path": path, "code": 503, "category": category})
-                    self.state.record_waf_block(path, 503)
-                elif status == 500:
-                    waf_blocks.append({"path": path, "code": 500, "category": category})
-                    self.state.record_waf_block(path, 500)
+                if status in _block:
+                    waf_blocks.append({"path": path, "code": status, "category": category})
+                    self.state.record_waf_block(path, status)
+                elif status in _honeypot:
+                    waf_blocks.append({"path": path, "code": status, "category": category})
+                    self.state.record_waf_block(path, status)
                 elif status == 200:
                     sig = fingerprint(status, result.get("body", "") or "",
                                       result.get("content_type", "") or "")
@@ -104,9 +106,12 @@ class WAFMapping(BaseModule):
         self.log("Phase 2: Bypass attempts...")
         blocked_sensitive = [b for b in waf_blocks if b["category"] == "sensitive"]
         bypass_results = []
+        block_codes = set(self.waf_config.get("block_codes", [503, 429]) or [])
+        honeypot_codes = set(self.waf_config.get("honeypot_codes", [500]) or [])
+        dead_codes = block_codes | honeypot_codes | {429}
 
         for block in blocked_sensitive[:2]:  # Max 2 blocked paths
-            for tech in self.BYPASS_TECHNIQUES[:3]:  # Max 3 bypass techniques
+            for tech in self.BYPASS_TECHNIQUES:  # All six, not the first three
                 kwargs = tech["kwargs"].copy()
                 path_arg = block["path"]
 
@@ -120,7 +125,7 @@ class WAFMapping(BaseModule):
                     "path": block["path"],
                     "technique": tech["name"],
                     "result": status,
-                    "success": status not in (503, 500, 429),
+                    "success": status not in dead_codes,
                 })
 
                 if status == 200:

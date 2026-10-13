@@ -51,11 +51,18 @@ class SitemapExploit(BaseModule):
                 all_urls.extend(urls)
                 self.log(f"  {path}: {len(urls)} URLs")
 
-                # If sub-sitemap found (sitemap index), fetch each sub-sitemap
+                # If sub-sitemap found (sitemap index), fetch each
+                # sub-sitemap — capped and guarded: an index with hundreds
+                # of children used to mean hundreds of blocking fetches,
+                # one throw killing the module.
                 sub_sitemaps = re.findall(r'<loc>(.*?sitemap.*?\.xml)</loc>', body)
-                for sub in sub_sitemaps:
-                    sub_result = await curl(sub, output="body")
-                    sub_body = sub_result.get("body", "")
+                for sub in sub_sitemaps[:25]:
+                    try:
+                        sub_result = await curl(sub, output="body", timeout=15)
+                    except Exception as exc:
+                        self.log(f"    {sub}: fetch failed ({exc})")
+                        continue
+                    sub_body = sub_result.get("body", "") or ""
                     sub_urls = re.findall(r'<loc>(.*?)</loc>', sub_body)
                     if sub_urls:
                         all_urls.extend(sub_urls)

@@ -52,24 +52,24 @@ class MobileAssets(BaseModule):
         for app in _dedupe(android_apps, "package_name"):
             self.state.add_asset(
                 "mobile_app",
-                f"android:{app['package_name']}",
+                f"android:{self.domain}:{app['package_name']}",
                 app["package_name"],
                 confidence="FIRM",
                 sources=[self.id],
                 attrs={**app, "platform": "android"},
             )
-            self.state.add_edge(f"domain:{self.domain}", f"android:{app['package_name']}", "android_asset_link")
+            self.state.add_edge(f"domain:{self.domain}", f"android:{self.domain}:{app['package_name']}", "android_asset_link")
 
         for app in _dedupe(ios_apps, "app_id"):
             self.state.add_asset(
                 "mobile_app",
-                f"ios:{app['app_id']}",
+                f"ios:{self.domain}:{app['app_id']}",
                 app["app_id"],
                 confidence="FIRM",
                 sources=[self.id],
                 attrs={**app, "platform": "ios"},
             )
-            self.state.add_edge(f"domain:{self.domain}", f"ios:{app['app_id']}", "ios_app_site_association")
+            self.state.add_edge(f"domain:{self.domain}", f"ios:{self.domain}:{app['app_id']}", "ios_app_site_association")
 
         for app in related_apps[:50]:
             key = f"related_app:{app.get('platform', 'unknown')}:{app.get('id') or app.get('url')}"

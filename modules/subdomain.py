@@ -1,12 +1,23 @@
 """Stage 2: Subdomain Enumeration — passive + active with tool fallbacks."""
 
 import asyncio
+import ipaddress
 from modules.base import BaseModule
 from tools.wrappers import (
     dig, crtsh, otx_passive_dns, hackertarget_hostsearch,
     urlscan_search, subfinder_scan, amass_passive, dnsx_resolve, dig_bulk,
     rapiddns, anubisdb, certspotter,
 )
+
+
+def _looks_ip(value: object) -> bool:
+    """Literal IP (v4 or v6): the old answer[0].isdigit() kept IPv6 only
+    when it happened to start with a digit and dropped the rest."""
+    try:
+        ipaddress.ip_address(str(value or "").strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
 
 
 class SubdomainEnum(BaseModule):
@@ -122,7 +133,7 @@ class SubdomainEnum(BaseModule):
             resolved_map = await dig_bulk(bf_candidates, concurrency=15)
             for hostname, answers in resolved_map.items():
                 for answer in answers:
-                    if answer and answer[0].isdigit():
+                    if _looks_ip(answer):
                         if hostname not in discovered:
                             discovered.add(hostname)
                         source_map.setdefault(hostname, []).append("dns-brute")
@@ -130,6 +141,12 @@ class SubdomainEnum(BaseModule):
         # 9. Register all discovered subdomains and resolve to IPs
         self.log(f"Resolving {len(discovered)} discovered subdomains...")
         all_subs = sorted(discovered)
+
+        # Wildcard FIRST: hosts resolving only to the wildcard's IPs are
+        # not confirmed hosts. The old order stored every wildcard match
+        # as CONFIRMED and flagged the wildcard afterwards — the false
+        # positives were already in the graph.
+        wildcard_ips = await self._wildcard_ips()
 
         # Batch resolve using dnsx if available, otherwise parallel dig
         resolved_all = {}
@@ -140,13 +157,13 @@ class SubdomainEnum(BaseModule):
 
         added = 0
         for sub in all_subs:
-            ips = resolved_all.get(sub, [])
+            ips = [ip for ip in (resolved_all.get(sub, []) or []) if ip]
             sources = source_map.get(sub, ["passive"])
 
-            if ips:
+            if ips and not (wildcard_ips and set(ips) <= wildcard_ips):
                 confidence = "CONFIRMED"
                 for ip in ips:
-                    if ip and ip[0].isdigit():
+                    if _looks_ip(ip):
                         self.state.add_asset(
                             "ip", f"ip:{ip}", ip,
                             confidence="CONFIRMED",
@@ -166,8 +183,7 @@ class SubdomainEnum(BaseModule):
             )
             added += 1
 
-        # 10. Wildcard detection
-        await self._check_wildcard()
+        await self._check_wildcard(wildcard_ips)
 
         self.state.complete_module(self.id)
         self.log(
@@ -189,31 +205,47 @@ class SubdomainEnum(BaseModule):
         source_map.setdefault(hostname, []).append(source)
         return True
 
-    async def _check_wildcard(self):
-        """Detect wildcard DNS to avoid false positives."""
+    async def _wildcard_ips(self) -> set:
+        """IPs a random nonexistent subdomain resolves to (A + AAAA)."""
         import uuid
         random_sub = f"{uuid.uuid4().hex[:8]}.{self.domain}"
-        result = await dig("A", random_sub)
-        if result.get("answers"):
-            self.state.add_asset(
-                "dns_wildcard",
-                f"wildcard:{self.domain}",
-                self.domain,
-                confidence="CONFIRMED",
-                sources=["wildcard detection"],
-                attrs={"wildcard_ips": result["answers"]},
-            )
-            self.state.add_finding(
-                title=f"Wildcard DNS Detected on {self.domain}",
-                severity="INFO",
-                confidence="CONFIRMED",
-                category="DNS",
-                description=f"Wildcard DNS is configured for *.{self.domain}, "
-                            f"resolving to {result['answers']}. Subdomain brute-force "
-                            f"results may contain false positives.",
-                evidence=[f"*.{self.domain} → {result['answers']}"],
-                remediation="Review wildcard DNS configuration.",
-                verified=True,
-                verification={"method": "random_subdomain_resolves",
-                              "url": random_sub},
-            )
+        found = set()
+        for rtype in ("A", "AAAA"):
+            try:
+                result = await dig(rtype, random_sub)
+            except Exception:
+                continue
+            for answer in result.get("answers", []) or []:
+                if _looks_ip(answer):
+                    found.add(answer)
+        return found
+
+    async def _check_wildcard(self, wildcard_ips: set | None = None):
+        """Detect wildcard DNS to avoid false positives."""
+        import uuid
+        ips = set(wildcard_ips) if wildcard_ips is not None else await self._wildcard_ips()
+        if not ips:
+            return
+        random_sub = f"wildcard-probe.{self.domain}"
+        self.state.add_asset(
+            "dns_wildcard",
+            f"wildcard:{self.domain}",
+            self.domain,
+            confidence="CONFIRMED",
+            sources=["wildcard detection"],
+            attrs={"wildcard_ips": sorted(ips)},
+        )
+        self.state.add_finding(
+            title=f"Wildcard DNS Detected on {self.domain}",
+            severity="INFO",
+            confidence="CONFIRMED",
+            category="DNS",
+            description=f"Wildcard DNS is configured for *.{self.domain}, "
+                        f"resolving to {sorted(ips)}. Subdomain brute-force "
+                        f"results may contain false positives.",
+            evidence=[f"*.{self.domain} → {sorted(ips)}"],
+            remediation="Review wildcard DNS configuration.",
+            verified=True,
+            verification={"method": "random_subdomain_resolves",
+                          "url": random_sub},
+        )

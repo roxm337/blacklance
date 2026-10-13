@@ -47,7 +47,11 @@ class TLSAudit(BaseModule):
             self.state.skip_module(self.id, "no TLS endpoints (plaintext only)")
             return "skipped"
         for host, port in endpoints:
-            await self._audit_endpoint(host, port)
+            try:
+                await self._audit_endpoint(host, port)
+            except Exception as exc:
+                # One dead endpoint must not abort the remaining nine.
+                self.log(f"  {host}:{port}: audit failed ({exc})")
         self.state.complete_module(self.id)
         return "done"
 
@@ -121,7 +125,10 @@ class TLSAudit(BaseModule):
         for proto, proto_state in protocols.items():
             if proto_state is True and proto in WEAK_PROTOCOLS:
                 severity = WEAK_PROTOCOLS[proto]
-                proto_display = proto.upper().replace("TLS1", "TLS 1.0").replace("TLS1_1", "TLS 1.1")
+                proto_display = {"ssl2": "SSL 2.0", "ssl3": "SSL 3.0",
+                                 "tls1": "TLS 1.0", "tls1_1": "TLS 1.1",
+                                 "tls1_2": "TLS 1.2", "tls1_3": "TLS 1.3",
+                                 }.get(str(proto).lower(), str(proto).upper())
                 self.state.add_finding(
                     title=f"Weak TLS Protocol Supported: {proto_display}",
                     severity=severity,

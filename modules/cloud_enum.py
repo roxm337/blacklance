@@ -63,6 +63,20 @@ class CloudEnum(BaseModule):
                 rb = await curl(url, output="body", follow_redirects=False,
                                 timeout=_BUCKET_TIMEOUT)
                 body = rb.get("body", "")
+            elif status in (301, 302, 303, 307, 308):
+                # Regional redirect (S3 answers 301 with the regional
+                # endpoint): one follow-up decides public vs merely
+                # existing. Without it every redirected public bucket
+                # graded TENTATIVE — a systematic false negative.
+                try:
+                    rf = await curl(url, output="full",
+                                    follow_redirects=True,
+                                    timeout=_BUCKET_TIMEOUT)
+                except Exception:
+                    rf = {}
+                if rf.get("status", 0) == 200:
+                    status = 200
+                    body = rf.get("body", "") or ""
             return name, provider, url, status, body
 
         tasks = [
@@ -322,6 +336,12 @@ class CloudEnum(BaseModule):
             base_names.append("-".join(domain_parts[:-1]))
             base_names.append(self.domain.replace(".", "-"))
             base_names = list(dict.fromkeys(b for b in base_names if b))
+            combos = len(prefixes) * len(suffixes)
+            if combos > 64:
+                self.log(f"  permutation cap: first 8x8 of "
+                         f"{len(prefixes)}x{len(suffixes)} "
+                         f"prefix/suffix combos per base — extend wordlists "
+                         f"or narrow the target for full coverage")
 
             for base in base_names:
                 candidates.add(base)

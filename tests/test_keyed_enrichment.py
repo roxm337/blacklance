@@ -168,3 +168,55 @@ def test_keyed_subdomains_adds_sources(monkeypatch):
 
     assert result == "done"
     assert len(state.get_assets_by_type("subdomain")) == 2
+
+
+def test_keyed_source_failure_spares_the_other_source(monkeypatch):
+    """One bad key must not kill all keyed enrichment: the second source
+    still runs and its hosts still land."""
+
+    async def bad_chaos(domain, api_key):
+        raise RuntimeError("bad key")
+
+    async def good_st(domain, api_key):
+        return ["api.example.com"]
+
+    import modules.keyed_subdomains as keyed_module
+    monkeypatch.setattr(keyed_module, "chaos_subdomains", bad_chaos)
+    monkeypatch.setattr(keyed_module, "securitytrails_subdomains", good_st)
+
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    state.add_asset("domain", "domain:example.com", "example.com")
+    config = {
+        "target": {"domain": "example.com"},
+        "api_keys": {"chaos": "bad", "securitytrails": "good"},
+    }
+
+    result = asyncio.run(KeyedSubdomains(state, config).run())
+
+    assert result == "done"
+    assert {a["value"] for a in state.get_assets_by_type("subdomain")} == \
+        {"api.example.com"}
+
+
+def test_keyed_out_of_scope_hosts_are_dropped(monkeypatch):
+    """A noisy source returning foreign hostnames must not plant
+    out-of-scope assets and edges in the graph."""
+
+    async def noisy(domain, api_key):
+        return ["api.example.com", "evil.other.net", "*.wild.example.com"]
+
+    import modules.keyed_subdomains as keyed_module
+    monkeypatch.setattr(keyed_module, "chaos_subdomains", noisy)
+
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    state.add_asset("domain", "domain:example.com", "example.com")
+    config = {
+        "target": {"domain": "example.com"},
+        "api_keys": {"chaos": "test-key"},
+    }
+
+    assert asyncio.run(KeyedSubdomains(state, config).run()) == "done"
+    assert {a["value"] for a in state.get_assets_by_type("subdomain")} == \
+        {"api.example.com", "wild.example.com"}
