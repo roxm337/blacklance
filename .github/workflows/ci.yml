@@ -35,8 +35,18 @@ jobs:
           python -m py_compile $(git ls-files '*.py')
 
       - name: Config YAML lint
+        # config.yaml is operator-local and gitignored, so fresh checkouts
+        # only carry the example — lint what exists.
         run: |
-          python -c "import yaml; yaml.safe_load(open('config.yaml')); yaml.safe_load(open('config.example.yaml')); print('configs parse')"
+          python - <<'EOF'
+          import pathlib, yaml
+          files = [p for p in ("config.example.yaml", "config.yaml")
+                   if pathlib.Path(p).exists()]
+          assert files, "no config file found"
+          for f in files:
+              yaml.safe_load(open(f))
+          print("configs parse:", ", ".join(files))
+          EOF
 
       - name: Config coverage (shipped config must be warning-lean)
         run: |
@@ -61,11 +71,22 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Install Qt system libraries
+        # PySide6 wheels link system Qt libs (glib, X11, NSS for WebEngine)
+        # that bare ubuntu images do not ship; without them `import gui.app`
+        # fails at collection. Per-package `|| true` keeps this working when
+        # future ubuntu releases rename a package.
+        run: |
+          sudo apt-get update
+          for p in libglib2.0-0t64 libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 libatspi2.0-0t64 libx11-6 libxcb1 libxext6 libxi6 libxtst6 libxkbfile1 libxcursor1 libxss1 libxshmfence1 libx11-xcb1; do
+            sudo apt-get install -y --no-install-recommends "$p" || true
+          done
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm
-          pip install pytest pytest-asyncio PySide6
+          pip install pytest pytest-asyncio PySide6 "gravis==0.1.0" "setuptools<81"
 
       - name: Run GUI tests (offscreen)
         env:

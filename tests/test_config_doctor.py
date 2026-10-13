@@ -77,21 +77,33 @@ def test_check_config_runs_nothing(monkeypatch, capsys):
     assert "tools.backend" in out
 
 
+def _shipped_config_paths():
+    """Shipped configs present in this checkout. config.yaml is
+    operator-local and gitignored, so fresh clones only carry the example;
+    pin what exists rather than assuming the operator file is there."""
+    root = Path(__file__).resolve().parent.parent
+    found = [root / name for name in ("config.example.yaml", "config.yaml")
+             if (root / name).exists()]
+    assert found, "no shipped config found"
+    return found
+
+
 def test_shipped_config_has_no_silent_default_blocks():
-    """config.yaml must carry every run-shaping block explicitly — a missing
-    block runs on invisible code defaults (kiterunner politeness, budgets,
-    module timeout, IDOR identities)."""
+    """Every shipped config must carry every run-shaping block explicitly —
+    a missing block runs on invisible code defaults (kiterunner politeness,
+    budgets, module timeout, IDOR identities)."""
     import yaml
 
-    with open(Path(__file__).resolve().parent.parent / "config.yaml") as handle:
-        config = yaml.safe_load(handle)
+    for path in _shipped_config_paths():
+        with open(path) as handle:
+            config = yaml.safe_load(handle)
 
-    kr = config["modules"]["content_discovery"]["kiterunner"]
-    assert kr["delay_ms"] == 100
-    assert kr["connections"] == 3
-    assert config["budget_limits"]["max_concurrent_actions"] == 5
-    assert config["module_timeout"] == 300
-    assert config["auth"]["identities"] == {}
+        kr = config["modules"]["content_discovery"]["kiterunner"]
+        assert kr["delay_ms"] == 100, path
+        assert kr["connections"] == 3, path
+        assert config["budget_limits"]["max_concurrent_actions"] == 5, path
+        assert config["module_timeout"] == 300, path
+        assert config["auth"]["identities"] == {}, path
 
 
 def test_retired_namespaces_warn():
@@ -125,18 +137,16 @@ def test_doctor_flags_both_directions_on_typo_config():
 
 
 def test_shipped_configs_warn_only_on_informative_defaults():
-    """config.yaml and config.example.yaml must be warning-free except the
-    two keys whose defaults are dynamic/legacy by design (nuclei
-    max_seconds, full_cve). Anything else means a shipped default drifted
-    from the engine again."""
+    """Shipped configs must be warning-free except the two keys whose
+    defaults are dynamic/legacy by design (nuclei max_seconds, full_cve).
+    Anything else means a shipped default drifted from the engine again."""
     import yaml
 
     allowed = {"modules.nuclei_scan.max_seconds",
                "modules.nuclei_scan.full_cve"}
-    root = Path(__file__).resolve().parent.parent
-    for name in ("config.yaml", "config.example.yaml"):
-        with open(root / name) as handle:
+    for path in _shipped_config_paths():
+        with open(path) as handle:
             warnings = doctor(yaml.safe_load(handle))
         unexpected = [w for w in warnings
                       if w.split(" ")[0] not in allowed]
-        assert unexpected == [], (name, unexpected)
+        assert unexpected == [], (path.name, unexpected)
