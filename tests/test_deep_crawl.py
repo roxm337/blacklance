@@ -28,7 +28,7 @@ def _config(depth=2):
         "target": {"domain": "example.test", "base_url": "https://example.test"},
         "auth": {"identities": []},
         "waf": {"block_codes": [429, 503]},
-        "crawl": {"depth": depth},
+        "crawl": {"browser": {"depth": depth}},
         "modules": {},
     }
 

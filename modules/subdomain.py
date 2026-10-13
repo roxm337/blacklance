@@ -52,7 +52,9 @@ class SubdomainEnum(BaseModule):
                     source_map[hostname + "_ip"] = entry["ip"]
 
         # 4. URLScan.io
-        api_key = self.config.get("urlscan_api_key", "") or ""
+        api_keys = self.config.get("api_keys", {}) or {}
+        api_key = (self.config.get("urlscan_api_key", "")  # legacy top-level
+                   or api_keys.get("urlscan", "") or "")
         self.log("Querying URLScan.io...")
         urlscan_results = await urlscan_search(self.domain, api_key=api_key)
         for result in urlscan_results:

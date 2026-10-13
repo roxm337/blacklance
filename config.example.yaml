@@ -146,7 +146,7 @@ modules:
   auto_run: true
   max_consecutive_empty: 5  # stop module after N empty probes
   record_http_evidence: true
-  idor:
+  idor_differ:
     # Explicit object endpoints for the idor_differ module. Normally derived
     # from js_analysis output; list them here when the API shape is already
     # known, otherwise the module falls back to its built-in path seeds.
@@ -187,6 +187,8 @@ modules:
     # Resources to try when the wordlist above is not enough. Defaults to a
     # built-in list of per-user resources.
     resources: []
+    # API prefixes tried when shaping collection URLs (empty = built-in list).
+    api_prefixes: []
     # api_prefixes: ["/api", "/api/v1", "/v1"]
 
     # Page that identifies the *requesting* account, used to attribute a leak
@@ -228,6 +230,7 @@ modules:
 
     # Optional: a different URL for the update, e.g. when the read endpoint is
     # read-only. Accepts a full URL or a path.
+    write_endpoint: ""
     # write_endpoint: "https://api.example.com/users/me"
 
     method: PATCH      # PATCH, PUT or POST
@@ -261,6 +264,7 @@ modules:
     # would hide a polluted prototype. Point this at a Node/Express app you
     # control while testing. Defaults to the first endpoint above.
     # reflect_endpoint: "https://api.example.com/api/reflect"
+    reflect_endpoint: ""
 
     methods: [POST, PUT]
 
@@ -349,6 +353,8 @@ modules:
     # sqlmap needs somewhere to poll. Findings are only promoted to CONFIRMED
     # for the exact URL that produced a callback.
     oast: true
+    escalate: true             # re-run promising points with heavier tamper sets
+    max_escalations: 3         # cap on escalation re-runs per point
 
   ssrf_scan:
     # Generic server-side request forgery: URL-bearing parameters get a
@@ -362,7 +368,22 @@ modules:
     # cannot land in evidence on a hit.
     enabled: true
     max_points: 6                # URL parameters probed per run (cap 30)
+    params: []                   # empty = built-in URL-param names
     # params: ["url", "src"]     # override the built-in URL-param names
+
+  ssti_scan:
+    max_points: 40               # template-injection points probed per run
+
+  nosql_scan:
+    max_points: 40               # NoSQL-injection points probed per run
+
+  dom_xss_scan:
+    max_pages: 25                # rendered pages sunk-checked for DOM XSS
+
+  parameter_discovery:
+    seed_when_empty: true        # seed reflection probes when none discovered
+    seed_targets: 10             # pages seeded with reflection probes
+    seed_params: []              # extra parameter names to seed
 
   auth_audit:
     # Lab packs (knowledge/*.yaml) inject extra paths and credentials here
@@ -373,6 +394,8 @@ modules:
     # extra_credentials: [["admin@juice-sh.op", "admin123"]]
     # Set true only to prove missing-current-password flaws by writing.
     test_password_change: false
+    # OPT-IN: create a real account to test registration (never deleted).
+    test_registration_oracle: false
 
   business_logic:
     # Own-account logic flaws in two halves. The surface half is
@@ -385,54 +408,70 @@ modules:
     # no checkout is ever completed.
     enabled: true
     max_probes: 12               # hostile values sent per run (cap 40)
+    endpoints: []                # explicit cart/order endpoints
     # endpoints: ["/api/cart"]   # discovered api_endpoints win when present
 
-misconfig:
-  concurrency: 12
-  timeout: 5
-  max_paths: 160
-  max_consecutive_empty: 60
-  progress_every: 25
-  # Target-specific backup basenames (lab packs merge theirs here).
-  # Module defaults stay generic; knowledge lives in config, not code.
-  extra_backup_bases: []
+  misconfig_probes:
+    concurrency: 12
+    timeout: 5
+    max_paths: 160
+    max_consecutive_empty: 60
+    progress_every: 25
+    # Target-specific backup basenames (lab packs merge theirs here).
+    # Module defaults stay generic; knowledge lives in config, not code.
+    extra_backup_bases: []
 
-fast_scan:
-  # Lightweight replacement for heavyweight consolidated scanners.
-  # Focuses on high-signal headers, CORS, and sensitive path exposure.
-  timeout: 4
-  concurrency: 8
-  max_paths: 20
-  paths:
-    - "/.env"
-    - "/.git/config"
-    - "/.git/HEAD"
-    - "/wp-config.php"
-    - "/wp-content/debug.log"
-    - "/phpinfo.php"
-    - "/info.php"
-    - "/server-status"
-    - "/actuator/env"
-    - "/actuator/heapdump"
-    - "/swagger.json"
-    - "/swagger/v1/swagger.json"
-    - "/v2/api-docs"
-    - "/v3/api-docs"
-    - "/graphql"
-    - "/graphiql"
-    - "/api/graphql"
-    - "/phpmyadmin/"
-    - "/adminer.php"
-    - "/backup.sql"
+  fast_exposure_scan:
+    # Lightweight replacement for heavyweight consolidated scanners.
+    # Focuses on high-signal headers, CORS, and sensitive path exposure.
+    timeout: 4
+    concurrency: 8
+    max_paths: 20
+    paths:
+      - "/.env"
+      - "/.git/config"
+      - "/.git/HEAD"
+      - "/wp-config.php"
+      - "/wp-content/debug.log"
+      - "/phpinfo.php"
+      - "/info.php"
+      - "/server-status"
+      - "/actuator/env"
+      - "/actuator/heapdump"
+      - "/swagger.json"
+      - "/swagger/v1/swagger.json"
+      - "/v2/api-docs"
+      - "/v3/api-docs"
+      - "/graphql"
+      - "/graphiql"
+      - "/api/graphql"
+      - "/phpmyadmin/"
+      - "/adminer.php"
+      - "/backup.sql"
 
-nuclei:
-  full_cve_on_confirmed_apex: true
-  # Templates freeze at image build: the module logs their age into
-  # evidence and warns past max_age_days (a stale set misses CVEs, it
-  # never invents them). update_templates refreshes first — opt-in
-  # because it downloads hundreds of MB from GitHub mid-engagement.
-  max_age_days: 30
-  update_templates: false
+  nuclei_scan:
+    full_cve_on_confirmed_apex: true
+    # full_cve: false            # legacy kill-switch for the CVE pass
+    # max_seconds: 300           # time-box (default: module deadline minus 60s)
+    batch_seconds: 150           # time-box per template batch
+    # Templates freeze at image build: the module logs their age into
+    # evidence and warns past max_age_days (a stale set misses CVEs, it
+    # never invents them). update_templates refreshes first — opt-in
+    # because it downloads hundreds of MB from GitHub mid-engagement.
+    max_age_days: 30
+    update_templates: false
+
+  xss_scan:
+    max_points: 80
+    browser_confirm: true
+    dalfox_timeout: 600
+    # Let dalfox run its own interactsh session against the public mesh.
+    # Findings from that session stay FIRM (dalfox saw the callback, the
+    # framework did not poll it). Off by default: the framework-owned blind
+    # pass above confirms via poll and can reach CONFIRMED.
+    dalfox_blind_oob: false
+    # Global outbound cap for dalfox in requests/second (0 = unlimited).
+    dalfox_rate_limit: 0
 
 oob:
   # Configure real callback infrastructure for blind SSRF/XXE/SQLi/RCE checks.
@@ -457,18 +496,6 @@ oob:
   poll_timeout: 30
   # `enabled: false` turns off OOB everywhere without deleting the settings.
   enabled: true
-
-xss:
-  max_points: 80
-  browser_confirm: true
-  dalfox_timeout: 600
-  # Let dalfox run its own interactsh session against the public mesh.
-  # Findings from that session stay FIRM (dalfox saw the callback, the
-  # framework did not poll it). Off by default: the framework-owned blind
-  # pass above confirms via poll and can reach CONFIRMED.
-  dalfox_blind_oob: false
-  # Global outbound cap for dalfox in requests/second (0 = unlimited).
-  dalfox_rate_limit: 0
 
 semgrep:
   # SAST over downloaded JS bundles with repo-local rules (rules/semgrep/).

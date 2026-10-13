@@ -67,7 +67,7 @@ class NucleiScan(BaseModule):
             self.state.skip_module(self.id, "nuclei not installed")
             return "skipped"
 
-        nuclei_cfg = self.config.get("nuclei", {})
+        nuclei_cfg = self._cfg()
         template_info = await self._template_freshness(nuclei_cfg)
 
         target_url = self.base_url
@@ -106,7 +106,7 @@ class NucleiScan(BaseModule):
             deadline = float(self.config.get("module_timeout", 300) or 300)
         except (TypeError, ValueError):
             deadline = 300.0
-        nuclei_cfg = self.config.get("nuclei", {})
+        nuclei_cfg = self._cfg()
         max_seconds = nuclei_cfg.get("max_seconds")
         try:
             max_seconds = float(max_seconds) if max_seconds else deadline - 60.0
@@ -357,8 +357,12 @@ class NucleiScan(BaseModule):
         return False, (f"template {template_id} did not re-fire "
                        f"({result.get('error') or 'no match'})")
 
+    def _cfg(self) -> dict:
+        cfg = self.config.get("modules", {}).get(self.id, {})
+        return cfg if isinstance(cfg, dict) else {}
+
     def _allow_full_cve_pass(self, target_url: str, webapp_assets: list[dict]) -> bool:
-        nuclei_cfg = self.config.get("nuclei", {})
+        nuclei_cfg = self._cfg()
         if nuclei_cfg.get("full_cve") is False:
             return False
         if nuclei_cfg.get("full_cve_on_confirmed_apex", True) is False:

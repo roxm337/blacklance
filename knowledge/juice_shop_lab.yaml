@@ -27,7 +27,7 @@ modules:
       - "/rest/admin/application-configuration"
     extra_credentials:
       - ["admin@juice-sh.op", "admin123"]
-  misconfig:
+  misconfig_probes:
     extra_backup_bases:
       - "coupons_2013.md"
       - "eastere.gg"

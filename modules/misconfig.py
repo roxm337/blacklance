@@ -190,14 +190,11 @@ class MisconfigProbes(BaseModule):
                     "spring_actuator_paths", "vendor_paths", "container_k8s_paths"]:
             all_paths.update(self.config.get("wordlists", {}).get(key, []))
 
-        probe_cfg = self.config.get("misconfig", {})
+        probe_cfg = self.config.get("modules", {}).get(self.id, {})
         if not isinstance(probe_cfg, dict):
             probe_cfg = {}
-        # Knowledge packs merge under modules:{id:}; honor both so pack
-        # extras (extra_backup_bases) work without config surgery.
-        pack_cfg = (self.config.get("modules", {}) or {}).get("misconfig", {})
-        if isinstance(pack_cfg, dict):
-            probe_cfg = {**pack_cfg, **probe_cfg}
+        # Knowledge packs merge under modules:{id} via apply_pack, so pack
+        # extras (extra_backup_bases) land here with no pack-aware code.
         timeout = int(probe_cfg.get("timeout", 5) or 5)
         concurrency = max(1, int(probe_cfg.get("concurrency", 12) or 12))
         max_paths = int(probe_cfg.get("max_paths", 160) or 160)

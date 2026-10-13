@@ -42,10 +42,10 @@ REAL_ENV = (
 def _misconfig_config():
     return {
         "target": {"domain": "example.com"},
-        "misconfig": {
+        "modules": {"misconfig_probes": {
             "concurrency": 4, "timeout": 1, "max_paths": 40,
             "max_consecutive_empty": 40, "progress_every": 100,
-        },
+        }},
         "wordlists": {
             "misconfig_paths": [
                 "/.env", "/.env.production", "/.env.backup", "/.git/config",

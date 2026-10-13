@@ -366,7 +366,7 @@ def _harness(fn, *args, vulnerable=True, app_kwargs=None, module_cfg=None,
                         "verify_url": f"{base}/dashboard",
                         "success_marker": "Sign out"},
             }},
-            "modules": {"idor": idor_cfg},
+            "modules": {"idor_differ": idor_cfg},
         }
         state = StateManager(str(out))
         env = _Env(base, app, engine, config, state)
@@ -855,8 +855,8 @@ class TestAnonymousExposure:
     @served
     async def test_private_object_is_not_reported_without_opt_in(self, env):
         """Nothing on this server is public, so the probe must find nothing."""
-        env.config["modules"]["idor"]["test_anonymous"] = True
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["test_anonymous"] = True
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         assert not [f for f in env.findings()
                     if "without authentication" in f["title"]], \
@@ -866,15 +866,15 @@ class TestAnonymousExposure:
     async def test_anonymous_probe_is_off_unless_requested(self, env):
         """Record 100 *is* readable with no session, so the opt-in is the
         only thing standing between this run and a real finding."""
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         assert not [f for f in env.findings()
                     if "without authentication" in f["title"]]
 
     @variant(public_ids=["100"])
     async def test_public_object_is_reported_when_enabled(self, env):
-        env.config["modules"]["idor"]["test_anonymous"] = True
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["test_anonymous"] = True
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
 
         anon = [f for f in env.findings() if "without authentication" in f["title"]]
@@ -893,10 +893,10 @@ class TestSequentialProbing:
     @variant(third_party=[101])
     async def test_third_party_record_is_reported(self, env):
         """The case two accounts cannot prove: a stranger's record."""
-        env.config["modules"]["idor"]["id_probing"] = {
+        env.config["modules"]["idor_differ"]["id_probing"] = {
             "enabled": True, "radius": 3, "max": 20,
         }
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
 
         unknown = [f for f in env.findings() if "unowned record" in f["title"]]
@@ -910,7 +910,7 @@ class TestSequentialProbing:
     async def test_probing_is_off_by_default(self, env):
         """A stranger's record sits one ID away, so only the opt-in stands
         between this run and reaching other people's data."""
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         assert not [f for f in env.findings() if "unowned" in f["title"]]
 
@@ -918,10 +918,10 @@ class TestSequentialProbing:
     async def test_probing_respects_its_budget(self, env):
         """Every candidate here exists, so each probe that runs is recorded.
         Counting 404s would pass even with no budget at all."""
-        env.config["modules"]["idor"]["id_probing"] = {
+        env.config["modules"]["idor_differ"]["id_probing"] = {
             "enabled": True, "radius": 8, "max": 3,
         }
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         probed = [e for e in env.evidence() if e["type"] == "idor_unattributed"]
         assert 0 < len(probed) <= 3, \
@@ -937,10 +937,10 @@ class TestSequentialProbing:
 
     @_hardened_third_party
     async def test_enforced_server_leaks_nothing_to_sequential_probing(self, env):
-        env.config["modules"]["idor"]["id_probing"] = {
+        env.config["modules"]["idor_differ"]["id_probing"] = {
             "enabled": True, "radius": 3, "max": 20,
         }
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         assert env.findings() == [], f"false positive: {env.findings()}"
 
@@ -954,7 +954,7 @@ class TestUnattributedLeaks:
         """A record that came back but cannot be tied to any account is a weak
         signal. Filing it as CONFIRMED would be a guess; it is still recorded."""
         async def body(env):
-            env.config["modules"]["idor"]["endpoints"] = \
+            env.config["modules"]["idor_differ"]["endpoints"] = \
                 [f"{env.base}/api/invoices/100"]
             assert await env.run_module() == "done"
 
@@ -976,10 +976,10 @@ class TestWriteAuthorisation:
 
     @variant(write_vulnerable=True)
     async def test_accepted_cross_account_write_is_critical(self, env):
-        env.config["modules"]["idor"]["test_write_methods"] = ["PATCH"]
+        env.config["modules"]["idor_differ"]["test_write_methods"] = ["PATCH"]
         # Only alice's own URL is known; bob's record must be reached by
         # substituting into the shape, which recon never observed directly.
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
 
         writes = [f for f in env.findings() if "can modify" in f["title"]]
@@ -993,8 +993,8 @@ class TestWriteAuthorisation:
         """The probe must not quietly destroy the victim's data."""
         from tools.wrappers import curl
 
-        env.config["modules"]["idor"]["test_write_methods"] = ["PUT"]
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["test_write_methods"] = ["PUT"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         await env.run_module()
 
         after = await curl(f"{env.base}/api/invoices/200", identity="bob",
@@ -1004,14 +1004,14 @@ class TestWriteAuthorisation:
 
     @variant(write_vulnerable=True)
     async def test_writes_are_off_by_default(self, env):
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/200"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/200"]
         assert await env.run_module() == "done"
         assert not [f for f in env.findings() if "can modify" in f["title"]]
 
     @variant(write_vulnerable=True)
     async def test_delete_is_never_sent_without_destructive_consent(self, env):
-        env.config["modules"]["idor"]["test_write_methods"] = ["DELETE"]
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["test_write_methods"] = ["DELETE"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
 
         after = await curl(f"{env.base}/api/invoices/200", identity="bob",
@@ -1023,15 +1023,15 @@ class TestWriteAuthorisation:
         """The operator asked for PUT only on a PATCH-only endpoint: no
         finding. Before the fix the configured list was ignored and the
         PATCH/PUT/DELETE fallback fired PATCH instead."""
-        env.config["modules"]["idor"]["test_write_methods"] = ["PUT"]
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["test_write_methods"] = ["PUT"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         assert not [f for f in env.findings() if "can modify" in f["title"]]
 
     @served
     async def test_enforced_server_rejects_cross_account_writes(self, env):
-        env.config["modules"]["idor"]["test_write_methods"] = ["PATCH", "PUT"]
-        env.config["modules"]["idor"]["endpoints"] = [f"{env.base}/api/invoices/100"]
+        env.config["modules"]["idor_differ"]["test_write_methods"] = ["PATCH", "PUT"]
+        env.config["modules"]["idor_differ"]["endpoints"] = [f"{env.base}/api/invoices/100"]
         assert await env.run_module() == "done"
         assert not [f for f in env.findings() if "can modify" in f["title"]]
 
@@ -1044,8 +1044,8 @@ class TestCollectionDiscovery:
     @served
     async def test_wordlist_finds_collections_and_synthesises_templates(self, env):
         """No object URL was ever observed; the run must still find records."""
-        env.config["modules"]["idor"]["endpoints"] = []
-        env.config["modules"]["idor"]["collection_paths"] = ["/api/invoices"]
+        env.config["modules"]["idor_differ"]["endpoints"] = []
+        env.config["modules"]["idor_differ"]["collection_paths"] = ["/api/invoices"]
         assert await env.run_module() == "done"
 
         titles = [f["title"] for f in env.findings()]
@@ -1054,9 +1054,9 @@ class TestCollectionDiscovery:
 
     @served
     async def test_404_collections_do_not_invent_endpoints(self, env):
-        env.config["modules"]["idor"]["endpoints"] = []
-        env.config["modules"]["idor"]["collection_paths"] = ["/api/widgets"]
-        env.config["modules"]["idor"]["max_collections"] = 5
+        env.config["modules"]["idor_differ"]["endpoints"] = []
+        env.config["modules"]["idor_differ"]["collection_paths"] = ["/api/widgets"]
+        env.config["modules"]["idor_differ"]["max_collections"] = 5
         assert await env.run_module() in ("done", "skipped")
         assert env.findings() == [], "a 404 is not an endpoint"
 
@@ -1076,7 +1076,7 @@ class TestCollectionDiscovery:
             "//api.ipinfodb.com/v3/ip-country/?key=1")
         env.state.add_asset(
             "api_endpoint", "api:/api/SecurityQuestions", "/api/SecurityQuestions")
-        env.config["modules"]["idor"]["endpoints"] = [
+        env.config["modules"]["idor_differ"]["endpoints"] = [
             f"{env.base}/api/invoices/100", f"{env.base}/api/invoices/200"]
 
         assert await env.run_module() == "done"
@@ -1101,7 +1101,7 @@ class TestOwnershipWithoutCollection:
 
     @staticmethod
     def _point_at_baskets(env):
-        env.config["modules"]["idor"]["endpoints"] = [
+        env.config["modules"]["idor_differ"]["endpoints"] = [
             f"{env.base}/api/invoices/100",
             f"{env.base}/api/baskets/100",
         ]

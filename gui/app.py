@@ -3193,7 +3193,7 @@ class MainWindow(QMainWindow):
             ]
             self._refresh_identities_table()
 
-        xss = config.get("xss", {})
+        xss = self._module_section(config, "xss_scan")
         if hasattr(self, "xss_browser_confirm_check"):
             self.xss_browser_confirm_check.setChecked(bool(xss.get("browser_confirm", True)))
             self.xss_max_points_spin.setValue(int(xss.get("max_points", 80) or 80))
@@ -3205,7 +3205,7 @@ class MainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     self.xss_dalfox_rate_spin.setValue(0)
 
-        nuclei = config.get("nuclei", {})
+        nuclei = self._module_section(config, "nuclei_scan")
         if hasattr(self, "nuclei_full_cve_check"):
             self.nuclei_full_cve_check.setChecked(bool(nuclei.get("full_cve_on_confirmed_apex", True)))
             if hasattr(self, "nuclei_update_check"):
@@ -3279,7 +3279,7 @@ class MainWindow(QMainWindow):
                 self.logic_max_probes_spin.setValue(12)
 
         if hasattr(self, "idor_endpoints_text"):
-            idor_cfg = self._module_section(config, "idor")
+            idor_cfg = self._module_section(config, "idor_differ")
             self.idor_endpoints_text.setPlainText(self._list_to_text(idor_cfg.get("endpoints", [])))
             self._set_spin(self.idor_max_probes_spin, idor_cfg.get("max_probes_per_template"), 15)
             obj_probe = idor_cfg.get("object_probe", {})
@@ -3347,7 +3347,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "sqli_oast_check") and isinstance(sqli_scan, dict):
             self.sqli_oast_check.setChecked(bool(sqli_scan.get("oast", True)))
 
-        fast_scan = config.get("fast_scan", {})
+        fast_scan = self._module_section(config, "fast_exposure_scan")
         if hasattr(self, "fast_scan_paths_input"):
             self.fast_scan_paths_input.setPlainText(self._list_to_text(fast_scan.get("paths", [])))
             self.fast_scan_timeout_spin.setValue(int(fast_scan.get("timeout", 4) or 4))
@@ -3456,7 +3456,6 @@ class MainWindow(QMainWindow):
                 ]
 
         if hasattr(self, "xss_browser_confirm_check"):
-            config.setdefault("xss", {})
             config["xss"].update({
                 "browser_confirm": self.xss_browser_confirm_check.isChecked(),
                 "max_points": self.xss_max_points_spin.value(),
@@ -3469,7 +3468,6 @@ class MainWindow(QMainWindow):
                 })
 
         if hasattr(self, "nuclei_full_cve_check"):
-            config.setdefault("nuclei", {})
             config["nuclei"].update({
                 "full_cve_on_confirmed_apex": self.nuclei_full_cve_check.isChecked(),
             })
@@ -3490,7 +3488,6 @@ class MainWindow(QMainWindow):
             sqli_cfg["oast"] = self.sqli_oast_check.isChecked()
 
         if hasattr(self, "fast_scan_paths_input"):
-            config.setdefault("fast_scan", {})
             config["fast_scan"].update({
                 "paths": self._text_to_list(self.fast_scan_paths_input.toPlainText()),
                 "timeout": self.fast_scan_timeout_spin.value(),
@@ -3580,7 +3577,7 @@ class MainWindow(QMainWindow):
             })
 
         if hasattr(self, "idor_endpoints_text"):
-            idor_cfg = self._ensure_module_section(config, "idor")
+            idor_cfg = self._ensure_module_section(config, "idor_differ")
             idor_cfg.update({
                 "endpoints": self._text_to_list(self.idor_endpoints_text.toPlainText()),
                 "max_probes_per_template": self.idor_max_probes_spin.value(),

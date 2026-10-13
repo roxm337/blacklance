@@ -2540,7 +2540,7 @@ def test_misconfig_backup_bypass_variant(monkeypatch):
     result = asyncio.run(MisconfigProbes(
         state, {"target": {"domain": "example.com",
                            "base_url": "http://example.com"},
-                "misconfig": {"max_paths": 5}}).run())
+                "modules": {"misconfig_probes": {"max_paths": 5}}}).run())
 
     assert result == "done"
     backups = [f for f in state.findings["findings"]
@@ -2864,7 +2864,8 @@ def test_header_reflection_unsanitized_is_filed(monkeypatch):
                     sources=["test"], attrs={})
     module = XSSScan(state, {"target": {"domain": "example.com",
                                         "base_url": "http://example.com"},
-                             "xss": {"browser_confirm": False}})
+                             "modules": {"xss_scan":
+                                         {"browser_confirm": False}}})
 
     result = asyncio.run(module.run())
 
@@ -2997,7 +2998,7 @@ def test_pack_merge_and_unknown_pack():
     assert "/rest/user/login" in config["modules"]["auth_audit"]["extra_login_paths"]
     assert ["admin@juice-sh.op", "admin123"] in \
         config["modules"]["auth_audit"]["extra_credentials"]
-    assert "coupons_2013.md" in config["modules"]["misconfig"]["extra_backup_bases"]
+    assert "coupons_2013.md" in config["modules"]["misconfig_probes"]["extra_backup_bases"]
     assert "ftp" in config["wordlists"]["content_discovery"]
     # Operator values win; pack appends without duplicating.
     config2 = {"modules": {"auth_audit": {

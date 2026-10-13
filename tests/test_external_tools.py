@@ -828,7 +828,7 @@ def test_nuclei_stale_templates_warn_but_scan(monkeypatch):
     logged = []
     state = StateManager(tempfile.mkdtemp())
     module = NucleiScan(state, {"target": {"domain": "example.com"},
-                                "nuclei": {}})
+                                "modules": {"nuclei_scan": {}}})
     module.log = logged.append
 
     out = asyncio.run(module._template_freshness({}))
@@ -862,7 +862,8 @@ def test_nuclei_refresh_opt_in_updates_first(monkeypatch):
     monkeypatch.setattr(nuclei_module, "nuclei_update_templates", update)
     state = StateManager(tempfile.mkdtemp())
     module = NucleiScan(state, {"target": {"domain": "example.com"},
-                                "nuclei": {"update_templates": True}})
+                                "modules": {"nuclei_scan":
+                                            {"update_templates": True}}})
 
     out = asyncio.run(module._template_freshness(
         {"update_templates": True}))

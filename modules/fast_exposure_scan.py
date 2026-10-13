@@ -116,7 +116,9 @@ class FastExposureScan(BaseModule):
 
     async def run(self) -> str:
         base_url = self._target()
-        cfg = self.config.get("fast_scan", {})
+        cfg = self.config.get("modules", {}).get(self.id, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
         timeout = int(cfg.get("timeout", 4) or 4)
         concurrency = max(1, int(cfg.get("concurrency", 8) or 8))
         paths = _normalize_paths(cfg.get("paths") or DEFAULT_PATHS)

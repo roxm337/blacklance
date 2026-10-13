@@ -23,23 +23,15 @@ def test_empty_config_warns_on_every_known_key():
 
 
 def test_covered_keys_stay_silent():
-    config = {
-        "tools": {"backend": "docker", "image": "mine:latest"},
-        "semgrep": {"enabled": False, "rules": "r"},
-        "modules": {
-            "content_discovery": {"kiterunner": {
-                "enabled": True, "wordlist": "w", "max_routes": 5,
-                "max_targets": 1, "delay_ms": 100, "connections": 1}},
-            "sqli_scan": {"oast": True},
-            "ssrf_scan": {"enabled": True, "max_points": 6},
-            "business_logic": {"enabled": True, "max_probes": 12},
-        },
-        "nuclei": {"max_age_days": 30, "update_templates": False},
-        "xss": {"dalfox_blind_oob": False, "dalfox_rate_limit": 0},
-        "oob": {"mode": "public", "enabled": True},
-        "crawl": {"browser": {"enabled": True, "depth": 1,
-                              "max_identities": 2}},
-    }
+    config: dict = {}
+    for dotted, default, _why in KNOWN_KEYS:
+        node = config
+        parts = dotted.split(".")
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            node = child if isinstance(child, dict) else node.setdefault(
+                part + "_", {})
+        node[parts[-1]] = default
 
     assert doctor(config) == []
 
@@ -102,3 +94,49 @@ def test_shipped_config_has_no_silent_default_blocks():
     assert config["auth"]["identities"] == {}
 
 
+def test_retired_namespaces_warn():
+    from core.config_doctor import retired_warnings
+    warnings = retired_warnings({
+        "xss": {"max_points": 1},
+        "modules": {"idor": {"endpoints": []}},
+    })
+    assert any(w.startswith("xss:") and "modules.xss_scan" in w
+               for w in warnings)
+    assert any(w.startswith("modules.idor:") and "idor_differ" in w
+               for w in warnings)
+    assert retired_warnings({"modules": {"xss_scan": {}}}) == []
+
+
+def test_unknown_module_keys_warn_but_extra_keys_pass():
+    from core.config_doctor import unknown_warnings
+    warnings = unknown_warnings({"modules": {
+        "xss_scan": {"write_methods": ["PUT"], "max_points": 5},
+        "misconfig_probes": {"extra_backup_bases": ["a.bak"]},
+    }})
+    assert any("write_methods" in w for w in warnings)
+    assert not any("extra_backup_bases" in w for w in warnings)
+    assert not any("max_points" in w for w in warnings)
+
+
+def test_doctor_flags_both_directions_on_typo_config():
+    config = {"modules": {"xss_scan": {"write_methods": ["PUT"]}}}
+    warnings = doctor(config)
+    assert any("write_methods" in w and "unknown key" in w for w in warnings)
+
+
+def test_shipped_configs_warn_only_on_informative_defaults():
+    """config.yaml and config.example.yaml must be warning-free except the
+    two keys whose defaults are dynamic/legacy by design (nuclei
+    max_seconds, full_cve). Anything else means a shipped default drifted
+    from the engine again."""
+    import yaml
+
+    allowed = {"modules.nuclei_scan.max_seconds",
+               "modules.nuclei_scan.full_cve"}
+    root = Path(__file__).resolve().parent.parent
+    for name in ("config.yaml", "config.example.yaml"):
+        with open(root / name) as handle:
+            warnings = doctor(yaml.safe_load(handle))
+        unexpected = [w for w in warnings
+                      if w.split(" ")[0] not in allowed]
+        assert unexpected == [], (name, unexpected)

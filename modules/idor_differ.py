@@ -1374,8 +1374,8 @@ class IdorDiffer(BaseModule):
         return int(self._cfg().get("max_probes_per_template", 15))
 
     def _cfg(self) -> dict:
-        block = self.module_config.get("idor")
-        return block if isinstance(block, dict) else {}
+        cfg = self.config.get("modules", {}).get(self.id, {})
+        return cfg if isinstance(cfg, dict) else {}
 
     def _write_enabled(self) -> bool:
         return bool(self._cfg().get("test_write_methods"))

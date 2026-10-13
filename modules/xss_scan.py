@@ -27,7 +27,9 @@ class XSSScan(BaseModule):
 
     async def run(self) -> str:
         points = self._candidate_injection_points()
-        cfg = self.config.get("xss", {})
+        cfg = self.config.get("modules", {}).get(self.id, {})
+        if not isinstance(cfg, dict):
+            cfg = {}
         max_points = int(cfg.get("max_points", 80))
         browser_enabled = bool(cfg.get("browser_confirm", True))
         browser_available = browser_enabled and await _playwright_available()

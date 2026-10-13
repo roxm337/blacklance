@@ -73,7 +73,13 @@ class DeepCrawl(BaseModule):
 
         discovered = set()
         evidence_refs = []
-        depth = int(self.config.get("crawl", {}).get("depth", 2))
+        crawl_cfg = self.config.get("crawl", {}).get("browser", {})
+        if not isinstance(crawl_cfg, dict):
+            crawl_cfg = {}
+        try:
+            depth = max(0, min(3, int(crawl_cfg.get("depth", 2) or 0)))
+        except (TypeError, ValueError):
+            depth = 2
         import time
         try:
             _deadline = float(self.config.get("module_timeout", 300) or 300)

@@ -7,9 +7,8 @@ its default credentials — belongs in a pack YAML under knowledge/,
 loaded explicitly for lab/benchmark runs and invisible otherwise.
 
 Packs merge into the standard module-config namespaces, so modules
-need no pack-aware code: they already read
-`config["modules"][id]` / `config["misconfig"]` style keys, and the
-pack just adds `extra_*` entries beside operator config.
+need no pack-aware code: they already read `config["modules"][id]`,
+and the pack just adds `extra_*` entries beside operator config.
 """
 
 from pathlib import Path

@@ -211,7 +211,7 @@ class LoginEnum(BaseModule):
         if status == 429 or any(s in body for s in lockout_signals):
             self.state.record_waf_block(url, status or 429)
             backoff = float(
-                self.config.get("auth", {}).get("probe_backoff_seconds", 0)
+                self.config.get("auth", {}).get("probe_backoff_seconds", 10)
             )
             if backoff > 0:
                 self.log(f"  Lockout signal; backing off {backoff:g}s")

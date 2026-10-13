@@ -243,7 +243,8 @@ def test_nuclei_full_cve_only_on_confirmed_apex():
     )
     disabled = NucleiScan(
         state,
-        {"target": {"domain": "example.com"}, "nuclei": {"full_cve": False}},
+        {"target": {"domain": "example.com"},
+         "modules": {"nuclei_scan": {"full_cve": False}}},
     )
     assert not disabled._allow_full_cve_pass(
         "https://example.com",
@@ -294,13 +295,13 @@ def test_misconfig_probes_are_bounded_and_detect_findings(monkeypatch):
     state = StateManager(str(tmpdir / "run" / "example.com"))
     config = {
         "target": {"domain": "example.com"},
-        "misconfig": {
+        "modules": {"misconfig_probes": {
             "concurrency": 4,
             "timeout": 1,
             "max_paths": 5,
             "max_consecutive_empty": 5,
             "progress_every": 2,
-        },
+        }},
         "wordlists": {
             "misconfig_paths": ["/missing1", "/missing2", "/.env", "/missing3", "/missing4", "/missing5"],
         },
@@ -333,7 +334,10 @@ def test_fast_exposure_scan_detects_exposed_env(monkeypatch):
         state, 
         {
             "target": {"domain": "example.com"},
-            "fast_scan": {"paths": ["/.env", "/missing"], "timeout": 1, "concurrency": 2},
+            "modules": {"fast_exposure_scan":
+                        {"paths": ["/.env", "/missing"], "timeout": 1,
+                         "concurrency": 2},
+                        "cors_audit": {"enabled": False}},
         },
     ).run())
 
