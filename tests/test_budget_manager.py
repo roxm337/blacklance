@@ -36,9 +36,27 @@ def test_custom_limits():
     budget = BudgetManager({"budget_limits": {"max_requests": 10}})
     for _ in range(10):
         budget.record_request()
+    assert budget.check() is False
+    assert budget.state.errored
+    assert budget.state.exceeded
+
+
+def test_check_is_pure_boolean_never_raises():
+    """check() is used as a boolean predicate (chain_executor._run_one);
+    it must return False on exhaustion, never raise — otherwise the raise
+    escapes execute() and skips state.save() after findings were pruned."""
+    budget = BudgetManager({"budget_limits": {"max_requests": 1}})
+    budget.record_request()
+    assert budget.check() is False
+
+
+def test_raise_if_exceeded_raises_for_controlled_call_sites():
+    budget = BudgetManager({"budget_limits": {"max_requests": 1}})
+    budget.record_request()
     with pytest.raises(BudgetExceededError):
-        budget.record_request()
-        budget.check()
+        budget.raise_if_exceeded()
+    fresh = BudgetManager({"budget_limits": {"max_requests": 1}})
+    assert fresh.raise_if_exceeded() is True
 
 
 def test_summary_shape():

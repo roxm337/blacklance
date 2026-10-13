@@ -300,6 +300,25 @@ def test_record_action_is_called():
     assert budget.actions == 1
 
 
+def test_real_exhausted_budget_skips_without_raising_or_losing_findings():
+    """A real exhausted BudgetManager must produce a skipped outcome, not
+    raise out of execute() — the raise used to escape after
+    prune_module_findings, deleting prior findings with no replacements."""
+    from core.budget_manager import BudgetManager
+    _register("test.probe", "LOW")
+    state = _state()
+    state.module["current"] = "chain_executor"
+    state.add_finding(title="Prior proven claim", severity="HIGH",
+                      confidence="CONFIRMED", category="test",
+                      description="seeded", evidence=["e1"], verified=True)
+    budget = BudgetManager({"budget_limits": {"max_requests": 1}})
+    budget.record_request()
+    ex = ChainExecutor(state, {}, budget=budget)
+    report = asyncio_run(ex.execute([_chain(action_id="test.probe")]))
+    assert report.skipped and report.skipped[0].detail == "budget exhausted"
+    assert "Prior proven claim" in [f["title"] for f in _findings(state)]
+
+
 # --- param preflight: never look clean because we were not armed ---------
 
 def test_sqli_action_gets_the_param_name_from_a_parameter_node():

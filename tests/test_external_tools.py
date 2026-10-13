@@ -92,6 +92,20 @@ def test_parse_nuclei_jsonl():
     assert results[0]["severity"] == "MEDIUM"
 
 
+def test_parse_nuclei_jsonl_tolerates_null_info():
+    """One template with info:null must not kill the whole parse."""
+    text = (
+        '{"template-id":"t1","info":null,"matched-at":"https://a.example"}\n'
+        '{"template-id":"t2","info":{"name":"N","severity":"high"},'
+        '"matched-at":"https://b.example"}\n'
+    )
+
+    results = parse_nuclei_jsonl(text)
+
+    assert [r["template_id"] for r in results] == ["t1", "t2"]
+    assert results[1]["severity"] == "HIGH"
+
+
 def test_extract_parameters_from_urls():
     results = extract_parameters_from_urls([
         "https://example.com/search?q=test&page=1",
@@ -307,6 +321,26 @@ def test_semgrep_scan_parses_rule_hits(monkeypatch):
         "line": 42,
         "snippet": "eval(x)",
     }]
+
+
+def test_semgrep_scan_survives_staging_failure(monkeypatch):
+    """A staging failure (mkdtemp throws) must degrade to empty results,
+    not raise UnboundLocalError from the unbound `result` variable."""
+    import tempfile as _tempfile
+    import tools.external as external
+
+    def _boom(*args, **kwargs):
+        raise OSError("no scratch space")
+
+    monkeypatch.setattr(_tempfile, "mkdtemp", _boom)
+    monkeypatch.setattr(external, "tool_available", lambda name: True)
+
+    result = asyncio.run(external.semgrep_scan(
+        {"https://h.test/app.js": "var x = 1; " * 20}))
+
+    assert result["available"] is True
+    assert result["results"] == []
+    assert result["error"] is not None
 
 
 def test_parse_sqlmap_text():

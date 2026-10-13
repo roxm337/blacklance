@@ -38,7 +38,7 @@ class BaseAgent:
                         max_tokens: int = 2000) -> Optional[str]:
         self.budget.record_llm_call()
         try:
-            self.budget.check()
+            self.budget.raise_if_exceeded()
         except BudgetExceededError as e:
             logger.warning(f"[{self.role.value}] {e}")
             return None

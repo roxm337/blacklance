@@ -207,7 +207,7 @@ class AgentSupervisor:
 
     def _check_budget(self, agent: BaseAgent):
         try:
-            agent.budget.check()
+            agent.budget.raise_if_exceeded()
         except BudgetExceededError as exc:
             self.audit.budget(agent.budget.summary())
             self.audit.record("engagement.abort", {"reason": str(exc)})

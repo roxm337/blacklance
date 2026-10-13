@@ -59,7 +59,14 @@ class BudgetManager:
         return self._semaphore
 
     def check(self) -> bool:
-        """Returns True if budget allows continuing. Raises if exceeded."""
+        """Pure predicate: True if budget allows continuing, False if exceeded.
+
+        Never raises — callers use this as a boolean (notably
+        ChainExecutor._run_one). Raising here used to escape execute() after
+        prune_module_findings, deleting prior findings with no replacements
+        and skipping state.save(). Controlled call sites that want the
+        exception use raise_if_exceeded() below.
+        """
         now = time.time()
         exceeded = []
 
@@ -73,8 +80,16 @@ class BudgetManager:
         if exceeded:
             self.state.exceeded = exceeded
             self.state.errored = True
-            raise BudgetExceededError(f"Budget exceeded: {', '.join(exceeded)}")
+            return False
 
+        return True
+
+    def raise_if_exceeded(self) -> bool:
+        """check() that raises for controlled call sites (agents) that handle
+        BudgetExceededError themselves and stop gracefully."""
+        if not self.check():
+            raise BudgetExceededError(
+                f"Budget exceeded: {', '.join(self.state.exceeded)}")
         return True
 
     def record_request(self, count: int = 1):

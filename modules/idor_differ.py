@@ -169,11 +169,13 @@ class CrossResult:
     def severity(self) -> str:
         # A write the server accepted is a data-integrity problem, not just a
         # confidentiality one, and the two are triaged differently.
+        # Uppercase: this flows straight into finding severity via _describe,
+        # and the schema (counts, dedupe, scoring) expects HIGH/CRITICAL/MEDIUM.
         if self.kind == "write":
-            return "critical"
+            return "CRITICAL"
         if self.kind == "anonymous":
-            return "critical" if self.attributed else "medium"
-        return "high"
+            return "CRITICAL" if self.attributed else "MEDIUM"
+        return "HIGH"
 
 
 def _describe(result: "CrossResult") -> tuple:

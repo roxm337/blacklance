@@ -286,7 +286,7 @@ def parse_nuclei_jsonl(text: str) -> List[dict]:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        info = item.get("info", {})
+        info = item.get("info") or {}
         parsed.append({
             "template_id": item.get("template-id", ""),
             "name": info.get("name", ""),
@@ -1306,6 +1306,8 @@ async def semgrep_scan(sources: dict, rules: str = "rules/semgrep",
     import tempfile
     tmpdir = ""
     names: dict[str, str] = {}
+    result: dict = {}
+    staging_error: str | None = None
     try:
         tmpdir = tempfile.mkdtemp(prefix="semgrep-", dir=os.getcwd())
         for index, (source_url, body) in enumerate(sources.items()):
@@ -1321,6 +1323,11 @@ async def semgrep_scan(sources: dict, rules: str = "rules/semgrep",
              "--metrics", "off", "--disable-version-check",
              "--include=*.js", "--include=*.ts", tmpdir],
             timeout=timeout)
+    except OSError as exc:
+        # Staging failure (no scratch space, read-only cwd): degrade to
+        # empty results with the error surfaced, never UnboundLocalError
+        # from the unbound `result` below.
+        staging_error = f"staging failed: {exc}"
     finally:
         if tmpdir:
             import shutil as _shutil
@@ -1353,7 +1360,7 @@ async def semgrep_scan(sources: dict, rules: str = "rules/semgrep",
         "scanned": len(names),
         "rule_errors": len(errors),
         "exit_code": result.get("exit_code"),
-        "error": result.get("error"),
+        "error": result.get("error") or staging_error,
     }
 
 

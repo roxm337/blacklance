@@ -32,6 +32,7 @@ from core.auth_harness import AuthHarness, Identity, fingerprint_body
 from aiohttp import web
 
 from modules.idor_differ import (
+    CrossResult,
     IdorDiffer,
     ObjectTemplate,
     _absent_ref,
@@ -620,7 +621,7 @@ class TestIdorDetected:
             assert finding["category"] == "broken-access-control"
             assert finding["confidence"] == "CONFIRMED", "leak must be attributed to a victim"
             assert finding["verified"] is True
-            assert finding["severity"] == "high"
+            assert finding["severity"] == "HIGH"
 
         # Each report must name the account whose data leaked, and both
         # accounts must be covered across the pair.
@@ -880,7 +881,7 @@ class TestAnonymousExposure:
         assert anon, env.findings()
         # Unauthenticated disclosure of a named customer's data is the worst
         # case, so it must not be filed as a medium.
-        assert anon[0]["severity"] == "critical"
+        assert anon[0]["severity"] == "CRITICAL"
         assert "alice@example.com" in anon[0]["description"]
 
 
@@ -984,7 +985,7 @@ class TestWriteAuthorisation:
         writes = [f for f in env.findings() if "can modify" in f["title"]]
         assert writes, [f["title"] for f in env.findings()]
         # A confirmed write is a data-integrity problem, not a read leak.
-        assert writes[0]["severity"] == "critical"
+        assert writes[0]["severity"] == "CRITICAL"
         assert "PATCH" in writes[0]["title"]
 
     @variant(write_vulnerable=True)
@@ -1301,3 +1302,22 @@ def test_csrf_hidden_field_parser_handles_attribute_order():
     fields = _hidden_form_fields(html)
     assert fields == {"csrfmiddlewaretoken": "tok-1",
                       "authenticity_token": "tok-2"}, fields
+
+
+def _cross(kind="read", attributed=True):
+    return CrossResult(
+        template=ObjectTemplate(url="https://h.test/api/orders/7"),
+        attacker="alice", victim="bob", object_ref="7", status=200,
+        leak_detected=True, attributed=attributed, kind=kind,
+    )
+
+
+def test_cross_result_severity_is_schema_uppercase():
+    """CrossResult.severity flows straight into finding severity via _describe;
+    lowercase values break severity counts and dedupe downstream."""
+    assert _cross(kind="read").severity == "HIGH"
+    assert _cross(kind="write").severity == "CRITICAL"
+    assert _cross(kind="anonymous", attributed=True).severity == "CRITICAL"
+    assert _cross(kind="anonymous", attributed=False).severity == "MEDIUM"
+
+

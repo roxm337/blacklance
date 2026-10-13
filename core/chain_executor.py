@@ -386,6 +386,20 @@ class ChainExecutor:
 
     async def execute(self, chains, max_chains: int = 10) -> ExecutionReport:
         report = ExecutionReport()
+        pending = list(chains)[:max_chains]
+        if self.budget is not None and not self.budget.check():
+            # Budget already exhausted: report every chain as skipped WITHOUT
+            # pruning. The old code pruned first and then raised out of here,
+            # deleting prior findings with no replacements and skipping
+            # state.save(); prune-then-skip-all would lose them just as
+            # silently. Untouched prior claims survive for the operator.
+            for chain in pending:
+                edges = list(getattr(chain, "edges", []) or [])
+                if edges:
+                    report.skipped.append(EdgeOutcome(
+                        edge=edges[0], action_id="",
+                        status="skipped", detail="budget exhausted"))
+            return report
         # Execution runs outside any module run, so without this the proven
         # findings were tagged with an empty module id — orphaned from every
         # module view — and every re-run stacked a fresh copy next to the
@@ -394,7 +408,7 @@ class ChainExecutor:
         self.state.prune_module_findings(self.module_id)
         self.state.module["current"] = self.module_id
         try:
-            for chain in list(chains)[:max_chains]:
+            for chain in pending:
                 # Vuln-driven edges (declared action, category match) run
                 # before generic probes: without this ordering one probe
                 # family (open redirects on every surface) spends the
