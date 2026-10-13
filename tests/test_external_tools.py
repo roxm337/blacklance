@@ -525,6 +525,14 @@ def test_docker_run_args_rewrites_repo_paths(monkeypatch):
     assert "https://t/FUZZ" in args
     args_in = external.docker_run_args(["nuclei", "-l", "t.txt"], stdin=True)
     assert "-i" in args_in
+    # Not-yet-existing output files rewrite too: the parent exists, so
+    # the container writes where the host will read.
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory(dir=cwd) as tmpdir:
+        name = os.path.basename(tmpdir)
+        out = external.docker_run_args(
+            ["ffuf", "-u", "https://t/FUZZ", "-o", f"{name}/fresh.json"])
+        assert f"/work/{name}/fresh.json" in out
     external.configure_tool_backend({})
 
 
@@ -871,3 +879,75 @@ def test_nuclei_refresh_opt_in_updates_first(monkeypatch):
     assert calls == ["info", "update", "info"]
     assert out["refreshed"] is True
     assert out["age_days"] == 0.0
+
+
+def test_parse_dalfox_jsonl_drops_url_less_lines():
+    from tools.external import parse_dalfox_jsonl
+    text = (
+        '{"type": "I", "inject_type": "blind-oob-Query-http", '
+        '"evidence": "session banner"}\n'
+        '{"type": "V", "url": "http://h.test/?q=1", '
+        '"payload": "<svg>", "inject_type": "reflected"}\n'
+    )
+    results = parse_dalfox_jsonl(text)
+    assert [r["url"] for r in results] == ["http://h.test/?q=1"]
+
+
+def test_parse_kiterunner_json_survives_string_status():
+    from tools.external import parse_kiterunner_json
+    text = (
+        '{"level": "info", "msg": "starting"}\n'
+        '{"method": "GET", "target": "https://h.test", "path": "/api", '
+        '"responses": [{"sc": "200 OK", "len": 12}]}\n'
+    )
+    assert parse_kiterunner_json(text) == [
+        {"url": "https://h.test/api", "method": "GET",
+         "status": 200, "length": 12}]
+
+
+def test_jsluice_urls_keeps_plain_drops_banners():
+    from tools import external as _external
+    seen = []
+
+    async def fake_run(args, timeout=60):
+        seen.append(args)
+        return {"stdout": '{"url": "https://h.test/a.js"}\n'
+                          "https://h.test/plain.js\n"
+                          "Error: jsluice blew up\n",
+                "stderr": "", "exit_code": 0, "error": None}
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(_external, "run_command", fake_run)
+    monkeypatch.setattr(_external, "tool_available", lambda name: True)
+    try:
+        found = asyncio.run(_external.jsluice_urls("var x = 1;"))
+    finally:
+        monkeypatch.undo()
+    assert found == ["https://h.test/a.js", "https://h.test/plain.js"], found
+
+
+def test_redact_for_log_scrubs_sessions():
+    from core.validators import redact_for_log
+    text = ("sqlmap --cookie sess=abc123 --headers 'Authorization: Bearer bt992' "
+            "Cookie: sess=abc123 api_key=supersecret ?key=shodansecret "
+            "wpscan --api-token WPVULNKEY")
+    out = redact_for_log(text)
+    for secret in ("abc123", "bt992", "supersecret", "shodansecret", "WPVULNKEY"):
+        assert secret not in out, out
+    assert "--cookie ***" in out and "--api-token ***" in out
+
+
+def test_sqlmap_scan_persists_redacted_output(monkeypatch):
+    import tools.external as external
+
+    async def fake_run(args, timeout=900, stdin_data=""):
+        return {"stdout": "GET parameter 'id' is vulnerable "
+                          "[Cookie: sess=abc123]",
+                "stderr": "", "exit_code": 0, "error": None}
+
+    monkeypatch.setattr(external, "run_command", fake_run)
+    monkeypatch.setattr(external, "tool_available", lambda name: True)
+    out = asyncio.run(external.sqlmap_scan(
+        "http://h.test/?id=1", cookie="sess=abc123"))
+    assert "abc123" not in out["stdout"], out["stdout"]
+    assert out["results"], "parse runs on unredacted output"

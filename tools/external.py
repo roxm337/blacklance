@@ -12,6 +12,8 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 from typing import List, Optional
 
+from core.validators import redact_for_log
+
 
 # ── Tool backend: local binaries or the docker toolchain image ──────
 #
@@ -105,8 +107,15 @@ def _rewrite_arg(arg: str, cwd: str) -> str:
         path = Path(arg)
         if not path.is_absolute():
             candidate = Path(cwd) / arg
-            if candidate.exists():
-                return f"/work/{candidate.relative_to(cwd).as_posix()}"
+            try:
+                rel = candidate.relative_to(cwd)
+            except ValueError:
+                return arg
+            # Output files (ffuf -o, arjun -oJ) do not exist yet: rewrite
+            # when the parent does, or the container writes into its own
+            # filesystem and the host parses a stale/empty file.
+            if candidate.exists() or candidate.parent.exists():
+                return f"/work/{rel.as_posix()}"
             return arg
         try:
             return f"/work/{path.relative_to(cwd).as_posix()}"
@@ -211,6 +220,7 @@ async def run_command(args: List[str], timeout: int = 120,
     except asyncio.TimeoutError:
         try:
             proc.kill()
+            await asyncio.wait_for(proc.wait(), 10)
         except Exception:
             pass
         return {"stdout": "", "stderr": "timeout", "exit_code": -1, "error": "timeout"}
@@ -685,7 +695,10 @@ def parse_dalfox_jsonl(text: str) -> List[dict]:
             continue
         url = (item.get("url") or item.get("data") or item.get("target")
                or item.get("poc_url") or item.get("poc") or "")
-        if not url and not item.get("type"):
+        if not url:
+            # Tier-only lines (blind-session banners, summaries) carry no
+            # URL to attribute: keeping them mints findings with empty
+            # URLs that no module can triage or reproduce.
             continue
         findings.append({
             "type": item.get("type", item.get("poc_type", "")),
@@ -758,16 +771,18 @@ def parse_kiterunner_json(text: str) -> List[dict]:
     hits = []
     for line in (text or "").splitlines():
         line = line.strip()
-        if not line or '"responses"' not in line:
+        if not line:
             continue
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or "responses" not in item:
             continue
         responses = item.get("responses") or []
         first = responses[0] if responses else {}
+        if not isinstance(first, dict):
+            first = {}
         target = str(item.get("target", "") or "").rstrip("/")
         path = str(item.get("path", "") or "")
         if not target or not path:
@@ -775,10 +790,18 @@ def parse_kiterunner_json(text: str) -> List[dict]:
         hits.append({
             "url": target + (path if path.startswith("/") else f"/{path}"),
             "method": str(item.get("method", "GET") or "GET"),
-            "status": int(first.get("sc") or 0),
-            "length": int(first.get("len") or 0),
+            "status": _safe_int(first.get("sc")),
+            "length": _safe_int(first.get("len")),
         })
     return hits
+
+
+def _safe_int(value: object) -> int:
+    """int() that survives '200 OK' strings, None, and floats."""
+    try:
+        return int(str(value).strip().split()[0])
+    except (ValueError, TypeError, IndexError):
+        return 0
 
 
 async def kiterunner_scan(targets: List[str], timeout: int = 900,
@@ -935,8 +958,10 @@ async def sqlmap_scan(url: str, timeout: int = 900,
     return {
         "available": True,
         "results": parse_sqlmap_text(result["stdout"]),
-        "stdout": result["stdout"][:20000],
-        "stderr": result["stderr"][:5000],
+        # Session credentials ride on argv (--cookie/--headers) and sqlmap
+        # echoes its config: scrub persisted output, never the parse.
+        "stdout": redact_for_log(result["stdout"][:20000]),
+        "stderr": redact_for_log(result["stderr"][:5000]),
         "exit_code": result["exit_code"],
         "oast": oast,
         "error": result.get("error"),
@@ -1180,7 +1205,8 @@ async def wpscan(target: str, api_token: str = "",
         data = json.loads(result["stdout"])
         return {"available": True, "results": data, "exit_code": result["exit_code"]}
     except json.JSONDecodeError:
-        return {"available": True, "results": {}, "raw": result["stdout"][:10000],
+        return {"available": True, "results": {},
+                "raw": redact_for_log(result["stdout"][:10000]),
                 "exit_code": result["exit_code"]}
 
 
@@ -1282,9 +1308,20 @@ async def jsluice_urls(js_body: str, timeout: int = 60) -> list:
             data = None
         if isinstance(data, dict) and data.get("url"):
             found.append(str(data["url"]))
-        else:
+        elif data is None and _looks_like_url(line):
+            # Plain-text URL lines pass through; error banners and log
+            # lines do not. The old code appended every non-JSON line
+            # verbatim and downstream scans probed banner text as URLs.
             found.append(line)
     return found
+
+
+def _looks_like_url(line: str) -> bool:
+    text = (line or "").strip()
+    if text.startswith(("http://", "https://", "//", "/")):
+        return True
+    # Bare host/path without scheme (api.example.com/v1, app.js?v=2).
+    return bool(re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}([/?#].*)?$", text))
 
 
 async def semgrep_scan(sources: dict, rules: str = "rules/semgrep",
@@ -1585,11 +1622,15 @@ class PublicInteractshClient:
     async def poll(self, corr_id: str) -> list[dict]:
         import asyncio as _asyncio
         import time as _time
+        needle = (corr_id or self._corr).strip().lower()
+        if not needle:
+            # Unregistered session: nothing to attribute, and polling the
+            # full timeout per silent point burns minutes per run.
+            return []
         session = _PUBLIC_SESSION.get(self.server) or {}
         log_path = str(session.get("log", "") or "")
         if not log_path:
             return []
-        needle = (corr_id or self._corr).strip().lower()
         deadline = _time.monotonic() + self.poll_timeout
         offset = self._offset
         while _time.monotonic() < deadline:

@@ -53,6 +53,13 @@ interactsh-client
 macOS / Homebrew where available:
     brew install nuclei httpx ffuf sqlmap whatweb
 
+Name shadowing warning: the Go scanner `httpx` (projectdiscovery) and the
+Python HTTP library `httpx` share a binary name. If `httpx -json` prints
+Python CLI help instead of probing hosts, the Python package is shadowing
+the scanner: `pip uninstall httpx` (the engine uses aiohttp, never the
+httpx package) or ensure the Go binary precedes it on PATH. The docker
+image reinstalls the Go httpx last for exactly this reason.
+
 Go tools:
     go install github.com/projectdiscovery/katana/cmd/katana@latest
     go install github.com/lc/gau/v2/cmd/gau@latest

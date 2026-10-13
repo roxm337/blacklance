@@ -1,6 +1,7 @@
 """Async tool wrappers for DNS, HTTP, WHOIS, port scanning, etc."""
 
 import asyncio
+import shlex
 import subprocess
 import json
 import re
@@ -145,8 +146,21 @@ def configure_http_limiter(max_concurrent: int = 5, max_per_minute: int = 60):
     _http_limiter = RateLimiter(max_concurrent, max_per_minute)
 
 
+def _missing(tool: str) -> bool:
+    """True when the binary is absent: callers return their normal shape
+    with error="missing: <tool>" instead of a false negative."""
+    import shutil as _shutil
+    return _shutil.which(tool) is None
+
+
 async def bash(command: str, timeout: int = 120) -> dict:
-    """Execute a shell command with timeout. Returns {stdout, stderr, exit_code}.
+    """Execute a shell command with timeout.
+
+    Returns {stdout, stderr, exit_code, error}. A missing binary is NOT
+    reported here (bash cannot know which word is the tool): shell-based
+    helpers check with _missing() first and return their normal shape
+    with error="missing: <tool>", so absence never looks like a
+    negative result.
 
     Docker tool backend: commands invoking a baked binary are transparently
     re-routed into the toolchain image (repo mounted at /work); anything
@@ -169,6 +183,9 @@ async def bash(command: str, timeout: int = 120) -> dict:
     except asyncio.TimeoutError:
         try:
             proc.kill()
+            # Reap, or the killed child lingers as a zombie (and a
+            # `docker run --rm` container keeps running detached).
+            await asyncio.wait_for(proc.wait(), 10)
         except Exception:
             pass
         return {"stdout": "", "stderr": "timeout", "exit_code": -1, "error": "timeout"}
@@ -259,6 +276,11 @@ async def _curl_subprocess(url: str, method: str = "GET",
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout + 5)
         out = stdout.decode("utf-8", errors="replace").strip()
     except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await asyncio.wait_for(proc.wait(), 10)
+        except Exception:
+            pass
         return {"status": 0, "body": "", "error": "timeout"}
     except Exception as e:
         return {"status": 0, "body": "", "error": str(e)}
@@ -297,7 +319,8 @@ async def curl(url: str, method: str = "GET",
               follow_redirects: bool = True,
               timeout: int = 10,
               identity: Optional[str] = None,
-              no_session: bool = False) -> dict:
+              no_session: bool = False,
+              strip_global_auth: bool = False) -> dict:
     """HTTP request via the pooled aiohttp engine.
 
     Drop-in replacement for the old curl wrapper: same arguments, same return
@@ -314,8 +337,16 @@ async def curl(url: str, method: str = "GET",
     send a global credential and report an authenticated read as a public
     exposure, and any request bound to a named identity, which supplies its
     own. Non-authentication headers such as User-Agent still apply.
+
+    `strip_global_auth` is for third-party API calls (urlscan, shodan,
+    hunter): the target's session credentials must never ride along to
+    someone else's API. The caller's own headers (API keys) survive.
     """
-    merged_headers = _merge_session_headers(headers, drop_auth=no_session or bool(identity))
+    if strip_global_auth:
+        merged_headers = {str(k): v for k, v in (headers or {}).items()
+                          if v is not None}
+    else:
+        merged_headers = _merge_session_headers(headers, drop_auth=no_session or bool(identity))
     if no_session:
         # Anonymous means anonymous, including a credential the caller passed
         # in explicitly: the caller's headers now survive `drop_auth`, so
@@ -388,12 +419,17 @@ async def curl_json_with_status(url: str, **kwargs) -> tuple:
 async def dig(record_type: str, domain: str,
               server: str = "", follow_cname: bool = False) -> dict:
     """DNS lookup. Returns list of answers."""
+    if _missing("dig"):
+        return {"domain": domain, "type": record_type, "answers": [],
+                "raw": "", "error": "missing: dig"}
+    rtype = shlex.quote(str(record_type or "A"))
+    target = shlex.quote(str(domain or ""))
     if follow_cname:
-        cmd = f"dig {record_type} {domain}"
+        cmd = f"dig {rtype} {target}"
     else:
-        cmd = f"dig +short {record_type} {domain}"
+        cmd = f"dig +short {rtype} {target}"
     if server:
-        cmd += f" @{server}"
+        cmd += f" @{shlex.quote(str(server))}"
     result = await bash(cmd)
     answers = []
     for line in result["stdout"].split("\n"):
@@ -436,7 +472,10 @@ async def dig_bulk(hostnames: list, record_type: str = "A",
 
 async def whois_lookup(query: str) -> dict:
     """WHOIS lookup for domain or IP."""
-    result = await bash(f"whois {query}")
+    if _missing("whois"):
+        return {"query": query, "fields": {}, "raw": "",
+                "error": "missing: whois"}
+    result = await bash(f"whois {shlex.quote(str(query or ''))}")
     text = result["stdout"]
     fields = {}
     for line in text.split("\n"):
@@ -456,7 +495,7 @@ async def whois_lookup(query: str) -> dict:
 async def rdap_lookup(domain: str) -> dict:
     """RDAP lookup — structured JSON alternative to WHOIS."""
     result = await bash(
-        f"curl -s 'https://rdap.org/domain/{domain}' "
+        f"curl -s 'https://rdap.org/domain/{shlex.quote(str(domain or ''))}' "
         f"--max-time 10 -H 'Accept: application/json' 2>/dev/null || true"
     )
     try:
@@ -498,7 +537,7 @@ async def rdap_lookup(domain: str) -> dict:
 async def crtsh(domain: str) -> list:
     """Query certificate transparency logs via crt.sh."""
     result = await bash(
-        f"curl -s 'https://crt.sh/?q=%25.{domain}&output=json' "
+        f"curl -s 'https://crt.sh/?q=%25.{shlex.quote(str(domain or ''))}&output=json' "
         f"--max-time 20"
     )
     try:
@@ -513,7 +552,7 @@ async def crtsh(domain: str) -> list:
 async def otx_passive_dns(domain: str) -> list:
     """Query OTX AlienVault for passive DNS/subdomain data."""
     result = await bash(
-        f"curl -s 'https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns' "
+        f"curl -s 'https://otx.alienvault.com/api/v1/indicators/domain/{shlex.quote(str(domain or ''))}/passive_dns' "
         f"--max-time 15 -H 'User-Agent: Mozilla/5.0' 2>/dev/null || true"
     )
     try:
@@ -524,25 +563,26 @@ async def otx_passive_dns(domain: str) -> list:
 
 
 async def urlscan_search(domain: str, api_key: str = "") -> list:
-    """Query urlscan.io for domain-related URLs."""
-    headers_str = ""
-    if api_key:
-        headers_str = f" -H 'API-Key: {api_key}'"
-    result = await bash(
-        f"curl -s 'https://urlscan.io/api/v1/search/?q=domain:{domain}&size=200' "
-        f"{headers_str} --max-time 15 2>/dev/null || true"
+    """Query urlscan.io for domain-related URLs.
+
+    Engine call (no shell): the API key never appears in a process list.
+    Global target credentials are stripped — they must not ride along to
+    a third-party API.
+    """
+    headers = {"API-Key": api_key} if api_key else None
+    data = await curl_json(
+        f"https://urlscan.io/api/v1/search/?q=domain:{quote(str(domain or ''))}&size=200",
+        headers=headers, timeout=15, strip_global_auth=True,
     )
-    try:
-        data = json.loads(result["stdout"])
-        return data.get("results", [])
-    except (json.JSONDecodeError, TypeError):
+    if not isinstance(data, dict):
         return []
+    return data.get("results", [])
 
 
 async def hackertarget_hostsearch(domain: str) -> list:
     """HackerTarget host search API (free tier)."""
     result = await bash(
-        f"curl -s 'https://api.hackertarget.com/hostsearch/?q={domain}' "
+        f"curl -s 'https://api.hackertarget.com/hostsearch/?q={shlex.quote(str(domain or ''))}' "
         f"--max-time 15 2>/dev/null || true"
     )
     output = result.get("stdout", "").strip()
@@ -581,7 +621,7 @@ async def rapiddns(domain: str) -> list:
     result = await curl(
         f"https://rapiddns.io/subdomain/{quote(domain)}?full=1",
         output="body",
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return _extract_domain_hosts(result.get("body", ""), domain)
 
@@ -590,7 +630,7 @@ async def anubisdb(domain: str) -> list:
     """AnubisDB passive subdomain source."""
     data = await curl_json(
         f"https://jldc.me/anubis/subdomains/{quote(domain)}",
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, list):
         return []
@@ -611,7 +651,7 @@ async def certspotter(domain: str) -> list:
     })
     data = await curl_json(
         f"https://api.certspotter.com/v1/issuances?{query}",
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, list):
         return []
@@ -633,7 +673,7 @@ async def bgpview_asn(asn: str) -> dict:
         return {"asn": asn, "ipv4_prefixes": [], "ipv6_prefixes": [], "raw": {}}
     data = await curl_json(
         f"https://api.bgpview.io/asn/{clean_asn}/prefixes",
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, dict):
         return {"asn": f"AS{clean_asn}", "ipv4_prefixes": [], "ipv6_prefixes": [], "raw": {}}
@@ -660,7 +700,7 @@ async def epss_score(cves: list[str]) -> dict:
     query = urlencode({"cve": ",".join(cleaned)})
     data = await curl_json(
         f"https://api.first.org/data/v1/epss?{query}",
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, dict):
         return {}
@@ -688,7 +728,7 @@ async def osv_query(package: str, ecosystem: str = "") -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
         data=json.dumps(payload),
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -700,7 +740,7 @@ async def urlhaus_host(host: str) -> dict:
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data=urlencode({"host": host}),
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -712,7 +752,7 @@ async def threatfox_ioc(ioc: str) -> dict:
         method="POST",
         headers={"Content-Type": "application/json"},
         data=json.dumps({"query": "search_ioc", "search_term": ioc}),
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -725,7 +765,7 @@ async def ip_api(query: str) -> dict:
     )
     data = await curl_json(
         f"http://ip-api.com/json/{quote(query)}?{urlencode({'fields': fields})}",
-        timeout=10,
+        timeout=10, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -737,7 +777,7 @@ async def virustotal_domain(domain: str, api_key: str) -> dict:
     data = await curl_json(
         f"https://www.virustotal.com/api/v3/domains/{quote(domain)}",
         headers={"x-apikey": api_key},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -750,7 +790,7 @@ async def virustotal_domain_subdomains(domain: str, api_key: str, limit: int = 4
     data = await curl_json(
         f"https://www.virustotal.com/api/v3/domains/{quote(domain)}/subdomains?{query}",
         headers={"x-apikey": api_key},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, dict):
         return []
@@ -769,7 +809,7 @@ async def virustotal_ip(ip: str, api_key: str) -> dict:
     data = await curl_json(
         f"https://www.virustotal.com/api/v3/ip_addresses/{quote(ip)}",
         headers={"x-apikey": api_key},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -782,7 +822,7 @@ async def virustotal_url(url: str, api_key: str) -> dict:
     data = await curl_json(
         f"https://www.virustotal.com/api/v3/urls/{url_id}",
         headers={"x-apikey": api_key},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -794,7 +834,7 @@ async def greynoise_ip(ip: str, api_key: str) -> dict:
     data = await curl_json(
         f"https://api.greynoise.io/v3/community/{quote(ip)}",
         headers={"key": api_key, "Accept": "application/json"},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -807,7 +847,7 @@ async def abuseipdb_check(ip: str, api_key: str, max_age_days: int = 90) -> dict
     data = await curl_json(
         f"https://api.abuseipdb.com/api/v2/check?{query}",
         headers={"Key": api_key, "Accept": "application/json"},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -819,7 +859,7 @@ async def chaos_subdomains(domain: str, api_key: str) -> list:
     data = await curl_json(
         f"https://dns.projectdiscovery.io/dns/{quote(domain)}/subdomains",
         headers={"Authorization": api_key},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, dict):
         return []
@@ -838,7 +878,7 @@ async def hunter_domain(domain: str, api_key: str, limit: int = 50) -> dict:
     query = urlencode({"domain": domain, "api_key": api_key, "limit": limit})
     data = await curl_json(
         f"https://api.hunter.io/v2/domain-search?{query}",
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -853,7 +893,7 @@ async def ssllabs_scan(host: str, publish: bool = False, from_cache: bool = True
     })
     data = await curl_json(
         f"https://api.ssllabs.com/api/v3/analyze?{query}",
-        timeout=30,
+        timeout=30, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -865,7 +905,7 @@ async def securitytrails_subdomains(domain: str, api_key: str) -> list:
     data = await curl_json(
         f"https://api.securitytrails.com/v1/domain/{quote(domain)}/subdomains",
         headers={"APIKEY": api_key, "Accept": "application/json"},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     if not isinstance(data, dict):
         return []
@@ -884,7 +924,7 @@ async def securitytrails_history_dns(domain: str, api_key: str, record_type: str
     data = await curl_json(
         f"https://api.securitytrails.com/v1/history/{quote(domain)}/dns/{quote(record_type)}",
         headers={"APIKEY": api_key, "Accept": "application/json"},
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -899,7 +939,7 @@ async def vulners_search(query_text: str, api_key: str = "", limit: int = 20) ->
         method="POST",
         headers={"Content-Type": "application/json"},
         data=json.dumps(payload),
-        timeout=20,
+        timeout=20, strip_global_auth=True,
     )
     return data if isinstance(data, dict) else {}
 
@@ -908,10 +948,19 @@ async def nmap_scan(target: str, ports: str = "--top-ports 1000",
                     version_detect: bool = False,
                     scripts: str = "") -> dict:
     """Run nmap scan. HIGH detectability."""
+    # ports/scripts legitimately contain nmap flags (the default ports IS
+    # a flag), so quoting would break them: validate the alphabet
+    # instead and fail closed on metacharacters.
+    for value, label in ((ports, "ports"), (scripts, "scripts")):
+        if re.search(r"[^\w\s,./-]", str(value or "")):
+            raise ValueError(f"nmap {label} contains shell metacharacters")
+    if _missing("nmap"):
+        return {"hosts": [], "raw": "", "error": "missing: nmap"}
     flags = "-sV" if version_detect else ""
     script_flag = f"--script={scripts}" if scripts else ""
     result = await bash(
-        f"nmap {flags} {script_flag} {ports} {target} 2>/dev/null",
+        f"nmap {flags} {script_flag} {ports} "
+        f"{shlex.quote(str(target))} 2>/dev/null",
         timeout=600
     )
     return parse_nmap_output(result["stdout"])
@@ -945,8 +994,12 @@ def parse_nmap_output(text: str) -> dict:
 
 async def cert_info(host: str, port: int = 443) -> dict:
     """Get TLS certificate info via openssl."""
+    if _missing("openssl"):
+        return {"san": [], "error": "missing: openssl"}
+    endpoint = f"{shlex.quote(str(host or ''))}:{int(port or 443)}"
+    server = shlex.quote(str(host or ""))
     result = await bash(
-        f"echo | openssl s_client -connect {host}:{port} -servername {host} 2>/dev/null "
+        f"echo | openssl s_client -connect {endpoint} -servername {server} 2>/dev/null "
         f"| openssl x509 -noout -subject -dates -issuer -serial -fingerprint -ext subjectAltName 2>/dev/null"
     )
     info = {}
@@ -956,7 +1009,7 @@ async def cert_info(host: str, port: int = 443) -> dict:
             info[key.strip().lower()] = val.strip()
     # Also get SANs
     san_result = await bash(
-        f"echo | openssl s_client -connect {host}:{port} -servername {host} 2>/dev/null "
+        f"echo | openssl s_client -connect {endpoint} -servername {server} 2>/dev/null "
         f"| openssl x509 -noout -ext subjectAltName 2>/dev/null"
     )
     sans = re.findall(r"DNS:([\w.*-]+)", san_result["stdout"])
@@ -966,11 +1019,15 @@ async def cert_info(host: str, port: int = 443) -> dict:
 
 async def tls_protocols(host: str, port: int = 443) -> dict:
     """Check supported TLS protocols and detect weak ones."""
+    if _missing("openssl"):
+        return {"error": "missing: openssl"}
     protocols = {}
+    endpoint = f"{shlex.quote(str(host or ''))}:{int(port or 443)}"
+    server = shlex.quote(str(host or ""))
     for proto in ["ssl2", "ssl3", "tls1", "tls1_1", "tls1_2", "tls1_3"]:
         result = await bash(
-            f"echo | timeout 5 openssl s_client -{proto} -connect {host}:{port} "
-            f"-servername {host} 2>&1 | head -3"
+            f"echo | timeout 5 openssl s_client -{proto} -connect {endpoint} "
+            f"-servername {server} 2>&1 | head -3"
         )
         out = result["stdout"].lower()
         if "handshake failure" in out or "unknown option" in out or "no protocols" in out:
@@ -986,8 +1043,8 @@ async def wayback_cdx(domain: str, limit: int = 5000,
                        output_fields: str = "timestamp,original,statuscode,mimetype") -> list:
     """Query Wayback Machine CDX API for historical URLs."""
     result = await bash(
-        f"curl -s 'https://web.archive.org/cdx/search/cdx?url={domain}/*"
-        f"&output=json&limit={limit}&fl={output_fields}&collapse=urlkey' "
+        f"curl -s 'https://web.archive.org/cdx/search/cdx?url={shlex.quote(str(domain or ''))}/*"
+        f"&output=json&limit={int(limit)}&fl={shlex.quote(str(output_fields))}&collapse=urlkey' "
         f"--max-time 45"
     )
     try:
@@ -1010,7 +1067,8 @@ async def ssl_scan(host: str, port: int = 443) -> dict:
 
     if _tool_available("testssl.sh"):
         ts = await bash(
-            f"testssl.sh --quiet --color 0 --jsonfile /dev/stdout {host}:{port} 2>/dev/null",
+            f"testssl.sh --quiet --color 0 --jsonfile /dev/stdout "
+            f"{shlex.quote(str(host or ''))}:{int(port or 443)} 2>/dev/null",
             timeout=120
         )
         try:
@@ -1039,10 +1097,12 @@ async def httpx_probe(targets: list, timeout: int = 10) -> list:
     import shutil
     if not _tool_available("httpx"):
         return []
-    targets_str = "\n".join(targets)
+    # Quote the whole block as one shell word: newlines survive inside
+    # quotes, while a ' in a target can no longer break out of echo.
+    targets_str = "\n".join(str(t) for t in targets)
     result = await bash(
-        f"echo '{targets_str}' | httpx -silent -status-code -title -tech-detect "
-        f"-json -timeout {timeout} 2>/dev/null",
+        f"echo {shlex.quote(targets_str)} | httpx -silent -status-code -title -tech-detect "
+        f"-json -timeout {int(timeout)} 2>/dev/null",
         timeout=120
     )
     probed = []
@@ -1062,7 +1122,7 @@ async def gau_urls(domain: str, timeout: int = 60) -> list:
     if not _tool_available("gau"):
         return []
     result = await bash(
-        f"gau --subs {domain} --threads 5 --timeout 30 2>/dev/null",
+        f"gau --subs {shlex.quote(str(domain or ''))} --threads 5 --timeout 30 2>/dev/null",
         timeout=timeout
     )
     return [u.strip() for u in result["stdout"].split("\n") if u.strip()]
@@ -1074,7 +1134,7 @@ async def subfinder_scan(domain: str, timeout: int = 60) -> list:
     if not _tool_available("subfinder"):
         return []
     result = await bash(
-        f"subfinder -d {domain} -silent -all 2>/dev/null",
+        f"subfinder -d {shlex.quote(str(domain or ''))} -silent -all 2>/dev/null",
         timeout=timeout
     )
     return [s.strip() for s in result["stdout"].split("\n")
@@ -1087,7 +1147,7 @@ async def amass_passive(domain: str, timeout: int = 120) -> list:
     if not _tool_available("amass"):
         return []
     result = await bash(
-        f"amass enum -passive -d {domain} -nocolor 2>/dev/null",
+        f"amass enum -passive -d {shlex.quote(str(domain or ''))} -nocolor 2>/dev/null",
         timeout=timeout
     )
     return [s.strip() for s in result["stdout"].split("\n")
@@ -1099,9 +1159,9 @@ async def dnsx_resolve(hostnames: list, timeout: int = 60) -> dict:
     import shutil
     if not _tool_available("dnsx"):
         return {}
-    input_str = "\n".join(hostnames)
+    input_str = "\n".join(str(h) for h in hostnames)
     result = await bash(
-        f"echo '{input_str}' | dnsx -silent -a -resp -json 2>/dev/null",
+        f"echo {shlex.quote(input_str)} | dnsx -silent -a -resp -json 2>/dev/null",
         timeout=timeout
     )
     resolved = {}
@@ -1124,9 +1184,10 @@ async def trufflehog_scan(target: str, timeout: int = 120) -> list:
     import shutil
     if not _tool_available("trufflehog"):
         return []
+    quoted = shlex.quote(str(target or ""))
     result = await bash(
-        f"trufflehog git --repo={target} --json --no-update 2>/dev/null || "
-        f"trufflehog filesystem {target} --json 2>/dev/null",
+        f"trufflehog git --repo={quoted} --json --no-update 2>/dev/null || "
+        f"trufflehog filesystem {quoted} --json 2>/dev/null",
         timeout=timeout
     )
     findings = []
@@ -1141,24 +1202,21 @@ async def trufflehog_scan(target: str, timeout: int = 120) -> list:
 
 
 async def shodan_host(ip: str, api_key: str) -> dict:
-    """Query Shodan host info API."""
+    """Query Shodan host info API (engine call: the key skips ps)."""
     if not api_key:
         return {}
-    result = await bash(
-        f"curl -s 'https://api.shodan.io/shodan/host/{ip}?key={api_key}' "
-        f"--max-time 10 2>/dev/null || true"
+    data = await curl_json(
+        f"https://api.shodan.io/shodan/host/{quote(str(ip or ''))}?key={quote(str(api_key))}",
+        timeout=10, strip_global_auth=True,
     )
-    try:
-        return json.loads(result["stdout"])
-    except (json.JSONDecodeError, TypeError):
-        return {}
+    return data if isinstance(data, dict) else {}
 
 
 async def asn_lookup(ip: str) -> dict:
     """Look up ASN info for an IP using multiple sources."""
     # Primary: ipinfo.io (no key needed for basic)
     result = await bash(
-        f"curl -s 'https://ipinfo.io/{ip}/json' --max-time 10 2>/dev/null || true"
+        f"curl -s 'https://ipinfo.io/{shlex.quote(str(ip or ''))}/json' --max-time 10 2>/dev/null || true"
     )
     try:
         data = json.loads(result["stdout"])
@@ -1174,7 +1232,7 @@ async def asn_lookup(ip: str) -> dict:
     except (json.JSONDecodeError, TypeError):
         pass
     # Fallback: whois radb
-    result2 = await bash(f"whois -h whois.radb.net {ip} 2>/dev/null | grep -i origin")
+    result2 = await bash(f"whois -h whois.radb.net {shlex.quote(str(ip or ''))} 2>/dev/null | grep -i origin")
     asn = ""
     for line in result2["stdout"].split("\n"):
         if "origin" in line.lower():

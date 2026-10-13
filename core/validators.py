@@ -228,14 +228,65 @@ def redact_secret(value: str) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+# Credential shapes redacted from persisted tool output and evidence.
+# Reports and state files must never carry a session that can be replayed:
+# argv values (sqlmap --cookie/--headers, wpscan --api-token) and
+# reflecting-endpoint echoes land in stdout captures verbatim.
+_REDACT_PATTERNS = (
+    # Flag form first (--cookie X): swallows the quote that longer
+    # patterns would otherwise trip on.
+    (re.compile(r"--(api-token|cookie|headers)\s+(\S+)"), r"--\1 ***"),
+    # Bearer tokens before bare Authorization (which would eat "Bearer").
+    (re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._~+/-]+)"), r"\1***"),
+    (re.compile(r"(?i)\b(authorization\s*[:=]\s*)(?!bearer\b)([^\s'\"]+)"),
+     r"\1***"),
+    # Cookie: a=b; c=d  /  Cookie: a=b
+    (re.compile(r"(?i)\b(cookie\s*[:=]\s*)([^\s;'\"]+(?:\s*;\s*[^\s;'\"]+)*)"),
+     r"\1***"),
+    # api_key=xxx, apiKey: "xxx", 'api_key': 'xxx'
+    (re.compile(r"(?i)\b(api[_-]?key|api[_-]?token)\b(['\"]?\s*[:=]\s*['\"]?)([^'\"\s,}]+)"),
+     r"\1\2***"),
+    # ?key=xxx& / ?api_key=xxx in echoed URLs
+    (re.compile(r"(?i)([?&](?:api[_-]?key|key|token)=)([^&\s'\"]+)"), r"\1***"),
+)
+
+
+def redact_for_log(text: str) -> str:
+    """Scrub session credentials from text bound for reports/state/logs."""
+    out = str(text or "")
+    for pattern, replacement in _REDACT_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out
+
+
 # Substrings that mark a match as documentation, test fixture, or SDK
 # bundle rather than a live credential. Shared by secret mining (JS,
 # evidence files) and API audits so "example" is weak everywhere.
 SECRET_EXAMPLE_MARKERS = (
     "example", "test", "demo", "sample", "xxx", "changeme", "placeholder",
     "your_", "fake", "dummy", "abcdef", "12345", "password123", "testkey",
-    "public_key", "publickey",
+    "public_key", "publickey", "john doe",
 )
+
+
+def _has_example_marker(*texts: str) -> bool:
+    """Do any of the texts carry a docs/test marker?
+
+    Markers shorter than five characters ("test", "xxx") match on word
+    boundaries only: substring matching dismissed real credentials whose
+    claims merely contained "latest" or "context".
+    """
+    for text in texts:
+        lowered = str(text or "").lower()
+        if not lowered:
+            continue
+        for marker in SECRET_EXAMPLE_MARKERS:
+            if len(marker) < 5:
+                if re.search(r"\b" + re.escape(marker) + r"\b", lowered):
+                    return True
+            elif marker in lowered:
+                return True
+    return False
 
 
 def grade_secret_candidate(secret_type: str, value: str,

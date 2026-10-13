@@ -40,6 +40,7 @@ RUN for i in 1 2 3; do if go install github.com/tomnomnom/anew@latest; then brea
 RUN for i in 1 2 3; do if go install github.com/tomnomnom/qsreplace@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
 RUN for i in 1 2 3; do if go install github.com/tomnomnom/gf@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
 RUN for i in 1 2 3; do if go install github.com/PentestPad/subzy@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
+RUN for i in 1 2 3; do if go install github.com/theblackturtle/openredirex@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
 # Tier-1 hunt upgrades (2026-10 research): jsluice extracts URLs/words
 # from JS bundles (feeds endpoint discovery); Gxss filters reflection
 # candidates so dalfox only fires on live params. jsluice needs cgo

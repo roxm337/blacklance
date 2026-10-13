@@ -312,8 +312,10 @@ class InteractshClient:
 
     async def poll(self, corr_id: str) -> list[dict]:
         """Poll for callbacks matching the correlation ID."""
-        if not self.enabled:
-            await asyncio.sleep(self.poll_interval)
+        if not self.enabled or not corr_id:
+            # Disabled or unregistered: instant empty, never a sleep loop.
+            # Blind-confirm loops poll up to 6x; each sleeping poll
+            # interval on a dead client burns the module time-box.
             return []
         endpoint = self.poll_url or (f"{self.server_url}/interactions" if self.server_url else "")
         if not endpoint:
