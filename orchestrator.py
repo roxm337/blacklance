@@ -776,14 +776,28 @@ Examples:
 
     if args.tools:
         from tools.tool_manager import ToolManager
-        tm = ToolManager()
+        _probe = Orchestrator(
+            target=args.target,
+            output_dir=args.output,
+            config_path=args.config,
+            mode="auto",  # config layering only; nothing runs
+        )
+        tm = ToolManager(_probe.config)
         summary = tm.summary()
-        print(f"\nExternal tools ({summary['available']}/{summary['total']} available):")
+        print(f"\nExternal tools ({summary['available']}/{summary['total']} "
+              f"available{tm.backend_note}):")
+        if tm.backend_warning:
+            print(f"  ⚠ {tm.backend_warning}")
         for t in sorted(summary['available_tools']):
             print(f"  ✓ {t}")
         for t in sorted(summary['missing_tools']):
             print(f"  ✗ {t}")
-        print(f"\n  Installer: {summary['installer']}")
+        if "via docker image" in tm.backend_note:
+            print("\n  Add tools by rebuilding the image: "
+                  "docker build -f docker/Dockerfile.tools "
+                  "-t osint-tools:latest .")
+        else:
+            print(f"\n  Installer: {summary['installer']}")
         print()
         return
 

@@ -157,12 +157,43 @@ else:
 class ToolManager:
     """Detect, install, and manage external pentesting tools."""
 
-    def __init__(self):
+    def __init__(self, config: dict | None = None):
         self.tools: dict[str, ToolInfo] = {}
         self._scanned = False
+        self.config = config or {}
+        self.backend_note = ""
+        self.backend_warning = ""
 
     def scan(self) -> dict[str, ToolInfo]:
-        """Scan for available tools."""
+        """Scan for available tools.
+
+        Under tools.backend=docker this probes the toolchain image (one
+        container, not one per tool): local PATH is meaningless there,
+        and reporting it made --tools claim tools were missing that the
+        pipeline resolves fine. Falls back to the host scan with a
+        warning when the daemon or image is unreachable.
+        """
+        from tools.external import (
+            configure_tool_backend, tool_backend, _docker_ready, _BACKEND,
+        )
+        if self.config:
+            configure_tool_backend(self.config)
+        if self.config and tool_backend() == "docker":
+            if _docker_ready():
+                self.backend_note = (
+                    f" — via docker image {_BACKEND['image']}")
+                return self.scan_docker(_BACKEND["image"])
+            self.backend_warning = (
+                f"tools.backend=docker but {_BACKEND['image']} is "
+                "unreachable — showing host binaries; pipeline modules "
+                "will skip until the daemon is back")
+            self.backend_note = " — host binaries (docker backend down)"
+        else:
+            self.backend_note = " — host binaries"
+        return self.scan_local()
+
+    def scan_local(self) -> dict[str, ToolInfo]:
+        """Scan for available tools on the host PATH."""
         for tool in TOOL_DEFINITIONS:
             resolved = tool.binary or tool.name
             path = shutil.which(resolved)
@@ -171,6 +202,38 @@ class ToolManager:
             if path:
                 tool.version = self._get_version(resolved)
             self.tools[tool.name] = tool
+        self._scanned = True
+        return self.tools
+
+    def scan_docker(self, image: str) -> dict[str, ToolInfo]:
+        """Probe binary presence inside the toolchain image.
+
+        One `docker run` for all tools: each definition maps to its
+        binary (binary or name, e.g. kiterunner ships as `kr`).
+        """
+        import shlex as _shlex
+        by_binary: dict[str, list] = {}
+        for tool in TOOL_DEFINITIONS:
+            by_binary.setdefault(tool.binary or tool.name, []).append(tool)
+        script = ("for t in "
+                  + " ".join(_shlex.quote(b) for b in sorted(by_binary))
+                  + '; do command -v "$t" >/dev/null '
+                    '&& echo "OK $t" || echo "MISS $t"; done')
+        try:
+            proc = subprocess.run(
+                ["docker", "run", "--rm", image, "sh", "-c", script],
+                capture_output=True, text=True, timeout=120,
+            )
+            found = {line[3:] for line in proc.stdout.splitlines()
+                     if line.startswith("OK ")}
+        except Exception:
+            found = set()
+        for binary, tools in by_binary.items():
+            for tool in tools:
+                tool.available = binary in found
+                tool.path = binary if tool.available else ""
+                tool.version = ""
+                self.tools[tool.name] = tool
         self._scanned = True
         return self.tools
 
