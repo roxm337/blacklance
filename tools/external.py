@@ -103,6 +103,14 @@ def _rewrite_arg(arg: str, cwd: str) -> str:
     """Map a host path under the repo root to its /work twin inside."""
     if not arg or arg.startswith("-") or "://" in arg:
         return arg
+    if "/" not in arg:
+        # Bare tokens are not paths: the binary name itself, keywords
+        # (FUZZ), counts, modes. The old parent-exists heuristic rewrote
+        # every one of these (parent == cwd always exists), turning
+        # `openredirex -k FUZZ` into `/work/openredirex -k /work/FUZZ`
+        # and every docker-routed call into exit 127. The container cwd
+        # is /work, so a bare filename resolves identically either way.
+        return arg
     try:
         path = Path(arg)
         if not path.is_absolute():
@@ -992,15 +1000,31 @@ async def corsy_scan(target: str, timeout: int = 180) -> dict:
     }
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _parse_openredirex_hits(stdout: str) -> list:
+    """[FOUND] lines, ANSI-stripped. The banner, progress bar, and [INFO]
+    lines never qualify."""
+    hits = []
+    for line in stdout.splitlines():
+        if "[FOUND]" in line:
+            hits.append(_ANSI_RE.sub("", line).strip())
+    return hits
+
+
 async def openredirex_scan(urls: List[str], timeout: int = 300) -> dict:
-    """Run openredirex against URL candidates."""
+    """Run openredirex against URL candidates (devanshbatham Python build:
+    URLs on stdin, -k keyword swapped for payloads, hardcoded payload list
+    unless -p is given — so -p is left off. Concurrency stays low: this is
+    corroboration, not a fuzzing campaign)."""
     if not tool_available("openredirex"):
         return {"available": False, "results": [], "error": "missing"}
-    result = await run_command(["openredirex", "-p", "FUZZ"], timeout=timeout, stdin_data="\n".join(urls))
-    hits = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
+    result = await run_command(["openredirex", "-k", "FUZZ", "-c", "10"],
+                               timeout=timeout, stdin_data="\n".join(urls))
     return {
         "available": True,
-        "results": hits,
+        "results": _parse_openredirex_hits(result["stdout"]),
         "stdout": result["stdout"][:20000],
         "stderr": result["stderr"][:5000],
         "exit_code": result["exit_code"],

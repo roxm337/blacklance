@@ -235,6 +235,45 @@ def test_dalfox_scan_blind_oob_flag(monkeypatch):
     assert "--blind" not in calls["args"]
 
 
+def test_openredirex_scan_matches_real_cli(monkeypatch):
+    """The upstream tool reads URLs on stdin and swaps -k; -p names a
+    payloads FILE, so passing FUZZ there crashes it on open()."""
+    import tools.external as external
+
+    calls = {}
+
+    async def fake_run(args, timeout=120, stdin_data=""):
+        calls["args"] = args
+        calls["stdin"] = stdin_data
+        return {"stdout": "", "stderr": "", "exit_code": 0, "error": None}
+
+    monkeypatch.setattr(external, "run_command", fake_run)
+    monkeypatch.setattr(external, "tool_available", lambda name: True)
+
+    urls = ["https://example.com/logout?next=FUZZ"]
+    result = asyncio.run(external.openredirex_scan(urls, timeout=60))
+
+    assert calls["args"][:3] == ["openredirex", "-k", "FUZZ"]
+    assert "-p" not in calls["args"]
+    assert calls["stdin"] == urls[0]
+    assert result["available"] is True
+
+
+def test_parse_openredirex_hits_only_found_lines():
+    from tools.external import _parse_openredirex_hits
+
+    stdout = (
+        "\n   ____                   ____\n"
+        "[INFO] Processing 1 URLs with 47 payloads.\n"
+        "\x1b[32m[FOUND]\x1b[0m \x1b[92mhttps://example.com/?next=//evil.com redirects to https://evil.com\x1b[0m\n"
+        "[INFO] https://example.com/?next=/local redirects to /local\n"
+    )
+    hits = _parse_openredirex_hits(stdout)
+
+    assert hits == ["[FOUND] https://example.com/?next=//evil.com "
+                    "redirects to https://evil.com"]
+
+
 def test_parse_kiterunner_json():
     from tools.external import parse_kiterunner_json
 
@@ -525,6 +564,11 @@ def test_docker_run_args_rewrites_repo_paths(monkeypatch):
     assert "https://t/FUZZ" in args
     args_in = external.docker_run_args(["nuclei", "-l", "t.txt"], stdin=True)
     assert "-i" in args_in
+    # Bare tokens are never paths: the binary name, keywords, counts.
+    # Rewriting them broke every docker-routed call with exit 127.
+    bare = external.docker_run_args(
+        ["openredirex", "-k", "FUZZ", "-c", "10"], stdin=True)
+    assert bare[-5:] == ["openredirex", "-k", "FUZZ", "-c", "10"]
     # Not-yet-existing output files rewrite too: the parent exists, so
     # the container writes where the host will read.
     import tempfile as _tempfile

@@ -10,7 +10,8 @@
 #
 # Layout: builder stage compiles Go tools (keeps the runtime free of the
 # Go toolchain); runtime stage adds apt packages, pip/gem tools, and the
-# git-cloned scanners. Expected size ~2.5GB — pulled once per teammate.
+# git-cloned scanners. Measured ~4.5GB (5.07GB before the GraphQLer-ML-stack
+# removal, build-only package purge, and cache/VCS cleanup).
 
 # ── Builder: Go binaries (rolling 1.x: ProjectDiscovery releases
 # routinely require newer than the last frozen minor) ───────────
@@ -40,7 +41,6 @@ RUN for i in 1 2 3; do if go install github.com/tomnomnom/anew@latest; then brea
 RUN for i in 1 2 3; do if go install github.com/tomnomnom/qsreplace@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
 RUN for i in 1 2 3; do if go install github.com/tomnomnom/gf@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
 RUN for i in 1 2 3; do if go install github.com/PentestPad/subzy@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
-RUN for i in 1 2 3; do if go install github.com/theblackturtle/openredirex@latest; then break; fi; if [ $i = 3 ]; then exit 1; fi; sleep 20; done
 # Tier-1 hunt upgrades (2026-10 research): jsluice extracts URLs/words
 # from JS bundles (feeds endpoint discovery); Gxss filters reflection
 # candidates so dalfox only fires on live params. jsluice needs cgo
@@ -123,15 +123,20 @@ RUN pip install --no-cache-dir --break-system-packages \
  && chmod +x /usr/local/bin/cmseek \
  && test -x /usr/local/bin/cmseek
 
-# corsy / smuggler (single-file python tools, upstream git).
-# OpenRedireX omitted deliberately: upstream s0md3v/OpenRedireX 404s and
-# vendoring a lookalike fork would ship unreviewed exploit code. The
-# open_redirect module treats a missing binary as "skip corroboration".
+# corsy / smuggler / OpenRedireX (single-file python tools, upstream git).
+# OpenRedireX (devanshbatham, MIT) reads URLs on stdin and swaps a keyword
+# (-k, default FUZZ) for redirect payloads; it ships its own payload list.
+# It is Python, not Go — the s0md3v/theblackturtle Go import paths 404.
 RUN git clone --depth 1 https://github.com/s0md3v/Corsy /opt/corsy \
  && git clone --depth 1 https://github.com/defparam/smuggler /opt/smuggler \
+ && git clone --depth 1 https://github.com/devanshbatham/OpenRedireX /opt/openredirex \
+ && if ! python3 -c "import aiohttp" 2>/dev/null; then pip install --no-cache-dir --break-system-packages aiohttp; fi \
+ && if ! python3 -c "import tqdm" 2>/dev/null; then pip install --no-cache-dir --break-system-packages tqdm; fi \
  && printf '#!/bin/sh\nexec python3 /opt/corsy/corsy.py "$@"\n' > /usr/local/bin/corsy \
  && printf '#!/bin/sh\nexec python3 /opt/smuggler/smuggler.py "$@"\n' > /usr/local/bin/smuggler \
- && chmod +x /usr/local/bin/corsy /usr/local/bin/smuggler
+ && printf '#!/bin/sh\nexec python3 /opt/openredirex/openredirex.py "$@"\n' > /usr/local/bin/openredirex \
+ && chmod +x /usr/local/bin/corsy /usr/local/bin/smuggler /usr/local/bin/openredirex \
+ && command -v openredirex >/dev/null
 
 # Ruby toolchain: wpscan is gemified, WhatWeb ships as a git checkout.
 RUN gem install --no-document wpscan \
@@ -179,16 +184,15 @@ RUN case "$TARGETARCH" in \
  && tar -xzf /tmp/ferox.tar.gz -C /usr/local/bin feroxbuster 2>/dev/null; rm -f /tmp/ferox.tar.gz; true
 
 # graphql-cop (dolevf): GraphQL security auditor our graphql module
-# corroborates against. GraphQLer (pip): dependency-aware GraphQL
-# fuzzer — chains queries/mutations by object dependency.
+# corroborates against. (GraphQLer was dropped: nothing in the framework
+# imports or shells to it, and it dragged in an ML stack — litellm,
+# matplotlib, numpy and friends, ~450MB — for zero coverage.)
 RUN git clone --depth 1 https://github.com/dolevf/graphql-cop /opt/graphql-cop \
  && pip install --no-cache-dir --break-system-packages \
     --ignore-installed blinker -r /opt/graphql-cop/requirements.txt \
  && printf '#!/bin/sh\nexec python3 /opt/graphql-cop/graphql-cop.py "$@"\n' > /usr/local/bin/graphql-cop \
  && chmod +x /usr/local/bin/graphql-cop \
- && pip install --no-cache-dir --break-system-packages GraphQLer \
- && command -v graphql-cop >/dev/null \
- && python3 -c "import graphqler"
+ && command -v graphql-cop >/dev/null
 # Go httpx restore: pip dependencies ship a Python console script also
 # named `httpx`, which overwrites the ProjectDiscovery binary installed
 # earlier. Re-install Go httpx last so the scanner wins the PATH.
@@ -229,13 +233,40 @@ RUN python3 -m venv /opt/venv-semgrep \
   && test -x /usr/local/bin/semgrep \
   && semgrep --version 2>&1 | head -n 1
 
+# Drop the GraphQLer ML stack. Verified orphaned by in-image dependency
+# scan (nothing outside it requires these) plus CLI smokes of every
+# pip-backed tool the framework invokes (maigret, holehe, arjun,
+# droopescan, uro, sqlmap, graphql-cop, theHarvester) before removal.
+# Kept deliberately: networkx/pyvis/ipython (maigret declares them),
+# rapidfuzz+regex (tiny, defensively imported), pillow/reportlab (maigret).
+RUN pip uninstall -y --break-system-packages \
+    GraphQLer litellm boto3 botocore s3transfer jmespath openai tiktoken \
+    jiter tokenizers hf-xet huggingface-hub fsspec filelock clairvoyance \
+    cloudpickle levenshtein matplotlib contourpy cycler fonttools kiwisolver \
+    numpy
+
+# Slim-down: build-only packages, VCS metadata, doc/man pages, venv pip
+# copies, and pycache. Each removal was checked against the framework's
+# actual invocations (no runtime git/jq/unzip/wget/ssh use; venvs are
+# complete before this runs; curl stays for the HTTP fallback path).
+RUN rm -rf /opt/*/.git \
+ && apt-get purge -y --auto-remove \
+    build-essential ruby-dev software-properties-common \
+    git wget jq unzip openssh-client \
+ && apt-get clean && rm -rf /var/lib/apt/lists/* \
+ && rm -rf /usr/share/doc /usr/share/man \
+ && rm -rf /opt/venv-harvester/lib/python3*/site-packages/pip* \
+            /opt/venv-semgrep/lib/python3*/site-packages/pip* \
+ && find /usr/local/lib /opt/venv-harvester /opt/venv-semgrep \
+    -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null; true
+
 # Sanity: every binary the framework gates on must resolve here, and
 # httpx must answer as the Go scanner (exit 0 on -version), not the
 # pip stub. Failures break the build, not a 2am scan.
 RUN httpx -version >/dev/null 2>&1
 RUN for bin in nmap naabu nuclei ffuf httpx subfinder amass dnsx gau katana \
     searchsploit wpscan nikto whatweb hakrawler arjun gowitness dalfox \
-    sqlmap corsy smuggler trufflehog testssl.sh gobuster \
+    sqlmap corsy smuggler openredirex trufflehog testssl.sh gobuster \
     feroxbuster droopescan cmseek maigret holehe theHarvester \
     subzy assetfinder waybackurls anew qsreplace gf chromium \
     jsluice Gxss uro gitleaks graphql-cop interactsh-client \
