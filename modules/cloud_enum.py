@@ -80,7 +80,7 @@ class CloudEnum(BaseModule):
             return name, provider, url, status, body
 
         tasks = [
-            test_bucket(name, provider, template)
+            (name, provider, template)
             for name in candidates
             for provider, template in PROVIDER_TEMPLATES.items()
         ]
@@ -103,7 +103,12 @@ class CloudEnum(BaseModule):
                 self.log(f"  Time-box hit at {completed}/{total_tasks} probes — "
                          "keeping the buckets found so far")
                 break
-            batch = tasks[i:i + batch_size]
+            # Coroutines are built per batch, not all up front: on a
+            # timeout the unbuilt remainder is plain tuples, so nothing
+            # is destroyed unawaited (RuntimeWarning) and every started
+            # probe's exception is retrieved by gather.
+            batch = [test_bucket(name, provider, template)
+                     for name, provider, template in tasks[i:i + batch_size]]
             batch_out = await asyncio.gather(*batch, return_exceptions=True)
             task_results.extend(batch_out)
             completed += len(batch)

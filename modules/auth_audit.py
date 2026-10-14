@@ -75,23 +75,38 @@ class AuthAudit(BaseModule):
 
         self.profile = await self._profile()
         identities = []
-        for endpoint in endpoints[:12]:
-            # One endpoint must never eat the module: some paths accept
-            # the baseline fast and then stall payload requests
-            # server-side (four hanging probes measured at 60s on one
-            # target). Forty-five seconds per endpoint, then move on.
-            try:
-                identity = await asyncio.wait_for(
-                    self._try_login(endpoint), timeout=45)
-            except asyncio.TimeoutError:
-                self.log(f"  {endpoint}: login probing timed out, skipping")
-                continue
-            if identity:
-                identities.append(identity)
-                self._store_identity(endpoint, identity)
-                # One working session unlocks the follow-ups; more
-                # logins are more noise against the same auth system.
-                break
+        # Probe concurrently (3 slots): sequential 45s probes over up to
+        # 12 endpoints exceed the module deadline whenever several stall.
+        # First completed session still wins and the rest are cancelled —
+        # one working session unlocks the follow-ups; more logins are
+        # more noise against the same auth system.
+        semaphore = asyncio.Semaphore(3)
+
+        async def probe(endpoint):
+            async with semaphore:
+                try:
+                    return endpoint, await asyncio.wait_for(
+                        self._try_login(endpoint), timeout=45)
+                except asyncio.TimeoutError:
+                    self.log(f"  {endpoint}: login probing timed out, skipping")
+                except Exception as exc:
+                    self.log(f"  {endpoint}: login probe failed ({exc})")
+                return endpoint, None
+
+        tasks = [asyncio.ensure_future(probe(e)) for e in endpoints[:12]]
+        try:
+            for next_done in asyncio.as_completed(tasks):
+                endpoint, identity = await next_done
+                if identity:
+                    identities.append(identity)
+                    self._store_identity(endpoint, identity)
+                    break
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         if identities:
             await self._authenticated_follow_ups(identities[0])

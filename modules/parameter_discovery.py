@@ -40,6 +40,8 @@ class ParameterDiscovery(BaseModule):
         if tool_available("paramspider"):
             result = await paramspider_scan(self.domain, timeout=180)
             parameters.extend(result.get("parameters", []))
+            self.log(f"  ParamSpider: {len(result.get('urls', []))} urls, "
+                     f"{len(result.get('parameters', []))} parameters")
             evidence_refs.append(
                 self.state.add_evidence(
                     self.id,
@@ -61,6 +63,8 @@ class ParameterDiscovery(BaseModule):
                 output_file = run_dir / f"arjun-{len(evidence_refs) + 1}.json"
                 result = await arjun_scan(target, str(output_file), timeout=240)
                 parameters.extend(result.get("results", []))
+                self.log(f"  arjun {target}: "
+                         f"{len(result.get('results', []))} parameters")
                 evidence_refs.append(
                     self.state.add_evidence(
                         self.id,

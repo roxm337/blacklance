@@ -495,6 +495,7 @@ class IdorDiffer(BaseModule):
         self._merge_discovered_identities(harness)
         if not harness.identities:
             self.log("No identities in auth.identities — nothing to compare.")
+            self.state.skip_module(self.id, "no identities configured")
             return "skipped"
 
         await harness.establish_all(self._base_url())
@@ -505,6 +506,7 @@ class IdorDiffer(BaseModule):
 
         if not usable:
             self.log("No session survived verification; refusing to guess.")
+            self.state.skip_module(self.id, "no verified sessions")
             return "skipped"
 
         templates = await self._collect_templates()

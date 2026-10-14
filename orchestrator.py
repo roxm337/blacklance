@@ -101,6 +101,33 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def _dep_inputs_grew(state, dep_id: str) -> bool:
+    """A finished dependency runs again only when new assets landed since
+    its last finished run. Without this, every dependent re-triggers the
+    same sweep: on quiet targets parameter_discovery ran 10x and
+    wayback_machine 3x, each paying full tool timeouts for identical
+    empty results. Runs are recorded finished whatever the outcome
+    (done/skipped/blocked/timeout), so this also gates retries."""
+    runs = [r for r in state.module.get("runs", [])
+            if r.get("module_id") == dep_id and r.get("finished_at")]
+    if not runs:
+        return True
+    last_assets = runs[-1].get("assets_after")
+    if last_assets is None:
+        return True
+    return len(state.assets.get("nodes", [])) > last_assets
+
+
+def _no_probe_hint(risk_ceiling: str) -> str:
+    """Follow-up when no probes were proposed. Raising the ceiling only
+    helps while detection actions are locked out (SAFE/LOW); at MEDIUM+
+    the honest answer is that the surface holds no testable parameters."""
+    if risk_ceiling in ("SAFE", "LOW"):
+        return "Raise with --max-risk MEDIUM to run detection actions."
+    return ("Detection actions are allowed at this ceiling — "
+            "the surface holds no testable parameters.")
+
+
 class Orchestrator:
     """Main orchestrator. Runs all modules in stage order."""
 
@@ -216,7 +243,6 @@ class Orchestrator:
         print(f"\n  READINESS")
         for line in report["warnings"]:
             print(f"  ⚠ {line}")
-            logger.warning(line)
         for line in report["notices"]:
             print(f"  • {line}")
         print()
@@ -264,9 +290,12 @@ class Orchestrator:
             deps = entry.get("depends_on", [])
             missing_deps = [d for d in deps if not self.state.is_module_complete(d)]
             if missing_deps:
-                # Auto-run dependencies if not done
+                # Auto-run dependencies if not done — but a finished
+                # dependency runs again only on new inputs, or quiet
+                # targets pay for the same empty sweep per dependent.
                 for dep_id in missing_deps:
-                    if dep_id in module_ids:
+                    if dep_id in module_ids \
+                            and _dep_inputs_grew(self.state, dep_id):
                         await self._run_module(dep_id)
 
             # Run module
@@ -506,7 +535,7 @@ class Orchestrator:
                   f"{plan['surfaces_considered']} testable surface(s):")
             for reason, count in sorted(plan.get("not_proposed", {}).items()):
                 print(f"    - {reason} ({count})")
-            print("  Raise with --max-risk MEDIUM to run detection actions.")
+            print(f"  {_no_probe_hint(plan.get('risk_ceiling', 'LOW'))}")
             print()
 
         # Find exploit chains
@@ -666,26 +695,20 @@ class Orchestrator:
             elif result == "skipped":
                 reason = self._last_module_reason(module_id, "skipped")
                 print(f"  — Skipped: {reason}" if reason else "  — Skipped")
-                logger.warning(f"{module_id} skipped: "
-                               f"{reason or 'no reason recorded'}")
             elif result == "blocked":
                 reason = self._last_module_reason(module_id, "blocked")
                 print(f"  ✗ Blocked: {reason}" if reason else "  ✗ Blocked")
-                logger.warning(f"{module_id} blocked: "
-                               f"{reason or 'no reason recorded'}")
             self.state.finish_module_run(run_id, result or "unknown")
         except asyncio.TimeoutError:
             # Say the coverage is partial. A timeout recorded as "done" or
             # silently dropped both understate the gap in the same direction.
             print(f"  ⏱ Timed out after {deadline:.0f}s — coverage from this "
                   f"module is incomplete")
-            logger.warning(f"{module_id} timed out after {deadline:.0f}s")
             self.state.finish_module_run(
                 run_id, "timeout",
                 f"exceeded {deadline:.0f}s module deadline")
         except Exception as e:
             print(f"  ✗ Error: {e}")
-            logger.error(f"{module_id} error: {e}")
             import traceback
             traceback.print_exc()
             self.state.block_module(module_id, str(e))
