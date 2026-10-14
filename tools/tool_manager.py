@@ -63,7 +63,7 @@ TOOL_DEFINITIONS: list[ToolInfo] = [
              install_cmd="pipx install arjun"),
     ToolInfo("paramspider", "Parameter discovery from archives",
              categories=["web", "param"],
-             install_cmd="pipx install paramspider"),
+             install_cmd="pipx install git+https://github.com/devanshbatham/ParamSpider"),
     ToolInfo("wpscan", "WordPress vulnerability scanner",
              categories=["web", "cms", "wordpress"],
              install_cmd=f"{SCOUT} install wpscan" if SCOUT == "brew" else "gem install wpscan"),

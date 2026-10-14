@@ -138,6 +138,15 @@ RUN git clone --depth 1 https://github.com/s0md3v/Corsy /opt/corsy \
  && chmod +x /usr/local/bin/corsy /usr/local/bin/smuggler /usr/local/bin/openredirex \
  && command -v openredirex >/dev/null
 
+# ParamSpider (devanshbatham): parameter discovery from web archives.
+# A package, not a script (paramspider/main.py + setup.py console entry,
+# not on PyPI) — install it; -d domain, -s streams URLs to stdout, and
+# results/<domain>.txt lands in the container cwd (/work, i.e. the repo).
+RUN git clone --depth 1 https://github.com/devanshbatham/ParamSpider /opt/paramspider \
+ && pip install --no-cache-dir --break-system-packages /opt/paramspider \
+ && command -v paramspider >/dev/null \
+ && paramspider --help >/dev/null 2>&1
+
 # Ruby toolchain: wpscan is gemified, WhatWeb ships as a git checkout.
 RUN gem install --no-document wpscan \
  && git clone --depth 1 https://github.com/urbanadventurer/WhatWeb /opt/whatweb \
@@ -274,8 +283,8 @@ RUN rm -rf /opt/*/.git \
 # pip stub. Failures break the build, not a 2am scan.
 RUN httpx -version >/dev/null 2>&1
 RUN for bin in nmap naabu nuclei ffuf httpx subfinder amass dnsx gau katana \
-    searchsploit wpscan nikto whatweb hakrawler arjun gowitness dalfox \
-    sqlmap corsy smuggler openredirex trufflehog testssl.sh gobuster \
+    searchsploit wpscan nikto joomscan whatweb hakrawler arjun gowitness dalfox \
+    sqlmap corsy smuggler openredirex paramspider trufflehog testssl.sh gobuster \
     feroxbuster droopescan cmseek maigret holehe theHarvester \
     subzy assetfinder waybackurls anew qsreplace gf chromium \
     jsluice Gxss uro gitleaks graphql-cop interactsh-client \

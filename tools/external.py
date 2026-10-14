@@ -31,6 +31,7 @@ DOCKER_TOOLS = frozenset({
     "nikto", "whatweb", "gobuster", "feroxbuster",
     "hakrawler", "arjun", "gowitness",
     "dalfox", "sqlmap", "corsy", "smuggler", "openredirex",
+    "theHarvester", "maigret", "cmseek", "joomscan", "paramspider",
     "subzy", "assetfinder", "waybackurls", "dig", "whois",
     "jsluice", "gxss", "uro", "gitleaks", "graphql-cop",
     "interactsh-client", "kr", "semgrep",
@@ -636,15 +637,31 @@ async def arjun_scan(target: str, output_file: str,
 
 
 async def paramspider_scan(domain: str, timeout: int = 180) -> dict:
-    """Run ParamSpider for archived parameterized URLs."""
+    """Run ParamSpider for archived parameterized URLs.
+
+    Real CLI (devanshbatham package): -d domain, -s streams URLs to
+    stdout; there is NO --exclude flag (extensions are hardcoded
+    upstream) — passing one aborts with exit 2. results/<domain>.txt
+    also lands in the working dir, so it is read when present and
+    removed to avoid littering the repo.
+    """
     if not tool_available("paramspider"):
         return {"available": False, "urls": [], "error": "missing"}
 
     result = await run_command(
-        ["paramspider", "-d", domain, "--exclude", "png,jpg,gif,css,woff,svg"],
+        ["paramspider", "-d", domain, "-s"],
         timeout=timeout,
     )
     urls = [line.strip() for line in result["stdout"].splitlines() if line.startswith("http")]
+    leftover = Path("results") / f"{domain}.txt"
+    try:
+        if leftover.exists():
+            urls.extend(line.strip() for line in leftover.read_text().splitlines()
+                        if line.strip().startswith("http"))
+            leftover.unlink()
+    except OSError:
+        pass
+    urls = list(dict.fromkeys(urls))
     return {
         "available": True,
         "urls": urls,

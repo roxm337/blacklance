@@ -274,6 +274,52 @@ def test_parse_openredirex_hits_only_found_lines():
                     "redirects to https://evil.com"]
 
 
+def test_paramspider_scan_matches_real_cli(monkeypatch, tmp_path):
+    """Upstream has -d/-s and no --exclude; results/<domain>.txt lands in
+    cwd, so it is merged and removed instead of littering the repo."""
+    import tools.external as external
+
+    calls = {}
+
+    async def fake_run(args, timeout=120, stdin_data=""):
+        calls["args"] = args
+        return {"stdout": "https://example.com/?a=FUZZ\n[INFO] done\n",
+                "stderr": "", "exit_code": 0, "error": None}
+
+    monkeypatch.setattr(external, "run_command", fake_run)
+    monkeypatch.setattr(external, "tool_available", lambda name: True)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "example.com.txt").write_text(
+        "https://example.com/?b=FUZZ\nhttps://example.com/?a=FUZZ\n")
+
+    result = asyncio.run(external.paramspider_scan("example.com"))
+
+    assert calls["args"] == ["paramspider", "-d", "example.com", "-s"]
+    assert result["available"] is True
+    assert result["urls"] == ["https://example.com/?a=FUZZ",
+                              "https://example.com/?b=FUZZ"]
+    assert not (tmp_path / "results" / "example.com.txt").exists()
+
+
+def test_paramspider_scan_missing_tool(monkeypatch):
+    import tools.external as external
+
+    monkeypatch.setattr(external, "tool_available", lambda name: False)
+    result = asyncio.run(external.paramspider_scan("example.com"))
+    assert result == {"available": False, "urls": [], "error": "missing"}
+
+
+def test_docker_routed_tools_cover_gated_binaries():
+    """Every binary modules gate on must resolve under backend=docker:
+    image-backed tools belong in DOCKER_TOOLS, or their modules always
+    skip there (theHarvester/maigret/corsy/cmseek/joomscan did)."""
+    from tools.external import DOCKER_TOOLS
+    for name in ("theHarvester", "maigret", "corsy", "cmseek", "joomscan",
+                 "paramspider", "openredirex", "kr", "smuggler"):
+        assert name in DOCKER_TOOLS, name
+
+
 def test_parse_kiterunner_json():
     from tools.external import parse_kiterunner_json
 
