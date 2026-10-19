@@ -12,7 +12,17 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
-from PySide6.QtCore import QEvent, QProcess, QSize, QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QProcess,
+    QPropertyAnimation,
+    QSize,
+    QSettings,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPalette, QShortcut
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
@@ -26,6 +36,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
+    QGraphicsOpacityEffect,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -54,8 +65,10 @@ from PySide6.QtWidgets import (
 )
 
 from gui.graph import (
+    analyze_display_graph,
     build_display_graph,
     count_relations,
+    filter_display_graph,
     render_attack_html,
     render_gravis_html,
 )
@@ -119,8 +132,8 @@ SEVERITY_COLORS = {
 CONFIDENCE_RANK = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
 
 EMPTY_GRAPH_HTML = (
-    "<html><body style='font-family:Arial;background:#090d13;padding:24px;"
-    "color:#dce7f3;'>{message}</body></html>"
+    "<html><body style='font-family:Arial;background:#0a0f14;padding:24px;"
+    "color:#d8e2ea;'>{message}</body></html>"
 )
 VERDICT_LABELS = {
     "": "-",
@@ -165,26 +178,26 @@ def _dark_palette() -> QPalette:
     defaults to the light system theme and leaks white lines into the UI.
     """
     palette = QPalette()
-    palette.setColor(QPalette.Window, QColor("#101721"))
-    palette.setColor(QPalette.WindowText, QColor("#dce7f3"))
-    palette.setColor(QPalette.Base, QColor("#0b111a"))
-    palette.setColor(QPalette.AlternateBase, QColor("#0d1420"))
-    palette.setColor(QPalette.ToolTipBase, QColor("#151f2e"))
-    palette.setColor(QPalette.ToolTipText, QColor("#e5edf6"))
-    palette.setColor(QPalette.Text, QColor("#e5edf6"))
-    palette.setColor(QPalette.Button, QColor("#151f2e"))
-    palette.setColor(QPalette.ButtonText, QColor("#dce7f3"))
+    palette.setColor(QPalette.Window, QColor("#111820"))
+    palette.setColor(QPalette.WindowText, QColor("#d8e2ea"))
+    palette.setColor(QPalette.Base, QColor("#0c1218"))
+    palette.setColor(QPalette.AlternateBase, QColor("#101820"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#18232d"))
+    palette.setColor(QPalette.ToolTipText, QColor("#e5ecef"))
+    palette.setColor(QPalette.Text, QColor("#e5ecef"))
+    palette.setColor(QPalette.Button, QColor("#18232d"))
+    palette.setColor(QPalette.ButtonText, QColor("#d8e2ea"))
     palette.setColor(QPalette.BrightText, QColor("#f87171"))
-    palette.setColor(QPalette.Link, QColor("#7dd3fc"))
+    palette.setColor(QPalette.Link, QColor("#70daca"))
     palette.setColor(QPalette.LinkVisited, QColor("#93c5fd"))
-    palette.setColor(QPalette.Highlight, QColor("#9f1239"))
+    palette.setColor(QPalette.Highlight, QColor("#1b7469"))
     palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
     # Grayscale roles: QStyle frame/base lines (tab-bar base, scroll corners)
     # read Light/Mid/Dark and would otherwise stay light-theme white.
-    palette.setColor(QPalette.Light, QColor("#3b5675"))
-    palette.setColor(QPalette.Midlight, QColor("#2b3c54"))
-    palette.setColor(QPalette.Mid, QColor("#223044"))
-    palette.setColor(QPalette.Dark, QColor("#172233"))
+    palette.setColor(QPalette.Light, QColor("#47606c"))
+    palette.setColor(QPalette.Midlight, QColor("#32404d"))
+    palette.setColor(QPalette.Mid, QColor("#25313c"))
+    palette.setColor(QPalette.Dark, QColor("#17222b"))
     palette.setColor(QPalette.Shadow, QColor("#000000"))
     palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#5b6a80"))
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#5b6a80"))
@@ -404,7 +417,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        header = QHBoxLayout()
+        top_bar = QFrame()
+        top_bar.setObjectName("topBar")
+        header = QHBoxLayout(top_bar)
+        header.setContentsMargins(16, 11, 14, 11)
         header.setSpacing(10)
         title_stack = QVBoxLayout()
         title = QLabel("RED TEAM OPS CONSOLE")
@@ -430,7 +446,7 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("status")
         self.status_label.setProperty("state", "idle")
         header.addWidget(self.status_label)
-        layout.addLayout(header)
+        layout.addWidget(top_bar)
 
         body = QHBoxLayout()
         body.setSpacing(12)
@@ -458,10 +474,10 @@ class MainWindow(QMainWindow):
     def _build_nav_rail(self) -> QWidget:
         rail = QWidget()
         rail.setObjectName("navRail")
-        rail.setFixedWidth(78)
+        rail.setFixedWidth(84)
         rail_layout = QVBoxLayout(rail)
-        rail_layout.setContentsMargins(6, 8, 6, 8)
-        rail_layout.setSpacing(4)
+        rail_layout.setContentsMargins(7, 9, 7, 9)
+        rail_layout.setSpacing(5)
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons: list[QToolButton] = []
@@ -472,10 +488,10 @@ class MainWindow(QMainWindow):
             button.setCheckable(True)
             button.setAutoRaise(True)
             button.setIcon(self.style().standardIcon(icon))
-            button.setIconSize(QSize(20, 20))
+            button.setIconSize(QSize(21, 21))
             button.setText(label)
             button.setToolTip(f"{tip}  (Ctrl+{index + 1})")
-            button.setFixedSize(66, 60)
+            button.setFixedSize(70, 62)
             button.clicked.connect(lambda _checked=False, i=index: self.show_screen(i))
             self.nav_group.addButton(button, index)
             self.nav_buttons.append(button)
@@ -496,10 +512,29 @@ class MainWindow(QMainWindow):
         """Switch the stacked screen and keep rail, stack and settings in sync."""
         if not 0 <= index < self.screen_stack.count():
             return
+        previous_index = self.screen_stack.currentIndex()
         self.screen_stack.setCurrentIndex(index)
         if index < len(self.nav_buttons):
             self.nav_buttons[index].setChecked(True)
         self._settings.setValue("screen", index)
+        if previous_index != index and self.isVisible():
+            self._fade_in_screen(self.screen_stack.widget(index))
+
+    def _fade_in_screen(self, page: QWidget) -> None:
+        """Give navigation a short, non-blocking visual handoff."""
+        previous = getattr(self, "_page_animation", None)
+        if previous is not None:
+            previous.stop()
+        effect = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", page)
+        animation.setDuration(150)
+        animation.setStartValue(0.72)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.finished.connect(lambda: page.setGraphicsEffect(None))
+        self._page_animation = animation
+        animation.start()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1121,10 +1156,15 @@ class MainWindow(QMainWindow):
         self.budget_llm_spin = QSpinBox()
         self.budget_llm_spin.setRange(0, 1_000_000)
         self.budget_llm_spin.setSpecialValueText("unlimited")
+        self.budget_external_commands_spin = QSpinBox()
+        self.budget_external_commands_spin.setRange(0, 1_000_000)
+        self.budget_external_commands_spin.setSpecialValueText("unlimited")
         limits_form.addRow("Module timeout", self.module_timeout_spin)
         limits_form.addRow("Max requests", self.budget_requests_spin)
         limits_form.addRow("Max wall clock", self.budget_wall_clock_spin)
         limits_form.addRow("Max LLM calls", self.budget_llm_spin)
+        limits_form.addRow("Max external commands",
+                           self.budget_external_commands_spin)
         layout.addWidget(limits_box)
 
         button_row = QHBoxLayout()
@@ -2272,7 +2312,7 @@ class MainWindow(QMainWindow):
             f"Assets filtered to {finding.get('id')} ({len(keys)} linked)", 4000)
 
     def _build_graph_screen(self) -> QWidget:
-        """Screen 2: asset graph + attack graph side by side in sub-tabs."""
+        """Screen 2: intelligence graph, analytical filters and attack paths."""
         page = QWidget()
         page.setObjectName("screenGraph")
         layout = QVBoxLayout(page)
@@ -2286,10 +2326,32 @@ class MainWindow(QMainWindow):
         graph_widget = QWidget()
         graph_layout = QVBoxLayout(graph_widget)
         graph_layout.setContentsMargins(0, 0, 0, 0)
-        graph_header = QGridLayout()
+        graph_layout.setSpacing(8)
+        graph_toolbar = QFrame()
+        graph_toolbar.setObjectName("graphToolbar")
+        graph_header = QGridLayout(graph_toolbar)
+        graph_header.setContentsMargins(12, 9, 12, 9)
+        graph_header.setHorizontalSpacing(8)
+        graph_header.setVerticalSpacing(7)
         self.graph_summary = QLabel("No graph loaded")
+        self.graph_summary.setObjectName("graphSummary")
         self.graph_summary.setWordWrap(True)
         self.graph_summary.setMinimumWidth(0)
+        self.graph_search = QLineEdit()
+        self.graph_search.setObjectName("graphSearch")
+        self.graph_search.setPlaceholderText("Find entity, source or attribute…")
+        self.graph_search.setClearButtonEnabled(True)
+        self.graph_type_filter = QComboBox()
+        self.graph_type_filter.setObjectName("graphFilter")
+        self.graph_type_filter.addItem("All entity types", "")
+        self.graph_relation_filter = QComboBox()
+        self.graph_relation_filter.setObjectName("graphFilter")
+        self.graph_relation_filter.addItem("All relations", "")
+        self.graph_provenance_filter = QComboBox()
+        self.graph_provenance_filter.setObjectName("graphFilter")
+        self.graph_provenance_filter.addItem("All provenance", "all")
+        self.graph_provenance_filter.addItem("Observed only", "observed")
+        self.graph_provenance_filter.addItem("Inferred only", "inferred")
         self.graph_aggregate_check = QCheckBox("Group dense types")
         self.graph_aggregate_check.setChecked(True)
         self.graph_aggregate_check.stateChanged.connect(self.refresh_graph)
@@ -2300,50 +2362,131 @@ class MainWindow(QMainWindow):
         self.graph_edges_check.setChecked(True)
         self.graph_edges_check.stateChanged.connect(self.refresh_graph)
         self.fit_graph_button = QPushButton("Fit")
+        self.fit_graph_button.setObjectName("btnGhost")
         self.fit_graph_button.clicked.connect(self.refresh_graph)
-        graph_header.addWidget(self.graph_summary, 0, 0, 1, 4)
-        graph_header.addWidget(self.graph_aggregate_check, 1, 0)
-        graph_header.addWidget(self.graph_labels_check, 1, 1)
-        graph_header.addWidget(self.graph_edges_check, 1, 2)
-        graph_header.addWidget(self.fit_graph_button, 1, 3)
-        graph_header.setColumnStretch(0, 1)
-        graph_layout.addLayout(graph_header)
+        self.graph_legend = QLabel(
+            "<span style='color:#35c7b1'>●</span> observed &nbsp; "
+            "<span style='color:#94a3b8'>●</span> inferred &nbsp; "
+            "<span style='color:#fbbf24'>●</span> proposed/focus &nbsp; "
+            "<span style='color:#f87171'>◉</span> high-risk finding"
+        )
+        self.graph_legend.setObjectName("graphLegend")
+        graph_header.addWidget(self.graph_summary, 0, 0, 1, 5)
+        graph_header.addWidget(self.graph_search, 1, 0, 1, 2)
+        graph_header.addWidget(self.graph_type_filter, 1, 2)
+        graph_header.addWidget(self.graph_relation_filter, 1, 3)
+        graph_header.addWidget(self.graph_provenance_filter, 1, 4)
+        graph_header.addWidget(self.graph_legend, 2, 0, 1, 2)
+        options = QHBoxLayout()
+        options.setSpacing(12)
+        options.addWidget(self.graph_aggregate_check)
+        options.addWidget(self.graph_labels_check)
+        options.addWidget(self.graph_edges_check)
+        options.addWidget(self.fit_graph_button)
+        graph_header.addLayout(options, 2, 2, 1, 3)
+        graph_header.setColumnStretch(0, 2)
+        graph_header.setColumnStretch(1, 2)
+        graph_layout.addWidget(graph_toolbar)
+
+        self._graph_filter_timer = QTimer(self)
+        self._graph_filter_timer.setSingleShot(True)
+        self._graph_filter_timer.setInterval(220)
+        self._graph_filter_timer.timeout.connect(self.refresh_graph)
+        self.graph_search.textChanged.connect(lambda *_: self._graph_filter_timer.start())
+        self.graph_type_filter.currentIndexChanged.connect(self.refresh_graph)
+        self.graph_relation_filter.currentIndexChanged.connect(self.refresh_graph)
+        self.graph_provenance_filter.currentIndexChanged.connect(self.refresh_graph)
+
         self.graph_view = QWebEngineView()
         # Default page background is white — a jarring flash before the
         # dark graph html paints (and a white block in headless runs).
-        self.graph_view.page().setBackgroundColor(QColor("#090d13"))
+        self.graph_view.page().setBackgroundColor(QColor("#0a0f14"))
         self.graph_view.setMinimumSize(0, 0)
-        graph_layout.addWidget(self.graph_view, 1)
+        self.graph_brief = QLabel("Run collection to build an intelligence brief.")
+        self.graph_brief.setObjectName("graphBriefText")
+        self.graph_brief.setWordWrap(True)
+        self.graph_brief.setTextFormat(Qt.RichText)
+        self.graph_brief.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        brief_panel = QFrame()
+        brief_panel.setObjectName("graphBrief")
+        brief_layout = QVBoxLayout(brief_panel)
+        brief_layout.setContentsMargins(14, 13, 14, 13)
+        brief_title = QLabel("Analyst brief")
+        brief_title.setObjectName("graphBriefTitle")
+        brief_layout.addWidget(brief_title)
+        brief_layout.addWidget(self.graph_brief)
+        brief_layout.addStretch(1)
+        brief_scroll = QScrollArea()
+        brief_scroll.setObjectName("graphBriefScroll")
+        brief_scroll.setWidgetResizable(True)
+        brief_scroll.setMinimumWidth(285)
+        brief_scroll.setMaximumWidth(360)
+        brief_scroll.setWidget(brief_panel)
+        graph_splitter = QSplitter(Qt.Horizontal)
+        graph_splitter.setObjectName("graphSplitter")
+        graph_splitter.addWidget(self.graph_view)
+        graph_splitter.addWidget(brief_scroll)
+        graph_splitter.setStretchFactor(0, 1)
+        graph_splitter.setCollapsible(0, False)
+        graph_splitter.setCollapsible(1, False)
+        graph_splitter.setSizes([900, 310])
+        graph_layout.addWidget(graph_splitter, 1)
+        self.graph_splitter = graph_splitter
         tabs.addTab(graph_widget, "Asset Graph")
 
         attack_widget = QWidget()
         attack_layout = QVBoxLayout(attack_widget)
         attack_layout.setContentsMargins(0, 0, 0, 0)
         attack_layout.setSpacing(6)
+        attack_toolbar = QFrame()
+        attack_toolbar.setObjectName("graphToolbar")
+        attack_toolbar_layout = QVBoxLayout(attack_toolbar)
+        attack_toolbar_layout.setContentsMargins(12, 9, 12, 9)
         self.attack_graph_summary = QLabel("No attack graph loaded")
         self.attack_graph_summary.setWordWrap(True)
-        self.attack_graph_summary.setObjectName("opsPrimary")
-        attack_layout.addWidget(self.attack_graph_summary)
+        self.attack_graph_summary.setObjectName("graphSummary")
+        attack_toolbar_layout.addWidget(self.attack_graph_summary)
+        attack_legend = QLabel(
+            "<span style='color:#35c7b1'>●</span> established path &nbsp; "
+            "<span style='color:#fbbf24'>●</span> proposed probe &nbsp; "
+            "<span style='color:#f87171'>●</span> vulnerability"
+        )
+        attack_legend.setObjectName("graphLegend")
+        attack_toolbar_layout.addWidget(attack_legend)
+        attack_layout.addWidget(attack_toolbar)
 
-        probe_caption = QLabel("Probe plan")
-        probe_caption.setObjectName("subtitle")
-        attack_layout.addWidget(probe_caption)
+        attack_brief = QFrame()
+        attack_brief.setObjectName("graphBrief")
+        attack_brief_layout = QVBoxLayout(attack_brief)
+        attack_brief_layout.setContentsMargins(14, 13, 14, 13)
+        probe_caption = QLabel("Operation brief")
+        probe_caption.setObjectName("graphBriefTitle")
+        attack_brief_layout.addWidget(probe_caption)
         self.probe_plan_label = QLabel("Probe plan: not recorded")
         self.probe_plan_label.setWordWrap(True)
         self.probe_plan_label.setObjectName("opsSecondary")
-        attack_layout.addWidget(self.probe_plan_label)
+        attack_brief_layout.addWidget(self.probe_plan_label)
         self.probe_plan_table = QTableWidget(0, 2)
         self.probe_plan_table.setHorizontalHeaderLabels(["Reason not proposed", "Surfaces"])
         self.probe_plan_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.probe_plan_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.probe_plan_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.probe_plan_table.setMaximumHeight(120)
-        attack_layout.addWidget(self.probe_plan_table)
+        self.probe_plan_table.setMinimumHeight(180)
+        attack_brief_layout.addWidget(self.probe_plan_table, 1)
 
         self.attack_graph_view = QWebEngineView()
-        self.attack_graph_view.page().setBackgroundColor(QColor("#090d13"))
+        self.attack_graph_view.page().setBackgroundColor(QColor("#0a0f14"))
         self.attack_graph_view.setMinimumSize(0, 0)
-        attack_layout.addWidget(self.attack_graph_view, 1)
+        attack_splitter = QSplitter(Qt.Horizontal)
+        attack_splitter.setObjectName("graphSplitter")
+        attack_splitter.addWidget(self.attack_graph_view)
+        attack_splitter.addWidget(attack_brief)
+        attack_splitter.setStretchFactor(0, 1)
+        attack_splitter.setCollapsible(0, False)
+        attack_splitter.setCollapsible(1, False)
+        attack_splitter.setSizes([900, 320])
+        attack_layout.addWidget(attack_splitter, 1)
+        self.attack_graph_splitter = attack_splitter
         tabs.addTab(attack_widget, "Attack Graph")
 
         layout.addWidget(tabs, 1)
@@ -3804,6 +3947,8 @@ class MainWindow(QMainWindow):
             self.budget_requests_spin.setValue(int(budget.get("max_requests", 0) or 0))
             self.budget_wall_clock_spin.setValue(int(budget.get("max_wall_clock_seconds", 0) or 0))
             self.budget_llm_spin.setValue(int(budget.get("max_llm_calls", 0) or 0))
+            self.budget_external_commands_spin.setValue(int(
+                budget.get("max_external_commands", 0) or 0))
 
         rate_limits = config.get("rate_limits", {})
         if hasattr(self, "rate_limit_inputs"):
@@ -4143,6 +4288,8 @@ class MainWindow(QMainWindow):
                 "max_requests": self.budget_requests_spin.value(),
                 "max_wall_clock_seconds": self.budget_wall_clock_spin.value(),
                 "max_llm_calls": self.budget_llm_spin.value(),
+                "max_external_commands":
+                    self.budget_external_commands_spin.value(),
             })
             config["budget_limits"] = budget_limits
 
@@ -4735,52 +4882,145 @@ class MainWindow(QMainWindow):
     def refresh_graph(self):
         self._load_graph(self.current_assets)
 
+    def _sync_graph_filter(self, combo: QComboBox, label: str, values: list[str]) -> None:
+        """Refresh a graph filter without losing the analyst's selection."""
+        selected = str(combo.currentData() or "")
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(label, "")
+        for value in values:
+            combo.addItem(value.replace("_", " ").title(), value)
+        index = combo.findData(selected)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _graph_brief_html(self, analysis: dict, filtered: bool) -> str:
+        provenance = analysis.get("provenance") or {}
+        pivots = analysis.get("pivots") or []
+        relations = list((analysis.get("relations") or {}).items())[:4]
+        types = list((analysis.get("types") or {}).items())[:5]
+        pivot_rows = "".join(
+            "<li><b>{}</b><br><span style='color:#82919e'>{} · {} links</span></li>".format(
+                html_escape(str(pivot.get("label", ""))[:72]),
+                html_escape(str(pivot.get("type", "unknown")).replace("_", " ")),
+                int(pivot.get("degree", 0) or 0),
+            )
+            for pivot in pivots
+        ) or "<li>No connected pivots in this view</li>"
+        relation_text = ", ".join(
+            f"{html_escape(name.replace('_', ' ').lower())} ({count})"
+            for name, count in relations
+        ) or "none"
+        type_text = ", ".join(
+            f"{html_escape(name.replace('_', ' '))} ({count})"
+            for name, count in types
+        ) or "none"
+        scope_note = (
+            "<p style='color:#fbbf24'><b>Focused view</b><br>One-hop context is retained around matching entities.</p>"
+            if filtered else ""
+        )
+        return (
+            scope_note
+            + "<p><b>Structure</b><br>"
+            + f"{analysis.get('components', 0)} component(s) · "
+            + f"{analysis.get('isolated', 0)} isolated · "
+            + f"density {float(analysis.get('density', 0.0)):.3f}</p>"
+            + "<p><b>Provenance</b><br>"
+            + f"{provenance.get('observed', 0)} observed · "
+            + f"{provenance.get('inferred', 0)} inferred · "
+            + f"{provenance.get('proposed', 0)} proposed</p>"
+            + "<p><b>Evidence coverage</b><br>"
+            + f"{analysis.get('source_count', 0)} distinct sources · "
+            + f"{analysis.get('affected', 0)} affected entities · "
+            + f"<span style='color:#f87171'>{analysis.get('high_risk', 0)} high-risk</span></p>"
+            + f"<p><b>Entity mix</b><br>{type_text}</p>"
+            + f"<p><b>Relations</b><br>{relation_text}</p>"
+            + f"<p><b>Priority pivots</b></p><ol>{pivot_rows}</ol>"
+        )
+
     def _load_graph(self, assets: dict):
-        graph = build_display_graph(
+        query = self.graph_search.text().strip()
+        raw_graph = build_display_graph(
             assets,
-            aggregate=self.graph_aggregate_check.isChecked(),
+            aggregate=False,
             aggregate_threshold=10,
             # Annotate from the filtered set so the graph's "what hurts
             # here" markers match what the triage table is showing.
             findings=self._filtered_findings,
         )
+        self._sync_graph_filter(
+            self.graph_type_filter,
+            "All entity types",
+            sorted({str(node.get("type")) for node in raw_graph["nodes"] if node.get("type")}),
+        )
+        self._sync_graph_filter(
+            self.graph_relation_filter,
+            "All relations",
+            sorted({str(edge.get("type")) for edge in raw_graph["edges"] if edge.get("type")}),
+        )
+        asset_type = str(self.graph_type_filter.currentData() or "")
+        relation = str(self.graph_relation_filter.currentData() or "")
+        provenance = str(self.graph_provenance_filter.currentData() or "all")
+        # Focused entity searches must inspect real entities, not aggregate
+        # placeholders. Outside a focus search the operator controls grouping.
+        aggregate = self.graph_aggregate_check.isChecked() and not (query or asset_type)
+        graph = build_display_graph(
+            assets,
+            aggregate=aggregate,
+            aggregate_threshold=10,
+            findings=self._filtered_findings,
+        )
+        graph = filter_display_graph(
+            graph,
+            query=query,
+            asset_type=asset_type,
+            relation=relation,
+            provenance=provenance,
+        )
         nodes = graph["nodes"]
         edges = graph["edges"]
         meta = graph.get("meta", {})
-        raw_nodes = meta.get("raw_nodes", len(nodes))
-        raw_edges = meta.get("raw_edges", len(edges))
+        raw_nodes = len(raw_graph["nodes"])
+        raw_edges = len(raw_graph["edges"])
+        analysis = analyze_display_graph(graph)
         self.graph_summary.setText(
-            f"{raw_nodes} assets, {raw_edges} relations -> "
-            f"{len(nodes)} displayed nodes, {len(edges)} displayed relations"
+            f"Intelligence picture: {raw_nodes} entities · {raw_edges} relations  |  "
+            f"View: {len(nodes)} entities · {len(edges)} relations · "
+            f"{analysis['components']} component(s)"
+        )
+        self.graph_brief.setText(
+            self._graph_brief_html(analysis, bool(meta.get("filtered")))
         )
 
         if not nodes:
             self.graph_view.setHtml(
-                EMPTY_GRAPH_HTML.format(message="No asset graph available yet")
+                EMPTY_GRAPH_HTML.format(
+                    message=(
+                        "No entities match the current intelligence filters."
+                        if raw_nodes else "No asset graph available yet. Run collection first."
+                    )
+                )
             )
             self._graph_render_key = None
             return
 
+        # Skip identical re-renders (load_results runs on many events) and
+        # defer the paint so startup/refresh work doesn't block the UI thread.
+        render_key = (
+            hash(json.dumps(graph, sort_keys=True, default=str)),
+            self.graph_labels_check.isChecked(),
+            self.graph_edges_check.isChecked(),
+            aggregate,
+        )
+        if getattr(self, "_graph_render_key", None) == render_key:
+            return
+        self._graph_render_key = render_key
         html = render_gravis_html(
             graph,
             show_labels=self.graph_labels_check.isChecked(),
             show_edges=self.graph_edges_check.isChecked(),
             height=max(640, self.graph_view.height() - 20),
         )
-        # Skip identical re-renders (load_results runs on many events) and
-        # defer the paint so startup/refresh work doesn't block the UI thread.
-        render_key = (
-            len(nodes),
-            len(edges),
-            str(nodes[0].get("key", "")) if nodes else "",
-            str(nodes[-1].get("key", "")) if nodes else "",
-            self.graph_labels_check.isChecked(),
-            self.graph_edges_check.isChecked(),
-            self.graph_aggregate_check.isChecked(),
-        )
-        if getattr(self, "_graph_render_key", None) == render_key:
-            return
-        self._graph_render_key = render_key
         QTimer.singleShot(
             0,
             lambda: self.graph_view.setHtml(
@@ -4824,8 +5064,17 @@ class MainWindow(QMainWindow):
             return
 
         proposed = sum(1 for edge in edges if (edge.get("attrs") or {}).get("proposed"))
+        inferred = sum(1 for edge in edges if (edge.get("attrs") or {}).get("inferred"))
+        vulnerabilities = sum(
+            1 for node in nodes if str(node.get("type", "")).lower() == "vuln"
+        )
+        goals = sum(
+            1 for node in nodes if str(node.get("type", "")).lower() == "goal"
+        )
         self.attack_graph_summary.setText(
-            f"{len(nodes)} nodes, {len(edges)} edges ({proposed} proposed probe edge(s))"
+            f"Attack model: {len(nodes)} entities · {len(edges)} transitions  |  "
+            f"{len(edges) - proposed - inferred} established · {inferred} inferred · "
+            f"{proposed} proposed · {vulnerabilities} vulnerabilities · {goals} objectives"
         )
         if plan:
             self.probe_plan_label.setText(

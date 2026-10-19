@@ -615,7 +615,8 @@ def test_attack_graph_tab_counts_and_probe_plan(tmp_path):
 
     window._load_attack_graph()
     assert window.attack_graph_summary.text() == (
-        "3 nodes, 2 edges (1 proposed probe edge(s))"
+        "Attack model: 3 entities · 2 transitions  |  1 established · "
+        "0 inferred · 1 proposed · 1 vulnerabilities · 1 objectives"
     )
     assert "MEDIUM" in window.probe_plan_label.text()
     assert "145 surfaces considered" in window.probe_plan_label.text()
@@ -714,12 +715,14 @@ def test_runtime_limits_round_trip(tmp_path):
     window.module_timeout_spin.setValue(450)
     window.budget_requests_spin.setValue(5000)
     window.budget_wall_clock_spin.setValue(120)
+    window.budget_external_commands_spin.setValue(40)
     window._save_settings_form()
 
     saved = yaml.safe_load(config_path.read_text())
     assert saved["module_timeout"] == 450
     assert saved["budget_limits"]["max_requests"] == 5000
     assert saved["budget_limits"]["max_wall_clock_seconds"] == 120
+    assert saved["budget_limits"]["max_external_commands"] == 40
     # Fields the GUI does not expose must survive the round trip.
     assert saved["budget_limits"]["max_concurrent_actions"] == 4
 
@@ -732,12 +735,12 @@ def test_theme_qss_applied_and_dark():
     qss_path = Path(__file__).resolve().parent.parent / "gui" / "theme.qss"
     assert qss_path.exists()
     qss = qss_path.read_text()
-    assert "#090d13" in qss  # dark background
+    assert "#0a0f14" in qss  # dark background
     assert "QMenu" in qss  # context menus are styled too
 
     window = MainWindow()
     applied = window.styleSheet()
-    assert "#090d13" in applied
+    assert "#0a0f14" in applied
     assert "QMenu" in applied
     window.close()
     app.processEvents()

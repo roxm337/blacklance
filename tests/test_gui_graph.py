@@ -7,14 +7,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gui.graph import (
     _patch_gravis_isolated_node_hover,
+    analyze_display_graph,
     build_attack_display,
     build_display_graph,
     build_graph,
+    filter_display_graph,
     graph_positions,
     render_attack_html,
     render_gravis_html,
     to_gravis_graph,
 )
+
+
+def _intelligence_graph():
+    return {
+        "nodes": [
+            {"type": "domain", "key": "domain:example.com", "value": "example.com",
+             "sources": ["certificate transparency"], "attrs": {}},
+            {"type": "subdomain", "key": "sub:api.example.com", "value": "api.example.com",
+             "sources": ["dns"], "attrs": {"finding_count": 2, "worst_finding": "HIGH"}},
+            {"type": "ip", "key": "ip:192.0.2.1", "value": "192.0.2.1",
+             "sources": ["dns"], "attrs": {}},
+            {"type": "email", "key": "email:ops@example.com", "value": "ops@example.com",
+             "sources": ["public page"], "attrs": {}},
+        ],
+        "edges": [
+            {"source": "domain:example.com", "target": "sub:api.example.com",
+             "type": "HAS_SUBDOMAIN", "attrs": {"inferred": True}},
+            {"source": "sub:api.example.com", "target": "ip:192.0.2.1",
+             "type": "RESOLVES_TO", "attrs": {}},
+        ],
+    }
+
+
+def test_filter_display_graph_keeps_one_hop_context_and_marks_focus():
+    filtered = filter_display_graph(_intelligence_graph(), query="api.example.com")
+
+    assert {node["key"] for node in filtered["nodes"]} == {
+        "domain:example.com", "sub:api.example.com", "ip:192.0.2.1"
+    }
+    focus = next(node for node in filtered["nodes"] if node["key"] == "sub:api.example.com")
+    assert focus["attrs"]["focus_match"] is True
+    assert filtered["meta"]["filtered"] is True
+
+
+def test_filter_display_graph_applies_relation_and_provenance():
+    filtered = filter_display_graph(
+        _intelligence_graph(), relation="HAS_SUBDOMAIN", provenance="inferred"
+    )
+
+    assert len(filtered["edges"]) == 1
+    assert {node["key"] for node in filtered["nodes"]} == {
+        "domain:example.com", "sub:api.example.com"
+    }
+
+
+def test_analyze_display_graph_reports_structure_risk_and_pivots():
+    analysis = analyze_display_graph(_intelligence_graph())
+
+    assert analysis["components"] == 2
+    assert analysis["isolated"] == 1
+    assert analysis["provenance"] == {"observed": 1, "inferred": 1, "proposed": 0}
+    assert analysis["source_count"] == 3
+    assert analysis["affected"] == 1
+    assert analysis["high_risk"] == 1
+    assert analysis["pivots"][0]["label"] == "api.example.com"
+    assert analysis["pivots"][0]["degree"] == 2
 
 
 def test_build_graph_infers_domain_to_subdomain_and_webapp():
@@ -67,6 +125,27 @@ def test_build_display_graph_aggregates_dense_types():
     assert graph["meta"]["raw_nodes"] == 13
 
 
+def test_aggregation_preserves_sources_and_finding_risk_but_not_singletons():
+    assets = {
+        "nodes": [
+            {"type": "subdomain", "key": "sub:a", "value": "a", "sources": ["dns"],
+             "attrs": {"finding_count": 1, "worst_finding": "HIGH"}},
+            {"type": "subdomain", "key": "sub:b", "value": "b", "sources": ["ct"],
+             "attrs": {"finding_count": 2, "worst_finding": "CRITICAL"}},
+            {"type": "webapp", "key": "webapp:a", "value": "https://a", "sources": ["http"]},
+        ],
+        "edges": [],
+    }
+
+    graph = build_display_graph(assets, aggregate=True, aggregate_threshold=10)
+    grouped = next(node for node in graph["nodes"] if node["key"] == "group:subdomain")
+
+    assert grouped["attrs"]["finding_count"] == 3
+    assert grouped["attrs"]["worst_finding"] == "CRITICAL"
+    assert grouped["sources"] == ["ct", "dns"]
+    assert any(node["key"] == "webapp:a" for node in graph["nodes"])
+
+
 def test_to_gravis_graph_uses_gjgf_shape():
     display_graph = {
         "nodes": [
@@ -115,7 +194,7 @@ def test_render_attack_html_is_dark_and_marks_proposed_probes():
     html = render_attack_html(attack_graph, show_labels=True, height=560)
 
     # Dark background and the proposed-probe hover label survive rendering.
-    assert "#090d13" in html
+    assert "#0a0f14" in html
     assert "proposed probe: sqli_probe" in html
     assert "steal session" in html
 

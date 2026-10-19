@@ -104,20 +104,45 @@ def build_display_graph(assets: dict, aggregate: bool = True,
 
     collapsed_types = {
         asset_type for asset_type, count in counts.items()
-        if count >= aggregate_threshold or asset_type in AGGREGATE_TYPES
+        if count >= aggregate_threshold
+        or (count > 1 and asset_type in AGGREGATE_TYPES)
     }
 
     display_nodes = []
     key_map = {}
     for asset_type in sorted(collapsed_types):
         group_key = f"group:{asset_type}"
+        members = [node for node in nodes if node.get("type", "unknown") == asset_type]
+        finding_count = sum(
+            int((node.get("attrs") or {}).get("finding_count", 0) or 0)
+            for node in members
+        )
+        severity_order = {"": 0, "INFO": 1, "LOW": 2, "MEDIUM": 3, "HIGH": 4, "CRITICAL": 5}
+        worst_finding = max(
+            (str((node.get("attrs") or {}).get("worst_finding", "")).upper()
+             for node in members),
+            key=lambda severity: severity_order.get(severity, 0),
+            default="",
+        )
+        group_attrs = {
+            "count": counts[asset_type],
+            "group_type": asset_type,
+            "finding_count": finding_count,
+        }
+        if worst_finding:
+            group_attrs["worst_finding"] = worst_finding
         display_nodes.append({
             "type": f"{asset_type}_group",
             "key": group_key,
             "value": f"{asset_type} ({counts[asset_type]})",
             "confidence": "GROUP",
-            "attrs": {"count": counts[asset_type], "group_type": asset_type},
-            "sources": ["graph aggregation"],
+            "attrs": group_attrs,
+            "sources": sorted({
+                str(source)
+                for node in members
+                for source in node.get("sources", []) or []
+                if source
+            }),
         })
 
     for node in nodes:
@@ -158,6 +183,189 @@ def build_display_graph(assets: dict, aggregate: bool = True,
     }
 
 
+def filter_display_graph(
+    graph: dict,
+    query: str = "",
+    asset_type: str = "",
+    relation: str = "",
+    provenance: str = "all",
+) -> dict:
+    """Return an analyst-focused subgraph while preserving one-hop context.
+
+    Text/type matches are the focus entities. Their immediate neighbours stay
+    visible so a search never removes the relationships that explain a match.
+    Relation and provenance filters are applied first and therefore define
+    which contextual links are allowed into the result.
+    """
+    nodes = list(graph.get("nodes") or [])
+    edges = list(graph.get("edges") or [])
+    node_by_key = {
+        str(node.get("key")): node for node in nodes if node.get("key")
+    }
+    relation_key = str(relation or "").strip().upper()
+    provenance_key = str(provenance or "all").strip().lower()
+
+    def edge_allowed(edge: dict) -> bool:
+        if relation_key and str(edge.get("type", "")).upper() != relation_key:
+            return False
+        attrs = edge.get("attrs") or {}
+        edge_provenance = (
+            "proposed" if attrs.get("proposed")
+            else "inferred" if attrs.get("inferred")
+            else "observed"
+        )
+        return provenance_key in ("", "all", edge_provenance)
+
+    allowed_edges = [edge for edge in edges if edge_allowed(edge)]
+    query_key = str(query or "").strip().casefold()
+    type_key = str(asset_type or "").strip().casefold()
+
+    def node_matches(node: dict) -> bool:
+        node_type = str(node.get("type", "")).casefold()
+        if type_key and node_type != type_key:
+            return False
+        if not query_key:
+            return True
+        searchable = " ".join((
+            str(node.get("key", "")),
+            str(node.get("value", "")),
+            str(node.get("type", "")),
+            str(node.get("confidence", "")),
+            " ".join(str(source) for source in node.get("sources", []) or []),
+            str(node.get("attrs") or {}),
+        )).casefold()
+        return query_key in searchable
+
+    has_node_filter = bool(query_key or type_key)
+    focus_keys = {
+        str(node.get("key")) for node in nodes
+        if node.get("key") and node_matches(node)
+    }
+    if has_node_filter:
+        visible_keys = set(focus_keys)
+        for edge in allowed_edges:
+            source = str(edge.get("source", ""))
+            target = str(edge.get("target", ""))
+            if source in focus_keys or target in focus_keys:
+                visible_keys.update((source, target))
+    elif relation_key or provenance_key not in ("", "all"):
+        visible_keys = {
+            str(endpoint)
+            for edge in allowed_edges
+            for endpoint in (edge.get("source"), edge.get("target"))
+            if endpoint
+        }
+    else:
+        visible_keys = set(node_by_key)
+
+    visible_nodes = []
+    for key in visible_keys:
+        node = node_by_key.get(key)
+        if node is None:
+            continue
+        if key in focus_keys and has_node_filter:
+            node = dict(node)
+            node["attrs"] = dict(node.get("attrs") or {})
+            node["attrs"]["focus_match"] = True
+        visible_nodes.append(node)
+    order = {str(node.get("key")): index for index, node in enumerate(nodes)}
+    visible_nodes.sort(key=lambda node: order.get(str(node.get("key")), 10**9))
+    visible_edges = [
+        edge for edge in allowed_edges
+        if str(edge.get("source", "")) in visible_keys
+        and str(edge.get("target", "")) in visible_keys
+    ]
+    return {
+        "nodes": visible_nodes,
+        "edges": visible_edges,
+        "meta": {
+            **dict(graph.get("meta") or {}),
+            "focus_nodes": len(focus_keys) if has_node_filter else len(visible_nodes),
+            "filtered": bool(has_node_filter or relation_key or provenance_key not in ("", "all")),
+        },
+    }
+
+
+def analyze_display_graph(graph: dict) -> dict:
+    """Calculate compact intelligence indicators for the analyst brief."""
+    nodes = list(graph.get("nodes") or [])
+    edges = list(graph.get("edges") or [])
+    node_by_key = {
+        str(node.get("key")): node for node in nodes if node.get("key")
+    }
+    adjacency = {key: set() for key in node_by_key}
+    relation_counts: dict[str, int] = defaultdict(int)
+    provenance_counts = {"observed": 0, "inferred": 0, "proposed": 0}
+    for edge in edges:
+        source = str(edge.get("source", ""))
+        target = str(edge.get("target", ""))
+        if source in adjacency and target in adjacency:
+            adjacency[source].add(target)
+            adjacency[target].add(source)
+        relation_counts[str(edge.get("type") or "RELATES_TO")] += 1
+        attrs = edge.get("attrs") or {}
+        provenance = (
+            "proposed" if attrs.get("proposed")
+            else "inferred" if attrs.get("inferred")
+            else "observed"
+        )
+        provenance_counts[provenance] += 1
+
+    unseen = set(adjacency)
+    components = 0
+    while unseen:
+        components += 1
+        stack = [unseen.pop()]
+        while stack:
+            current = stack.pop()
+            neighbours = adjacency[current] & unseen
+            unseen.difference_update(neighbours)
+            stack.extend(neighbours)
+
+    type_counts: dict[str, int] = defaultdict(int)
+    source_names = set()
+    affected = 0
+    high_risk = 0
+    for node in nodes:
+        type_counts[str(node.get("type") or "unknown")] += 1
+        source_names.update(str(source) for source in node.get("sources", []) or [] if source)
+        attrs = node.get("attrs") or {}
+        if int(attrs.get("finding_count", 0) or 0) > 0:
+            affected += 1
+        if str(attrs.get("worst_finding", "")).upper() in ("HIGH", "CRITICAL"):
+            high_risk += 1
+
+    pivot_keys = sorted(
+        adjacency,
+        key=lambda key: (-len(adjacency[key]), key),
+    )[:5]
+    pivots = [
+        {
+            "key": key,
+            "label": str(node_by_key[key].get("value") or key),
+            "type": str(node_by_key[key].get("type") or "unknown"),
+            "degree": len(adjacency[key]),
+        }
+        for key in pivot_keys if adjacency[key]
+    ]
+    node_count = len(nodes)
+    density = (len(edges) / (node_count * (node_count - 1))) if node_count > 1 else 0.0
+    return {
+        "nodes": node_count,
+        "edges": len(edges),
+        "components": components,
+        "isolated": sum(1 for neighbours in adjacency.values() if not neighbours),
+        "density": density,
+        "types": dict(sorted(type_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "relations": dict(sorted(relation_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "provenance": provenance_counts,
+        "source_count": len(source_names),
+        "affected": affected,
+        "high_risk": high_risk,
+        "pivots": pivots,
+    }
+
+
 def _annotate_finding_counts(nodes: list, findings: list) -> None:
     """Mark nodes their findings affect: count + worst severity in attrs.
 
@@ -194,6 +402,7 @@ def to_gravis_graph(display_graph: dict, show_labels: bool = False,
         size = 38 + min(42, count * 2) if is_group else 24 + min(18, len(node.get("sources", [])) * 2)
         label = _label(node, show_labels or is_group or asset_type == "domain")
         border_color = "#e2e8f0"
+        border_size = 2
         finding_count = int(node.get("attrs", {}).get("finding_count", 0) or 0)
         worst = str(node.get("attrs", {}).get("worst_finding", "") or "")
         if finding_count and worst in ("HIGH", "CRITICAL"):
@@ -201,13 +410,17 @@ def to_gravis_graph(display_graph: dict, show_labels: bool = False,
             # lands on damage first and inventory second.
             border_color = "#ef4444"
             size += 8
+        if node.get("attrs", {}).get("focus_match"):
+            border_color = "#fbbf24"
+            border_size = 4
+            size += 10
         nodes[node_id] = {
             "label": label,
             "metadata": {
                 "color": color,
                 "size": size,
                 "border_color": border_color,
-                "border_size": 2,
+                "border_size": border_size,
                 "hover": _node_hover(node),
                 "click": _node_click(node),
             },
@@ -230,7 +443,7 @@ def to_gravis_graph(display_graph: dict, show_labels: bool = False,
                 color, opacity, size = "#94a3b8", 0.44, 1.0
                 hover = escape(edge.get("type", "RELATES_TO"))
             else:
-                color, opacity, size = "#e11d48", 0.76, 1.4
+                color, opacity, size = "#35c7b1", 0.76, 1.4
                 hover = escape(edge.get("type", "RELATES_TO"))
             edges.append({
                 "source": source,
@@ -342,7 +555,7 @@ def _render_gravis_document(graph: dict, height: int) -> str:
     html = _patch_gravis_dark_theme(html)
     return html.replace(
         "</body>",
-        "<style>body{margin:0;background:#090d13;color:#dce7f3;"
+        "<style>body{margin:0;background:#0a0f14;color:#d8e2ea;"
         "font-family:Arial,sans-serif;}</style></body>",
     )
 
@@ -367,30 +580,30 @@ def _patch_gravis_dark_theme(html: str) -> str:
     dark_theme = """
 <style>
 body {
-    background: #090d13 !important;
-    color: #dce7f3 !important;
+    background: #0a0f14 !important;
+    color: #d8e2ea !important;
 }
 svg {
-    background: #0b111a !important;
+    background: #0c1218 !important;
 }
 svg text {
-    fill: #dce7f3 !important;
+    fill: #d8e2ea !important;
 }
 button, select, input, summary, details, label, div, span {
-    color: #dce7f3;
+    color: #d8e2ea;
 }
 button, select, input {
-    background: #151f2e !important;
-    border: 1px solid #29384d !important;
+    background: #18232d !important;
+    border: 1px solid #32404d !important;
     border-radius: 8px !important;
 }
 aside, pre {
-    background: #101721 !important;
-    color: #dce7f3 !important;
+    background: #111820 !important;
+    color: #d8e2ea !important;
 }
 details {
-    background: #101721 !important;
-    border: 1px solid #223044 !important;
+    background: #111820 !important;
+    border: 1px solid #25313c !important;
     border-radius: 10px !important;
 }
 </style>
