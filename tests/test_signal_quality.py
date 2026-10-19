@@ -3048,11 +3048,11 @@ def test_add_finding_carries_taxonomy_and_clean_evidence():
     assert finding["owasp"] == "A03:2021 – Injection"
     assert finding["evidence"] == ["real line"]
     assert finding["first_seen"] == finding["last_seen"]
-    edges = [e for e in state.assets["edges"]
-             if e.get("target") == fid]
-    assert len(edges) == 1
-    assert edges[0]["type"] == "AFFECTED_BY"
-    assert edges[0]["source"] == "url:http://example.com/x"
+    # asset_keys stay plain references — findings are never graph nodes,
+    # so writing an AFFECTED_BY edge to a finding ID left a dangling
+    # edge that only inflated the relations count.
+    assert finding["asset_keys"] == ["url:http://example.com/x", "url:missing"]
+    assert all(e.get("target") != fid for e in state.assets["edges"])
 
 
 def test_merge_bumps_last_seen_and_keeps_taxonomy():

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Union
@@ -78,6 +79,7 @@ class StateManager:
             self.module[key] = migrated
         self.module.setdefault("runs", [])
         self.module.setdefault("completed_checks", [])
+        self.findings.setdefault("findings", [])
         self.evidence.setdefault("items", [])
         self._dirty = False
 
@@ -144,6 +146,55 @@ class StateManager:
         return [n for n in self.assets["nodes"] if n["confidence"] == confidence]
 
     # ── Finding Management ────────────────────────────────────────
+
+    def _next_finding_id(self) -> str:
+        """Monotonic finding ID — a pruned finding's number is never reissued.
+
+        IDs used to be positional (`FINDING-{len+1}`), so `begin_module_run`
+        pruning one module's findings could hand the next new finding the
+        ID of an unrelated survivor: two rows shared one ID, and triage
+        verdicts silently attached to the wrong finding after a re-run.
+        The sequence persists in findings.json and only moves forward;
+        legacy states migrate by taking the highest suffix already on disk.
+        """
+        if "id_seq" not in self.findings:
+            highest = 0
+            for finding in self.findings["findings"]:
+                suffix = str(finding.get("id") or "")
+                if suffix.startswith("FINDING-") and suffix[8:].isdigit():
+                    highest = max(highest, int(suffix[8:]))
+            self.findings["id_seq"] = highest
+        existing = {str(f.get("id")) for f in self.findings["findings"]}
+        while True:
+            self.findings["id_seq"] = int(self.findings["id_seq"]) + 1
+            candidate = f"FINDING-{self.findings['id_seq']:04d}"
+            if candidate not in existing:
+                self._dirty = True
+                return candidate
+
+    def _next_evidence_id(self) -> str:
+        """Monotonic evidence ID (same rationale as _next_finding_id).
+
+        Evidence is never pruned today, so collisions never happened — but
+        the length-based scheme would break the day pruning is added, and
+        a reused evidence ID would silently swap one finding's proof with
+        another's.
+        """
+        if "id_seq" not in self.evidence:
+            highest = 0
+            for item in self.evidence["items"]:
+                suffix = str(item.get("id") or "")
+                if suffix.startswith("EVIDENCE-") and suffix[9:].isdigit():
+                    highest = max(highest, int(suffix[9:]))
+            self.evidence["id_seq"] = highest
+        existing = {str(item.get("id")) for item in self.evidence["items"]}
+        while True:
+            self.evidence["id_seq"] = int(self.evidence["id_seq"]) + 1
+            candidate = f"EVIDENCE-{self.evidence['id_seq']:04d}"
+            if candidate not in existing:
+                self._dirty = True
+                return candidate
+
     def prune_module_findings(self, module_id: str) -> int:
         """Remove findings previously emitted by this module.
 
@@ -214,7 +265,7 @@ class StateManager:
                     )
                     self._dirty = True
                     return existing["id"]
-        fid = f"FINDING-{len(self.findings['findings']) + 1:04d}"
+        fid = self._next_finding_id()
         now = self._now()
         finding = {
             "id": fid,
@@ -240,22 +291,7 @@ class StateManager:
         self.findings["findings"].append(finding)
         self.module["stats"]["total_findings"] = len(self.findings["findings"])
         self._dirty = True
-        self._link_finding_to_assets(finding)
         return fid
-
-    def _link_finding_to_assets(self, finding: dict) -> None:
-        """Record finding↔asset relations for the graph views.
-
-        asset_keys point at assets but nothing drew the edge, so the
-        asset graph could never answer "what is affected here" and the
-        attack graph had to re-derive it. Only existing nodes are
-        linked; dangling keys stay as plain references.
-        """
-        known = {node.get("key") for node in self.assets.get("nodes", [])
-                 if node.get("key")}
-        for asset_key in finding.get("asset_keys", []) or []:
-            if asset_key in known:
-                self.add_edge(asset_key, finding["id"], "AFFECTED_BY")
 
     def _merge_finding(self, existing: dict, severity: str, confidence: str,
                        risk_score: int, description: str,
@@ -292,7 +328,6 @@ class StateManager:
             merged_verification = dict(verification)
             merged_verification.update(existing.get("verification") or {})
             existing["verification"] = merged_verification
-        self._link_finding_to_assets(existing)
 
     def get_findings_by_severity(self, severity: str) -> list:
         return [f for f in self.findings["findings"] if f["severity"] == severity]
@@ -413,7 +448,7 @@ class StateManager:
 
     def add_evidence(self, module_id: str, evidence_type: str, subject: str,
                      data: Union[dict, list, str]) -> str:
-        eid = f"EVIDENCE-{len(self.evidence['items']) + 1:04d}"
+        eid = self._next_evidence_id()
         path = self.evidence_dir / f"{eid}.json"
         item = {
             "id": eid,
@@ -487,4 +522,9 @@ class StateManager:
         return default
 
     def _write_json(self, path: Path, data: dict):
-        path.write_text(json.dumps(data, indent=2, default=str))
+        # Atomic replace: Path.write_text truncates first, so a GUI poll or
+        # report run reading between truncate and finish saw empty/partial
+        # JSON, treated it as "no data", and zeroed tables and metrics.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, default=str))
+        os.replace(tmp, path)

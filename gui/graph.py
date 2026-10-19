@@ -10,10 +10,31 @@ from math import cos, pi, sin
 AGGREGATE_TYPES = {"subdomain", "webapp", "bucket", "dns_record", "social_media"}
 
 
+def count_relations(assets: dict) -> int:
+    """Drawable relation count: edges whose both endpoints exist as nodes.
+
+    Matches what the graph can actually render, so the "relations" metric
+    never disagrees with the drawn edges (legacy states carried dangling
+    finding-target edges that inflated the raw count).
+    """
+    keys = {node.get("key") for node in assets.get("nodes", []) if node.get("key")}
+    return sum(
+        1 for edge in assets.get("edges", [])
+        if edge.get("source") in keys and edge.get("target") in keys
+    )
+
+
 def build_graph(assets: dict) -> dict:
     nodes = assets.get("nodes", [])
-    edges = list(assets.get("edges", []))
+    # Keep only drawable edges (both endpoints are real nodes). Older
+    # states carry AFFECTED_BY edges whose target is a finding ID, which
+    # is never a node: they were dropped downstream anyway, but they
+    # inflated the "relations" counts shown next to the graph.
     by_key = {node.get("key"): node for node in nodes if node.get("key")}
+    edges = [
+        edge for edge in assets.get("edges", [])
+        if edge.get("source") in by_key and edge.get("target") in by_key
+    ]
 
     inferred = []
     for node in nodes:
