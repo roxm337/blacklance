@@ -22,6 +22,7 @@ import re
 from urllib.parse import urljoin, urlparse
 
 from core.auth_harness import AuthHarness
+from core.noise_filters import is_vendor_js
 from modules.base import BaseModule
 from modules.js_analysis import extract_dom_sinks
 
@@ -153,7 +154,7 @@ class BrowserCrawl(BaseModule):
                 js_url,
                 confidence="FIRM",
                 sources=[self.id],
-                attrs={"rendered": True},
+                attrs={"rendered": True, "vendor": is_vendor_js(js_url)},
             )
 
         for map_url in sorted(source_maps)[:100]:

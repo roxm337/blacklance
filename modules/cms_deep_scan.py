@@ -156,7 +156,16 @@ def droopescan_signals(result: dict, cms: str = "") -> list:
 
     if isinstance(data, dict):
         for key, value in data.items():
-            if key in ("stdout", "stderr", "exit_code", "error"):
+            # Scanner run-metadata, not components. droopescan emits the
+            # scanned host and the detected CMS name as top-level keys; left
+            # in, they became "host https://… identified" and "cms_name
+            # wordpress identified" version findings — the field name read as
+            # a product. These describe the scan, not the install.
+            if str(key).lower() in (
+                "stdout", "stderr", "exit_code", "error", "host", "url",
+                "target", "cms", "cms_name", "name", "interesting urls",
+                "interesting_urls", "warnings", "command", "args", "time",
+            ):
                 continue
             lowered = str(key).lower()
             if lowered in ("plugins", "modules", "themes", "components"):

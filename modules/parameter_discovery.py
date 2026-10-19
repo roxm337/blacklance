@@ -2,6 +2,7 @@
 
 import asyncio
 
+from core.noise_filters import is_noise_parameter
 from modules.base import BaseModule
 from tools.external import (
     arjun_scan,
@@ -84,6 +85,22 @@ class ParameterDiscovery(BaseModule):
         # misbuilds) must never become sqlmap targets.
         parameters = [item for item in parameters
                       if self._in_scope(str(item.get("url", "")))]
+        # Cache-busters (`?ver=` on static assets), analytics plumbing and
+        # asset-versioning names are not injectable inputs; dropping them
+        # here keeps sqlmap/XSS off 48 copies of `ver` and keeps the asset
+        # inventory to parameters an operator would actually test. Seeded
+        # reflection params are exempt — they were chosen deliberately.
+        before = len(parameters)
+        parameters = [
+            item for item in parameters
+            if item.get("seeded")
+            or not is_noise_parameter(str(item.get("parameter", "")),
+                                      str(item.get("url", "")))
+        ]
+        dropped = before - len(parameters)
+        if dropped:
+            self.log(f"  Dropped {dropped} non-testable parameter(s) "
+                     f"(cache-busters / static-asset versioning / analytics)")
         unique = _dedupe_parameters(parameters)
         if not unique:
             seeded = await self._seed_reflection_params()

@@ -2,6 +2,7 @@
 
 import re
 
+from core.noise_filters import is_probable_person_name, is_probable_phone
 from modules.base import BaseModule
 from tools.external import theharvester_scan, tool_available
 from tools.wrappers import curl
@@ -90,11 +91,10 @@ class EmailHarvest(BaseModule):
                 continue
             for name in NAME_RE.findall(body):
                 cleaned = " ".join(name.split())
-                if 4 <= len(cleaned) <= 40 and "@" not in cleaned:
+                if is_probable_person_name(cleaned):
                     all_names.add(cleaned)
             for phone in PHONE_RE.findall(body):
-                digits = re.sub(r"\D", "", phone)
-                if 9 <= len(digits) <= 15:
+                if is_probable_phone(phone):
                     all_phones.add(phone.strip())
 
         # 2. WP REST API authors/pages when WordPress is in play.

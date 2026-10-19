@@ -3,6 +3,7 @@
 import asyncio
 import re
 from urllib.parse import urlparse, parse_qs
+from core.noise_filters import is_vendor_js
 from modules.base import BaseModule
 from tools.wrappers import wayback_cdx, urlscan_search, curl_with_status, gau_urls
 
@@ -122,7 +123,7 @@ class WaybackMachine(BaseModule):
                 js_url,
                 confidence="FIRM",
                 sources=["wayback CDX", "gau"],
-                attrs={"url": js_url},
+                attrs={"url": js_url, "vendor": is_vendor_js(js_url)},
             )
 
         # API endpoints

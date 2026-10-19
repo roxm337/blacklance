@@ -98,9 +98,17 @@ class WAFMapping(BaseModule):
                     waf_allows.append({"path": path, "code": 200, "category": category})
                     self.state.record_waf_allow(path, 200)
                 elif status == 403:
-                    # Apache block (file exists but protected)
-                    waf_allows.append({"path": path, "code": 403, "category": category,
-                                       "note": "Apache protected (file exists)"})
+                    # A 403 is the path being *protected*, which is the
+                    # opposite of a WAF gap — filing it under waf_allows is
+                    # how "WAF Gap: Sensitive Paths Allowed" came to list a
+                    # path whose evidence read `code: 403`. It is also not
+                    # proof the file exists: Apache returns 403 for every
+                    # dotfile under its default deny whether or not the file
+                    # is there. Record it as blocked, claim nothing about
+                    # existence.
+                    waf_blocks.append({"path": path, "code": 403,
+                                       "category": category})
+                    self.state.record_waf_block(path, 403)
 
         # Phase 2: Try bypass on blocked paths (max 3)
         self.log("Phase 2: Bypass attempts...")

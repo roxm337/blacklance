@@ -2000,6 +2000,12 @@ def test_kev_match_strengths(monkeypatch):
         {"cveID": "CVE-2024-0002", "product": "Windows Kernel",
          "vendorProject": "Microsoft", "vulnerabilityName": "EoP",
          "dueDate": "2024-01-01", "shortDescription": "d"},
+        {"cveID": "CVE-0000-MB", "product": "Meteobridge",
+         "vendorProject": "Smartbedded", "vulnerabilityName": "RCE",
+         "dueDate": "2024-01-01", "shortDescription": "d"},
+        {"cveID": "CVE-0000-LAYER", "product": "LayerSlider",
+         "vendorProject": "Kreatura", "vulnerabilityName": "SQLi",
+         "dueDate": "2024-01-01", "shortDescription": "d"},
     ]}
 
     async def fake_bash(cmd, timeout=120):
@@ -2008,11 +2014,23 @@ def test_kev_match_strengths(monkeypatch):
 
     monkeypatch.setattr(exploit_module, "bash", fake_bash)
 
-    matches = asyncio.run(check_cisa_kev(["exchange", "Microsoft"]))
+    matches = asyncio.run(check_cisa_kev(
+        ["exchange", "Microsoft", "bridge", "layerslider", "Kreatura"]))
     by_cve = {m["cve"]: m for m in matches}
-    # "exchange" is a substring of "Exchange Server", "Microsoft" is exact vendor.
+
+    # "exchange" (>=6 chars) is a specific substring of "Exchange Server".
     assert by_cve["CVE-2024-0001"]["match_strength"] == "substring"
-    assert by_cve["CVE-2024-0002"]["match_strength"] in ("exact", "vendor")
+    # A bare generic vendor token ("Microsoft") must NOT promote an unrelated
+    # product ("Windows Kernel") — that vendor-wide net is what turned one
+    # "Apache" token into 17 HIGH KEV CVEs against a WordPress site.
+    assert "CVE-2024-0002" not in by_cve
+    # The "bridge" WordPress theme must NOT substring-match "Meteobridge":
+    # too short / substring-of-a-different-product.
+    assert "CVE-0000-MB" not in by_cve
+    # A real product keyword still matches exactly, and its real vendor
+    # matches as a vendor-strength lead.
+    assert by_cve["CVE-0000-LAYER"]["match_strength"] == "exact"
+    assert by_cve["CVE-0000-LAYER"]["matched_term"] == "layerslider"
 
 
 # ── Wave D+: sitemap liveness + ASN scope ────────────────────────

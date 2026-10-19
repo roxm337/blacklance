@@ -208,6 +208,7 @@ class MisconfigProbes(BaseModule):
         )
         findings_found = []
         exposed_paths = []
+        self._restricted_403 = []
         consecutive_empty = 0
 
         profile = await self._establish_profile(base_url, timeout)
@@ -247,6 +248,14 @@ class MisconfigProbes(BaseModule):
         await self._probe_backup_combinations(
             base_url, timeout, concurrency, profile,
             findings_found, exposed_paths, probe_cfg)
+
+        # Consolidate dotfile 403s into at most one finding, and only when a
+        # control probe shows the 403 is path-specific rather than a blanket
+        # dotfile deny.
+        dotfile_finding = await self._consolidate_restricted_403(
+            base_url, timeout)
+        if dotfile_finding:
+            findings_found.append(dotfile_finding)
 
         # Record all findings
         for f in findings_found:
@@ -448,22 +457,75 @@ class MisconfigProbes(BaseModule):
 
         elif status == 403:
             if any(kw in path for kw in [".git", ".htpasswd", ".env", "wp-config"]):
+                # A 403 is NOT proof the file exists: Apache (and most managed
+                # hosts) return 403 for every dotfile under a blanket deny,
+                # present or not. So this records a candidate for later
+                # consolidation rather than one "Restricted File Exists"
+                # finding per path — eleven of which, all 403, is how this
+                # module buried its real findings under dotfile noise. The
+                # control probe in run() decides whether any of these survive.
                 self.state.add_asset(
                     "url",
                     f"url:{base_url}{path}",
                     f"{base_url}{path}",
-                    confidence="FIRM",
+                    confidence="TENTATIVE",
                     sources=["misconfig probe"],
-                    attrs={"status": 403, "note": "Exists but access-controlled"},
+                    attrs={"status": 403,
+                           "note": "403 — access-controlled or blanket dotfile deny"},
                 )
-                findings_found.append({
-                    "path": path,
-                    "title": f"Restricted File Exists: {path}",
-                    "severity": "INFO",
-                    "desc": f"{path} returns 403 — file exists but is access-controlled. "
-                            f"Try WAF bypass techniques.",
-                    "body_preview": "",
-                })
+                self._restricted_403.append(path)
+
+    async def _dotfile_deny_is_blanket(self, base_url: str, timeout: int) -> bool:
+        """Does the server 403 a dotfile that cannot possibly exist?
+
+        The test that separates "this file exists but is protected" from
+        "this server denies every dotfile on principle": ask for two random
+        dotfiles that are not real. If the server answers 403 to a path no
+        one ever created, then a 403 on `/.git/config` says nothing about
+        `/.git/config` — it is the deny policy talking. Any other answer
+        (404/200) means the 403s we saw are path-specific and worth noting.
+        """
+        import uuid
+        controls = [f"/.{uuid.uuid4().hex}",
+                    f"/.git/{uuid.uuid4().hex}.nope"]
+        for ctrl in controls:
+            try:
+                result = await curl_with_status(f"{base_url}{ctrl}",
+                                                 timeout=timeout)
+            except Exception:  # noqa: BLE001 - control probe is best-effort
+                continue
+            if result.get("status", 0) != 403:
+                return False
+        return True
+
+    async def _consolidate_restricted_403(self, base_url: str,
+                                          timeout: int) -> "dict | None":
+        """Collapse the dotfile 403s into at most one honest finding."""
+        paths = sorted(set(self._restricted_403))
+        if not paths:
+            return None
+        if await self._dotfile_deny_is_blanket(base_url, timeout):
+            self.log(f"  [dotfile-deny] {len(paths)} dotfile 403(s) match a "
+                     f"blanket deny (control dotfile also 403) — suppressed, "
+                     f"not evidence of existence.")
+            return None
+        preview = ", ".join(paths[:10])
+        self.log(f"  {len(paths)} dotfile path(s) return 403 while a control "
+                 f"dotfile does not — path-specific, worth a lead.")
+        return {
+            "path": paths[0],
+            "title": f"Access-Controlled Dotfiles: {len(paths)} paths return 403",
+            "severity": "INFO",
+            "desc": (
+                f"{len(paths)} sensitive dotfile path(s) return HTTP 403 while "
+                f"a randomly-named control dotfile does not, so the server is "
+                f"handling these paths specifically rather than denying all "
+                f"dotfiles. The files are likely present but not readable; "
+                f"confirm with filter-bypass techniques before relying on it. "
+                f"Paths: {preview}."
+            ),
+            "body_preview": "",
+        }
 
     def _prioritized_paths(self, paths: list[str]) -> list[str]:
         critical_tokens = (

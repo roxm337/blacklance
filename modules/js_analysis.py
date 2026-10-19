@@ -4,6 +4,7 @@ import re
 from modules.base import BaseModule
 from tools.external import semgrep_scan, tool_available
 from tools.wrappers import curl_with_status, bash
+from core.noise_filters import is_vendor_js
 from core.response_fingerprint import establish_baseline, fingerprint
 from core.surface import script_urls_from_html
 
@@ -403,9 +404,18 @@ class JSAnalysis(BaseModule):
         # Collect JS files from multiple sources
         js_urls = set()
 
-        # From wayback data
+        # From wayback data. Vendor libraries (jQuery, GSAP, WP core,
+        # analytics) hold no first-party endpoints, secrets or sinks; the
+        # euro2c run queued 140 js_file assets, mostly theme/library bundles,
+        # and analysing each is how this module burned its whole 300s budget
+        # and timed out. Skip anything tagged vendor at discovery, and fall
+        # back to a path check for assets tagged before the flag existed.
         js_assets = self.state.get_assets_by_type("js_file")
         for asset in js_assets:
+            attrs = asset.get("attrs", {}) or {}
+            if attrs.get("vendor") or (
+                    "vendor" not in attrs and is_vendor_js(asset["value"])):
+                continue
             js_urls.add(asset["value"])
 
         # From main page source
