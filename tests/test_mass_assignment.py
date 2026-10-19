@@ -116,7 +116,7 @@ def _config(base, module_cfg):
 def _run(app, module_cfg):
     async def main():
         async with Env(app) as env:
-            state = StateManager(env.base)
+            state = StateManager(tempfile.mkdtemp())
             state.add_asset("parameter", "url:x", "q", attrs={"url": env.base})
             config = _config(env.base, module_cfg)
             config["target"]["base_url"] = env.base
@@ -144,7 +144,7 @@ def test_no_identity_means_skip():
     app = ProfileApp(writable={"role"})
     async def main():
         async with Env(app) as env:
-            state = StateManager(env.base)
+            state = StateManager(tempfile.mkdtemp())
             config = _config(env.base, {"enabled": True})
             config["auth"] = {"identities": {}}
             module = MassAssignment(state, config)

@@ -26,6 +26,9 @@ config.yaml
 # ============================================================
 reports/
 .data/
+# Stray state trees if a run is ever handed a URL as its output dir
+http:/
+https:/
 
 # ============================================================
 #  Internal development docs (kept local, not published)
