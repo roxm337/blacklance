@@ -53,10 +53,14 @@ jobs:
           python orchestrator.py -t example.com --check-config
 
       - name: Run test suite (non-GUI)
+        # GUI test files are ignored here because this job does not
+        # install PySide6; they run in the test-gui job instead.
         run: |
           python -m pytest -q \
             --ignore=tests/test_gui_app.py \
-            --ignore=tests/test_gui_graph.py
+            --ignore=tests/test_gui_graph.py \
+            --ignore=tests/test_gui_enhancements.py \
+            --ignore=tests/test_results_integrity.py
 
   test-gui:
     # Scanner save/load helpers live in the GUI tests; ignoring them let
@@ -92,4 +96,8 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          python -m pytest -q tests/test_gui_app.py tests/test_gui_graph.py
+          python -m pytest -q \
+            tests/test_gui_app.py \
+            tests/test_gui_graph.py \
+            tests/test_gui_enhancements.py \
+            tests/test_results_integrity.py
