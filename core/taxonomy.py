@@ -93,3 +93,43 @@ def classify(category: str) -> dict:
         if keyword in lowered:
             return {"cwe": list(cwe), "owasp": owasp}
     return {"cwe": [], "owasp": ""}
+
+
+# A finding's *vulnerability class* is coarser than its title: three modules
+# found the same WordPress user list and filed "WP REST API: 2 Users
+# Enumerated" (HIGH), "WordPress REST User Enumeration" (MEDIUM) and
+# "WordPress Author Enumeration" (LOW) — one weakness, three report entries.
+# Title-based dedup can't see that; a class signature can.
+#
+# The crucial distinction is scope. A *host-scoped* class is a property of
+# the host — one entry per host is the correct count, so duplicates collapse.
+# A *point-scoped* class (injection, IDOR, open redirect) is a property of a
+# specific endpoint/parameter: "XSS on ?q" and "XSS on ?name" are two real
+# findings and must never be merged. Only host-scoped classes are returned
+# with collapse=True; everything else stays exactly as filed.
+def vuln_class(title: str, category: str = "") -> "tuple[str | None, bool]":
+    """Return (class_slug, host_scoped). (None, False) when unclassified.
+
+    Conservative by construction: an unrecognised finding gets no class and
+    is left on its exact-title dedup key, so this can only ever *reduce*
+    duplicates of known posture classes, never fold distinct findings.
+    """
+    t = f"{title} {category}".lower()
+
+    # Account/user enumeration — the proven triplicate. Requires an explicit
+    # user/author signal so "Enumeration"-category file-existence findings
+    # (which share the word "enumeration") are not swept in.
+    if "enumerat" in t and any(
+            k in t for k in ("user", "author", "username", "wp-json")):
+        return "user-enumeration", True
+
+    # Missing/weak security headers — a single header posture per host.
+    if ("security header" in t or "missing header" in t
+            or "missing security" in t):
+        return "missing-security-headers", True
+
+    # Directory listing enabled — one per host.
+    if "directory listing" in t or "directory index" in t:
+        return "directory-listing", True
+
+    return None, False

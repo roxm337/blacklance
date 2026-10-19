@@ -13,6 +13,31 @@ CONFIDENCE_ORDER = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
 SEVERITY_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
+def _finding_host(asset_keys) -> str:
+    """The host a finding names in its asset keys, or "" if none.
+
+    Asset keys look like "webapp:https://euro2c.com", "url:https://e/x" or
+    "email_domain:euro2c.com". Pull the first host out of them. Many posture
+    findings carry no host-bearing asset; the caller supplies the run's
+    primary host as the fallback so that two reports of one class — one
+    tagged `webapp:…`, one untagged — still collapse within a single-target
+    run instead of splitting on a missing asset key.
+    """
+    from urllib.parse import urlparse
+    for key in asset_keys or []:
+        _, _, rest = str(key).partition(":")
+        rest = rest.strip()
+        if not rest:
+            continue
+        if rest.startswith(("http://", "https://")):
+            host = urlparse(rest).hostname
+            if host:
+                return host.lower()
+        elif "/" not in rest and " " not in rest:
+            return rest.lower()
+    return ""
+
+
 def _clean_evidence(evidence) -> list:
     """Drop empty and whitespace-only evidence lines.
 
@@ -215,6 +240,16 @@ class StateManager:
             self.module["stats"]["total_findings"] = len(self.findings["findings"])
             self._dirty = True
         return removed
+    def _primary_host(self) -> str:
+        """The run's target host, used as the host-scope fallback for posture
+        findings that carry no host-bearing asset key. The report directory
+        is named for the target (reports/<domain>/), so its basename is the
+        host; falls back to a constant when that is unavailable."""
+        name = str(getattr(self.output_dir, "name", "") or "").lower()
+        if name and name not in ("state", ""):
+            return name
+        return "__target__"
+
     def add_finding(self, title: str, severity: str, confidence: str,
                     category: str, description: str,
                     evidence: Optional[list] = None,
@@ -252,11 +287,28 @@ class StateManager:
         dedupe_key = (str(title or "").strip().lower(),
                       str(category or "").strip().lower(),
                       tuple(sorted(str(k) for k in (asset_keys or []))))
+        # Second, coarser key: the vulnerability *class* on a host. This folds
+        # the WP user-enumeration triplicate (three titles, one weakness) and
+        # similar host-posture duplicates that the exact key cannot see.
+        # Point-scoped classes (injection, IDOR) return no class, so they
+        # never reach this path and stay one-per-endpoint.
+        from core.taxonomy import vuln_class
+        incoming_class, host_scoped = vuln_class(title, category)
+        incoming_host = (_finding_host(asset_keys) or self._primary_host()) \
+            if host_scoped else None
         if dedupe_key[0]:
             for existing in self.findings["findings"]:
-                if (str(existing.get("title", "")).strip().lower(),
-                        str(existing.get("category", "")).strip().lower(),
-                        tuple(sorted(str(k) for k in (existing.get("asset_keys") or [])))) == dedupe_key:
+                exact = (str(existing.get("title", "")).strip().lower(),
+                         str(existing.get("category", "")).strip().lower(),
+                         tuple(sorted(str(k) for k in (existing.get("asset_keys") or [])))) == dedupe_key
+                semantic = False
+                if host_scoped and incoming_class:
+                    ex_class, ex_host_scoped = vuln_class(
+                        existing.get("title", ""), existing.get("category", ""))
+                    semantic = (ex_host_scoped and ex_class == incoming_class
+                                and (_finding_host(existing.get("asset_keys"))
+                                     or self._primary_host()) == incoming_host)
+                if exact or semantic:
                     self._merge_finding(
                         existing, severity, confidence, risk_score,
                         description, evidence, remediation, asset_keys,
