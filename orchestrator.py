@@ -714,6 +714,17 @@ class Orchestrator:
         if deadline <= 0:
             deadline = 300.0
 
+        # Arm the cooperative I/O deadline a margin before the hard guillotine
+        # so modules stop making requests, flush their findings, and run any
+        # teardown while there is still time — then clear it so nothing runs
+        # deadline-bound outside a module. The `wait_for` below stays as the
+        # backstop for the rare module that blocks without touching I/O.
+        import time as _time
+        from core.deadline import set_deadline, clear_deadline
+        margin = min(30.0, max(10.0, deadline * 0.1))
+        module.deadline = _time.monotonic() + deadline
+        set_deadline(_time.monotonic() + deadline - margin)
+
         try:
             result = await asyncio.wait_for(module.run(), timeout=deadline)
 
@@ -734,12 +745,22 @@ class Orchestrator:
             self.state.finish_module_run(
                 run_id, "timeout",
                 f"exceeded {deadline:.0f}s module deadline")
+        except BudgetExceededError as e:
+            # Budget exhaustion is a planned stop, not a module fault. Record
+            # it as a partial run (the findings written before the cap are
+            # kept) WITHOUT blocking the module or printing a traceback, and
+            # let the run loop halt cleanly on its next budget check instead
+            # of every remaining module raising the same error in turn.
+            print(f"  ⏹ Budget reached — stopping with partial coverage: {e}")
+            self.state.finish_module_run(run_id, "stopped", str(e))
         except Exception as e:
             print(f"  ✗ Error: {e}")
             import traceback
             traceback.print_exc()
             self.state.block_module(module_id, str(e))
             self.state.finish_module_run(run_id, "error", str(e))
+        finally:
+            clear_deadline()
 
         self.state.save()
 

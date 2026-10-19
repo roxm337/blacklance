@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 from typing import List, Optional
 
+from core.deadline import deadline_reached as _deadline_reached
 from core.validators import redact_for_log
 
 
@@ -283,6 +284,12 @@ async def run_command(args: List[str], timeout: int = 120,
     Docker backend: tool binaries run inside the toolchain image with
     the repo mounted at /work, so outputs land back in reports/.
     """
+    # Past the module deadline, do not launch a tool that would run its own
+    # (often multi-minute) timeout straight through the orchestrator's
+    # guillotine. Return the empty result the callers already handle.
+    if _deadline_reached():
+        return {"stdout": "", "stderr": "", "exit_code": -1,
+                "error": "deadline_exceeded"}
     consume_tool_budget()
     if _docker_wants(args):
         args = docker_run_args(args, stdin=bool(stdin_data))

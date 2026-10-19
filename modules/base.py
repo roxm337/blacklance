@@ -24,6 +24,10 @@ class BaseModule:
     depends_on = []
     active = False
 
+    # Absolute time.monotonic() the orchestrator expects this run to finish
+    # by. None when run outside the orchestrator (direct calls, tests).
+    deadline: Optional[float] = None
+
     def __init__(self, state: StateManager, config: dict):
         self.state = state
         self.config = config
@@ -144,6 +148,30 @@ class BaseModule:
             if answer and answer[0].isdigit():
                 return answer
         return None
+
+    def time_left(self) -> float:
+        """Seconds until this module's cooperative deadline; +inf if none.
+
+        Reads the same global deadline that `curl`/`bash`/`run_command`
+        enforce, so a module's own loop guard and the I/O boundary can never
+        disagree about how much time is left.
+        """
+        from core.deadline import deadline_remaining
+        return deadline_remaining()
+
+    def should_stop(self, reserve: float = 0.0) -> bool:
+        """True when the module should stop starting new work and flush.
+
+        `reserve` holds back time for post-loop steps (writing findings,
+        running a corroboration tool): pass the seconds that teardown needs,
+        and the loop breaks that much earlier. Use it in long scan loops:
+
+            for target in targets:
+                if self.should_stop(reserve=20):
+                    break
+                ...
+        """
+        return self.time_left() <= reserve
 
     def log(self, message: str):
         logger.info(f"  [{self.id}] {message}")

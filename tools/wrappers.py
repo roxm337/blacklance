@@ -12,6 +12,7 @@ import os
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
+from core.deadline import deadline_reached
 from tools import http_engine as _http_engine_mod
 from tools.http_engine import HttpEngine
 from tools.external import (consume_tool_budget, docker_wrap_shell,
@@ -114,23 +115,55 @@ def _merge_session_headers(headers: Optional[dict] = None,
 
 
 class RateLimiter:
-    """Async rate limiter with concurrency and per-minute caps."""
+    """Async rate limiter with concurrency, per-minute, and *adaptive* caps.
+
+    A fixed rate is only half the story against a real target: once the server
+    starts answering 429/503 (or sends `Retry-After`), continuing at the
+    configured rate just collects blocked responses — which downstream modules
+    read as "not vulnerable" — and hammers a WAF that is already shedding load.
+    `note_response()` feeds those signals back in, and the limiter holds new
+    requests during a cooldown. The backoff is capped so one hostile
+    `Retry-After: 3600` cannot stall the whole engagement, and every wait is
+    bounded by the module deadline so a limiter sleep never outlives the run
+    it belongs to.
+    """
+
+    # Cap on any single backoff, and the base penalty when a 429/503 arrives
+    # without a usable Retry-After. Repeated hits lengthen the cooldown up to
+    # the cap.
+    MAX_BACKOFF = 30.0
+    BASE_PENALTY = 2.0
 
     def __init__(self, max_concurrent: int = 5, max_per_minute: int = 60):
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._max_per_minute = max_per_minute
         self._timestamps: list[float] = []
         self._lock = asyncio.Lock()
+        self._cooldown_until = 0.0
+        self._consecutive_throttles = 0
+
+    async def _sleep_bounded(self, seconds: float) -> None:
+        """Sleep, but never past the current module's deadline — the next
+        request short-circuits there anyway, so a longer sleep would only
+        burn into the orchestrator's hard guillotine for no benefit."""
+        from core.deadline import deadline_remaining
+        seconds = min(seconds, max(0.0, deadline_remaining()))
+        if seconds > 0:
+            await asyncio.sleep(seconds)
 
     async def __aenter__(self):
         await self._semaphore.acquire()
         async with self._lock:
             now = time.monotonic()
+            # Adaptive backoff: the target asked us to slow down.
+            if self._cooldown_until > now:
+                await self._sleep_bounded(self._cooldown_until - now)
+                now = time.monotonic()
             self._timestamps = [t for t in self._timestamps if now - t < 60]
             if len(self._timestamps) >= self._max_per_minute:
                 wait = self._timestamps[0] + 60 - now
                 if wait > 0:
-                    await asyncio.sleep(wait)
+                    await self._sleep_bounded(wait)
                 now = time.monotonic()
                 self._timestamps = [t for t in self._timestamps if now - t < 60]
             self._timestamps.append(now)
@@ -138,6 +171,51 @@ class RateLimiter:
 
     async def __aexit__(self, *args):
         self._semaphore.release()
+
+    def note_response(self, status: int, retry_after=None) -> None:
+        """Feed a response's rate-limit signals back into the limiter.
+
+        A `Retry-After` (seconds, or an HTTP-date) is honoured when present;
+        otherwise a 429/503/509 triggers an exponential base penalty that
+        grows while throttling persists and resets on the first clean
+        response. All capped at MAX_BACKOFF.
+        """
+        if status in (429, 503, 509):
+            self._consecutive_throttles += 1
+            penalty = _parse_retry_after(retry_after)
+            if penalty <= 0:
+                penalty = min(self.BASE_PENALTY * self._consecutive_throttles,
+                              self.MAX_BACKOFF)
+            penalty = min(penalty, self.MAX_BACKOFF)
+            self._cooldown_until = max(self._cooldown_until,
+                                       time.monotonic() + penalty)
+        elif 200 <= status < 400:
+            self._consecutive_throttles = 0
+
+
+def _parse_retry_after(value) -> float:
+    """Seconds to wait from a Retry-After value: a number, or an HTTP-date.
+
+    Returns 0.0 when absent or unparseable so the caller falls back to its
+    own penalty. Never returns a negative (a past date means "now").
+    """
+    if value in (None, ""):
+        return 0.0
+    text = str(value).strip()
+    try:
+        return max(0.0, float(text))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(text)
+        if when is not None:
+            from datetime import datetime, timezone
+            delta = (when - datetime.now(timezone.utc)).total_seconds()
+            return max(0.0, delta)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    return 0.0
 
 
 _http_limiter = RateLimiter(max_concurrent=5, max_per_minute=60)
@@ -184,6 +262,12 @@ async def bash(command: str, timeout: int = 120) -> dict:
     re-routed into the toolchain image (repo mounted at /work); anything
     else runs locally as before.
     """
+    # A tool subprocess started past the deadline would run its own full
+    # timeout (sqlmap's is 900s) straight through the guillotine. Refuse to
+    # launch it and report an empty result the caller already handles.
+    if deadline_reached():
+        return {"stdout": "", "stderr": "", "exit_code": -1,
+                "error": "deadline_exceeded"}
     consume_tool_budget()
     command = docker_wrap_shell(command)
     try:
@@ -353,6 +437,13 @@ async def curl(url: str, method: str = "GET",
     hunter): the target's session credentials must never ride along to
     someone else's API. The caller's own headers (API keys) survive.
     """
+    # Once the running module is out of time, make no more requests: return
+    # the wrapper's own "failed probe" shape so the caller's loop drains fast
+    # and reaches its finding-flush instead of being guillotined mid-scan.
+    if deadline_reached():
+        return {"status": 0, "body": "", "error": "deadline_exceeded",
+                "time_ms": 0, "url": url, "history": []}
+
     # Reserve before either the aiohttp or subprocess transport is selected;
     # otherwise HTTP/1.0 and fallback requests would bypass the same cap.
     _consume_http_budget()
@@ -372,11 +463,14 @@ async def curl(url: str, method: str = "GET",
     # engine entirely — both fall back to the original subprocess.
     if http1_0 or _http_engine_mod.aiohttp is None:
         async with _http_limiter:
-            return await _curl_subprocess(
+            result = await _curl_subprocess(
                 url, method, headers, data, http1_0, output,
                 follow_redirects, timeout,
                 session_headers=merged_headers,
             )
+        _http_limiter.note_response(result.get("status", 0),
+                                    result.get("retry_after"))
+        return result
 
     async with _http_limiter:
         engine = get_engine()
@@ -390,6 +484,10 @@ async def curl(url: str, method: str = "GET",
             output=output,
             identity=identity,
         )
+    # Feed the target's rate-limit signals back to the limiter so the next
+    # request through it respects any cooldown this one just earned.
+    _http_limiter.note_response(result.get("status", 0),
+                                result.get("retry_after"))
     return result
 
 

@@ -341,6 +341,31 @@ class HttpEngine:
 
         client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=min(timeout, 5.0))
 
+        # One retry on a *transient* transport failure. A single dropped
+        # connection or a momentary timeout otherwise returns status 0, which
+        # every downstream module reads as "target gave nothing" — a false
+        # negative from one unlucky packet. SSL, redirect, and malformed-URL
+        # failures are not retried: they will fail again identically.
+        attempts = 1 + (1 if _retry_budget_ok(timeout) else 0)
+        for attempt in range(attempts):
+            result = await self._attempt(
+                session, method, url, request_headers, data, json, params,
+                follow_redirects, client_timeout, allow_redirects_to,
+                want_body, cap, output, started)
+            error = result.get("error", "")
+            transient = any(error.startswith(p) for p in
+                            ("timeout", "connection_error", "os_error"))
+            if transient and attempt + 1 < attempts:
+                await asyncio.sleep(0.4)
+                continue
+            return result
+        return result
+
+    async def _attempt(self, session, method, url, request_headers, data,
+                       json, params, follow_redirects, client_timeout,
+                       allow_redirects_to, want_body, cap, output,
+                       started) -> dict:
+        """One HTTP attempt. Returns the result dict or a `_fail` shape."""
         try:
             async with session.request(
                 method.upper(),
@@ -405,6 +430,11 @@ class HttpEngine:
 
                 if truncated:
                     result["truncated"] = True
+                # Surface the throttle hint even in status-only mode so the
+                # rate limiter can honour Retry-After without the caller
+                # asking for the whole header block.
+                if resp.status in (429, 503, 509):
+                    result["retry_after"] = resp.headers.get("Retry-After", "")
                 if output == "full":
                     result["headers"] = _header_block(resp.headers)
                 elif output == "headers":
@@ -441,6 +471,17 @@ class HttpEngine:
             "connections_reused": self.connections_reused,
             "identities": list(self._identities),
         }
+
+
+def _retry_budget_ok(timeout: float) -> bool:
+    """Only spend a retry when the module deadline can absorb another full
+    attempt plus its backoff; otherwise the retry would just run into the
+    orchestrator's guillotine."""
+    try:
+        from core.deadline import deadline_remaining
+        return deadline_remaining() > (timeout + 1.0)
+    except Exception:  # noqa: BLE001 - deadline is advisory, default to allow
+        return True
 
 
 def _fail(error: str, started: float) -> dict:
