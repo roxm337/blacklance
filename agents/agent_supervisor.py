@@ -1,8 +1,8 @@
 """Agent Supervisor — orchestrates the multi-agent lifecycle.
 
-Runs the full plan → analyze → exploit → verify → report sequence with no
-gating, confirmation prompts, or dry-run mode. Resource use is bounded only
-by `budget_limits` in config (all zero/unlimited by default).
+Runs the plan → analyze → exploit → verify → report sequence. Planning is
+the default; exploitation requires the caller's explicit execute flag and every
+action is still constrained by the shared risk ceiling and engagement budget.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from agents.verification_agent import VerificationAgent
 from agents.reporting_agent import ReportingAgent
 from core.audit_log import AuditLog
 from core.budget_manager import BudgetExceededError
+from actions.registry import RiskLevel
 from state.manager import StateManager
 
 
@@ -31,20 +32,32 @@ class AgentSupervisor:
     """Top-level orchestrator that initializes and runs the multi-agent team."""
 
     def __init__(self, state: StateManager, config: dict,
-                 audit: AuditLog | None = None):
+                 audit: AuditLog | None = None, *, budget=None,
+                 execute: bool = False,
+                 max_risk: RiskLevel = RiskLevel.LOW,
+                 max_actions: int = 25):
         self.state = state
         self.config = config
 
         self.bb = Blackboard(state, self.config)
         self.audit = audit or AuditLog(self.state.state_dir / "engagement.audit.jsonl")
+        self.execute = bool(execute)
+        self.max_risk = max_risk
+        self.max_actions = max(0, int(max_actions))
 
         self.agents: dict[str, BaseAgent] = {
-            "supervisor": SupervisorAgent(state, self.config, self.bb),
-            "recon": ReconAgent(state, self.config, self.bb),
-            "vuln_analyst": VulnAnalystAgent(state, self.config, self.bb),
-            "exploitation": ExploitationAgent(state, self.config, self.bb),
-            "verification": VerificationAgent(state, self.config, self.bb),
-            "reporting": ReportingAgent(state, self.config, self.bb),
+            "supervisor": SupervisorAgent(
+                state, self.config, self.bb, budget=budget, max_risk=max_risk),
+            "recon": ReconAgent(
+                state, self.config, self.bb, budget=budget, max_risk=max_risk),
+            "vuln_analyst": VulnAnalystAgent(
+                state, self.config, self.bb, budget=budget, max_risk=max_risk),
+            "exploitation": ExploitationAgent(
+                state, self.config, self.bb, budget=budget, max_risk=max_risk),
+            "verification": VerificationAgent(
+                state, self.config, self.bb, budget=budget, max_risk=max_risk),
+            "reporting": ReportingAgent(
+                state, self.config, self.bb, budget=budget, max_risk=max_risk),
         }
         for agent in self.agents.values():
             agent.audit = self.audit
@@ -58,7 +71,7 @@ class AgentSupervisor:
         print("\n" + "=" * 60)
         print("  AUTONOMOUS PENTEST ENGAGEMENT")
         print(f"  Target: {target}")
-        print("  Mode: EXECUTE")
+        print(f"  Mode: {'EXECUTE' if self.execute else 'PLAN'}")
         print("=" * 60 + "\n")
 
         self.audit.engagement_start(target, "agent")
@@ -78,6 +91,12 @@ class AgentSupervisor:
         }
         fn = phase_map.get(phase)
         if fn:
+            if phase in ("exploit", "verify") and not self.execute:
+                return {
+                    "phase": phase,
+                    "error": "phase requires --execute",
+                    "blocked": True,
+                }
             result = await fn()
             self.audit.record("phase.complete", {"phase": phase})
             return {"phase": phase, "result": result}
@@ -114,25 +133,30 @@ class AgentSupervisor:
             print(f"  {len(low_conf)} low-confidence assets identified for re-probe")
         print()
 
-        # Phase 4: Exploitation tests hypotheses
+        # Phase 4: Exploitation tests hypotheses. Agent mode is plan-only
+        # unless the same explicit --execute switch used by chain execution is
+        # present; --max-risk remains a second, independent ceiling.
         print("[Phase 4/5] Exploitation Agent: Testing hypotheses...")
         hypotheses = self.bb.get_hypotheses(status="proposed")
         exploitation = self.agents["exploitation"]
-        for hyp in hypotheses[:10]:
-            self._check_budget(exploitation)
-            print(f"  Testing: {hyp.title[:60]}...", end=" ")
-            result = await exploitation.test_hypothesis(hyp)
-            if result.get("success"):
-                print(f"✓ ({result.get('confidence', 'FIRM')})")
-            else:
-                print(f"✗ ({result.get('error', 'failed')[:40]})")
-            self.audit.record("hypothesis.tested", {
-                "hypothesis_id": hyp.id,
-                "action_id": hyp.action_id,
-                "success": result.get("success"),
-                "confidence": result.get("confidence", ""),
-                "error": str(result.get("error", ""))[:300],
-            })
+        if not self.execute:
+            print("  Plan-only mode — pass --execute to run proposed actions.")
+        else:
+            for hyp in hypotheses[:self.max_actions]:
+                self._check_budget(exploitation)
+                print(f"  Testing: {hyp.title[:60]}...", end=" ")
+                result = await exploitation.test_hypothesis(hyp)
+                if result.get("success"):
+                    print(f"✓ ({result.get('confidence', 'FIRM')})")
+                else:
+                    print(f"✗ ({result.get('error', 'failed')[:40]})")
+                self.audit.record("hypothesis.tested", {
+                    "hypothesis_id": hyp.id,
+                    "action_id": hyp.action_id,
+                    "success": result.get("success"),
+                    "confidence": result.get("confidence", ""),
+                    "error": str(result.get("error", ""))[:300],
+                })
         print()
 
         # Phase 5: Verification confirms findings
@@ -142,7 +166,7 @@ class AgentSupervisor:
             if h.status in ("testing", "confirmed")
         ]
         verification = self.agents["verification"]
-        for hyp in to_verify[:10]:
+        for hyp in to_verify[:self.max_actions] if self.execute else []:
             self._check_budget(verification)
             print(f"  Verifying: {hyp.title[:60]}...", end=" ")
             result = await verification.verify_finding(hyp)
@@ -170,7 +194,7 @@ class AgentSupervisor:
         print("=" * 60 + "\n")
 
         summary = {
-            "mode": "execute",
+            "mode": "execute" if self.execute else "plan",
             "hypotheses_proposed": len(self.bb.get_hypotheses()),
             "confirmed_findings": len(confirmed_final),
             "rejected_hypotheses": len(rejected),
@@ -215,14 +239,14 @@ class AgentSupervisor:
 
     async def _run_exploitation_phase(self) -> list:
         results = []
-        for hyp in self.bb.get_hypotheses(status="proposed"):
+        for hyp in self.bb.get_hypotheses(status="proposed")[:self.max_actions]:
             result = await self.agents["exploitation"].test_hypothesis(hyp)
             results.append({"hypothesis": hyp.id, "result": result})
         return results
 
     async def _run_verification_phase(self) -> list:
         results = []
-        for hyp in self.bb.get_hypotheses(status="testing"):
+        for hyp in self.bb.get_hypotheses(status="testing")[:self.max_actions]:
             result = await self.agents["verification"].verify_finding(hyp)
             results.append({"hypothesis": hyp.id, "result": result})
         return results

@@ -3,8 +3,8 @@
 Every offensive capability is a registered Action — the only way to
 touch a target. Properties: typed input/output, risk tier, detectability,
 declared tool deps, rate-limited, timeout-bounded, evidence-emitting, replayable.
-`risk` is descriptive metadata used for prioritization and reporting; it does not
-gate execution.
+Agent and chain execution enforce each action's `risk` against the
+operator-selected ceiling immediately before execution.
 
 Usage:
     @action(

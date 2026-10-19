@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from agents.base_agent import BaseAgent
 from agents.blackboard import AgentRole, Hypothesis
+from agents.plan_validation import parse_json_object, validate_supervisor_plan
 from core.attack_graph import AttackPath
 
 
@@ -173,16 +174,17 @@ class SupervisorAgent(BaseAgent):
         from actions import action_catalog
         return {item["action_id"] for item in action_catalog()}
 
-    def _parse_plan(self, response: str) -> dict:
-        import json, re
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
-        return self._fallback_plan([])
+    def _parse_plan(self, response: str) -> dict | None:
+        from modules import get_all_module_ids
+        try:
+            parsed = parse_json_object(response)
+        except (ValueError, TypeError):
+            return None
+        return validate_supervisor_plan(
+            parsed,
+            action_ids=self._valid_action_ids(),
+            module_ids=set(get_all_module_ids()),
+        )
 
     def _fallback_plan(self, chains: list) -> dict:
         hyps = []

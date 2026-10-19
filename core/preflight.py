@@ -64,8 +64,14 @@ def preflight(config: dict, context: dict | None = None) -> dict:
         caps.append(f"{limits['max_llm_calls']} LLM calls")
     if int(limits.get("max_wall_clock_seconds", 0) or 0):
         caps.append(f"{limits['max_wall_clock_seconds']}s wall clock")
+    if int(limits.get("max_external_commands", 0) or 0):
+        caps.append(f"{limits['max_external_commands']} external commands")
+    if int(context.get("max_actions", 0) or 0):
+        caps.append(f"{context['max_actions']} actions")
     notices.append("budgets: " + (", ".join(caps) if caps else "unlimited")
                    + f"; module deadline {config.get('module_timeout', 300)}s")
+    if limits.get("resume"):
+        notices.append("budget resume enabled — restored counters apply before execution")
 
     # Authenticated coverage needs test identities; without them the auth
     # modules skip (recorded per module, repeated here so it is seen).

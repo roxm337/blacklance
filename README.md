@@ -5,7 +5,7 @@ external attack surface, enriches discovered assets, records evidence, prioritiz
 findings, and generates reports or attack plans.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-101%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-pytest-brightgreen)
 ![Status](https://img.shields.io/badge/status-active%20development-orange)
 
 ---
@@ -16,9 +16,10 @@ This is an **offensive security tool**. Reconnaissance, scanning, and active tes
 against systems you do not own or lack **explicit written authorization** to test may
 be illegal in your jurisdiction.
 
-The framework ships **no scope enforcement, authorization gate, or risk-tier blocking**.
-You are solely responsible for operating within the law and within the rules of
-engagement of your target's bug-bounty program or pentest contract.
+The framework does not enforce an engagement scope or prove authorization. It does
+default active modules and autonomous exploitation to off, and applies a configurable
+risk ceiling when execution is enabled. You remain responsible for operating within
+the law and the rules of engagement for the target.
 
 ---
 
@@ -31,7 +32,8 @@ engagement of your target's bug-bounty program or pentest contract.
 - **LLM orchestration mode** — an LLM chooses which module to run next and generates a
   structured testing plan (with deterministic fallback when no key is set).
 - **Multi-agent autonomous layer** *(in progress)* — supervisor, blackboard coordination,
-  and specialized recon/vuln/exploit/verify/report agents over a tiered action registry.
+  and specialized recon/vuln/exploit/verify/report agents over a tiered action registry;
+  exploit and verification phases are plan-only unless `--execute` is supplied.
 - **Typed asset graph + evidence chain** — assets, edges, findings, and evidence are
   persisted per target with confidence and severity scoring.
 - **Report generation** — markdown report, executive summary, findings JSON, and
@@ -138,8 +140,11 @@ python orchestrator.py -t example.com --active
 # Active vulnerability scanning pass
 python orchestrator.py -t example.com --active --pentest
 
-# Autonomous multi-agent run (optionally limited to a phase)
+# Autonomous multi-agent planning/recon (exploit and verify remain plan-only)
 python orchestrator.py -t example.com --agent --phase recon
+
+# Deliberately execute agent actions up to the selected risk ceiling
+python orchestrator.py -t example.com --agent --execute --max-risk MEDIUM
 
 # Utilities
 python orchestrator.py --list-modules
@@ -149,7 +154,10 @@ python orchestrator.py --tools
 
 **Key flags:** `-t/--target` (required), `-o/--output` (default `reports`),
 `-c/--config` (default `config.yaml`), `--mode {auto,llm}`, `--module <id>`,
-`--active`, `--pentest`, `--agent`, `--phase {plan,recon,vuln,exploit,verify,report}`,
+`--active`, `--pentest`, `--agent`, `--execute`,
+`--max-risk {SAFE,LOW,MEDIUM,HIGH,DESTRUCTIVE}`, `--max-actions`, `--max-chains`,
+`--resume-budget`,
+`--phase {plan,recon,vuln,exploit,verify,report}`,
 `--list-modules`, `--list-actions`, `--tools`, `--install-tools`.
 
 ### GUI
@@ -212,10 +220,20 @@ project map.
 
 ## Run model
 
-Modules carry `detectability` (`low` / `medium` / `high`) and `active` as
-**descriptive metadata** for prioritization and reporting. Neither blocks execution —
-there is no scope filter, no authorization prompt, and no risk-tier gate anywhere in the
-request path. `--active` selects the active-stage modules; it no longer unlocks anything.
+Modules carry `detectability` (`low` / `medium` / `high`) and `active` metadata.
+Deterministic and LLM-guided pipeline runs exclude active modules by default;
+`--active` includes them. An explicitly named `--module` is still treated as an
+intentional direct request. Autonomous exploit and verify phases require `--execute`,
+and every agent action is checked against `--max-risk` immediately before execution.
+
+One engagement budget is shared by pipeline modules and autonomous agents. The request
+counter covers HTTP calls made through the framework wrappers, while
+`max_external_commands` caps scanner/tool process launches. External scanners such as
+Nuclei or sqlmap still enforce their own configured request rates because their internal
+traffic is outside the wrapper.
+Budget counters are checkpointed to `state/budget.json` after each reservation. A new
+run starts with fresh counters unless `--resume-budget` (or `budget_limits.resume`) is
+explicitly enabled; stopped time is not charged against the wall-clock limit.
 
 `BaseModule.http_get()` records WAF block/allow signals for reporting, and
 `modules.max_consecutive_empty` caps unproductive probing per module — an efficiency
@@ -232,9 +250,9 @@ python -m pytest --ignore=tests/test_gui_app.py --ignore=tests/test_gui_graph.py
 ```
 
 The suite covers core state, scoring, evidence, external-tool parsing, per-stage
-modules, the attack planner, the action registry, and the GUI (findings triage,
-engagement gating, settings round-trips, attack-graph tab). **603 tests pass**
-including the GUI extras.
+modules, execution policy, the attack planner, the action registry, and the GUI
+(findings triage, engagement gating, settings round-trips, attack-graph tab). Run
+`python -m pytest --collect-only -q` for the current test count.
 
 ---
 

@@ -1,6 +1,7 @@
 """Tests for external tool parsers."""
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -604,6 +605,11 @@ def test_docker_run_args_rewrites_repo_paths(monkeypatch):
     assert args[:3] == ["docker", "run", "--rm"]
     assert "-i" not in args
     assert f"{cwd}:/work" in args
+    assert "no-new-privileges:true" in args
+    assert args[args.index("--cap-drop") + 1] == "ALL"
+    assert args[args.index("--memory") + 1] == "2g"
+    assert args[args.index("--pids-limit") + 1] == "512"
+    assert "--cap-add" not in args
     assert f"/work/reports/x.json" in args
     # Outside the repo: passed through untouched.
     assert "/usr/share/seclists/rockyou.txt" in args
@@ -615,6 +621,9 @@ def test_docker_run_args_rewrites_repo_paths(monkeypatch):
     bare = external.docker_run_args(
         ["openredirex", "-k", "FUZZ", "-c", "10"], stdin=True)
     assert bare[-5:] == ["openredirex", "-k", "FUZZ", "-c", "10"]
+    raw = external.docker_run_args(["nmap", "-sS", "127.0.0.1"])
+    assert raw.count("--cap-add") == 2
+    assert "NET_RAW" in raw and "NET_ADMIN" in raw
     # Not-yet-existing output files rewrite too: the parent exists, so
     # the container writes where the host will read.
     import tempfile as _tempfile
@@ -623,6 +632,27 @@ def test_docker_run_args_rewrites_repo_paths(monkeypatch):
         out = external.docker_run_args(
             ["ffuf", "-u", "https://t/FUZZ", "-o", f"{name}/fresh.json"])
         assert f"/work/{name}/fresh.json" in out
+    external.configure_tool_backend({})
+
+
+def test_docker_policy_rejects_invalid_limits_and_shell_quotes_image(monkeypatch):
+    monkeypatch.delenv("OSINT_TOOLS_BACKEND", raising=False)
+    monkeypatch.delenv("OSINT_TOOLS_IMAGE", raising=False)
+    external.configure_tool_backend({"tools": {
+        "backend": "docker",
+        "image": "image; echo injected",
+        "network": "bridge;bad",
+        "memory": "unlimited",
+        "cpus": "999",
+        "pids_limit": 2,
+    }})
+    assert external._BACKEND["network"] == "bridge"
+    assert external._BACKEND["memory"] == "2g"
+    assert external._BACKEND["cpus"] == "64.0"
+    assert external._BACKEND["pids_limit"] == 32
+    monkeypatch.setattr(external, "_docker_ready", lambda: True)
+    wrapped = external.docker_wrap_shell("echo x | httpx -silent")
+    assert "'image; echo injected' sh" in wrapped
     external.configure_tool_backend({})
 
 
@@ -636,6 +666,7 @@ def test_run_command_routes_through_docker(monkeypatch):
 
     async def fake_exec(*args, **kwargs):
         seen["args"] = args
+        seen["kwargs"] = kwargs
         class P:
             returncode = 0
             async def communicate(self, input=None):
@@ -647,6 +678,7 @@ def test_run_command_routes_through_docker(monkeypatch):
     assert seen["args"][0] == "docker"
     assert "img:t" in seen["args"]
     assert result["stdout"] == "out"
+    assert seen["kwargs"]["start_new_session"] is (os.name != "nt")
     external.configure_tool_backend({})
 
 
@@ -668,6 +700,26 @@ def test_run_command_stays_local_for_unknown_binaries(monkeypatch):
     asyncio.run(external.run_command(["definitely-not-a-tool-zzz", "x"]))
     assert seen["args"][0] == "definitely-not-a-tool-zzz"
     external.configure_tool_backend({})
+
+
+def test_timeout_terminates_the_process_group(monkeypatch):
+    if os.name == "nt":
+        pytest.skip("POSIX process-group behavior")
+    killed = []
+
+    class Process:
+        pid = 4242
+
+        def kill(self):
+            raise AssertionError("group termination should be used")
+
+        async def wait(self):
+            return 0
+
+    monkeypatch.setattr(external.os, "killpg",
+                        lambda pid, sig: killed.append((pid, sig)))
+    asyncio.run(external.terminate_process_tree(Process()))
+    assert killed == [(4242, external.signal.SIGKILL)]
 
 
 def test_tool_available_uses_image_presence_in_docker_mode(monkeypatch):

@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from litellm import acompletion
-
 from agents import get_llm_config
 from agents.blackboard import Blackboard, AgentRole
 from core.attack_graph import AttackGraph
@@ -21,13 +19,18 @@ class BaseAgent:
 
     role: AgentRole = AgentRole.SUPERVISOR
 
-    def __init__(self, state: StateManager, config: dict, blackboard: Blackboard):
+    def __init__(self, state: StateManager, config: dict, blackboard: Blackboard,
+                 *, budget: BudgetManager | None = None, max_risk=None):
         self.state = state
         self.config = config
         self.bb = blackboard
         self.llm = get_llm_config(config)
         self.model = self.llm["model"]
-        self.budget = BudgetManager(config)
+        self.budget = budget or BudgetManager(config)
+        if max_risk is None:
+            from actions.registry import RiskLevel
+            max_risk = RiskLevel.LOW
+        self.max_risk = max_risk
         self.attack_graph: Optional[AttackGraph] = None
         self.audit = None  # core.audit_log.AuditLog, set by the engagement runner
 
@@ -36,9 +39,8 @@ class BaseAgent:
     async def _llm_call(self, system_prompt: str, user_prompt: str,
                         temperature: float = 0.1,
                         max_tokens: int = 2000) -> Optional[str]:
-        self.budget.record_llm_call()
         try:
-            self.budget.raise_if_exceeded()
+            self.budget.consume_llm_call()
         except BudgetExceededError as e:
             logger.warning(f"[{self.role.value}] {e}")
             return None
@@ -56,6 +58,9 @@ class BaseAgent:
             kwargs["api_key"] = self.llm["api_key"]
 
         try:
+            # LiteLLM performs provider/model initialization at import time.
+            # Keep normal CLI and deterministic runs offline and fast.
+            from litellm import acompletion
             response = await acompletion(**kwargs)
             return response.choices[0].message.content.strip()
         except Exception as e:
@@ -112,6 +117,19 @@ class BaseAgent:
         if not meta:
             return {"success": False, "error": f"Unknown action: {action_id}"}
 
+        from core.chain_executor import risk_allows
+        if not risk_allows(meta.risk.value, self.max_risk):
+            return {
+                "success": False,
+                "error": (f"blocked_risk: {meta.risk.value} action exceeds "
+                          f"{self.max_risk.value} ceiling"),
+                "blocked": True,
+            }
+        try:
+            self.budget.raise_if_exceeded()
+        except BudgetExceededError as exc:
+            return {"success": False, "error": str(exc), "blocked": True}
+
         ctx = ActionContext(
             action_id=action_id,
             params=params,
@@ -121,8 +139,12 @@ class BaseAgent:
             audit=self.audit,
         )
 
-        self.budget.record_action()
-        result = await ActionRegistry.execute(action_id, ctx)
+        async with self.budget.semaphore:
+            try:
+                self.budget.consume_action()
+            except BudgetExceededError as exc:
+                return {"success": False, "error": str(exc), "blocked": True}
+            result = await ActionRegistry.execute(action_id, ctx)
         return {
             "success": result.success,
             "data": result.data,

@@ -50,21 +50,63 @@ class VerificationAgent(BaseAgent):
         return url, param
 
     async def verify_finding(self, hypothesis: Hypothesis) -> dict:
-        """Verify a hypothesis using the composite oracle."""
+        """Re-run a hypothesis through a registered, risk-classified action.
+
+        Verification used to call oracle HTTP methods directly, bypassing the
+        action registry's risk ceiling, concurrency limit, timeout and audit
+        event. A repeated successful action is the reproducibility signal that
+        promotes a testing hypothesis to confirmed.
+        """
         self.log(f"Verifying: {hypothesis.title}")
 
         technique = hypothesis.technique.lower()
         url, param = self._extract_target_url(hypothesis)
+        from actions import ActionRegistry
 
-        if "sqli" in technique:
-            return await self._verify_sqli(url, param, hypothesis)
-        elif "xss" in technique:
-            return await self._verify_xss(url, param, hypothesis)
-        elif "ssrf" in technique:
-            return await self._verify_ssrf(url, param, hypothesis)
-        else:
-            # Generic differential verification
-            return await self._verify_generic(url, hypothesis)
+        action_id = hypothesis.action_id
+        if not action_id or action_id == "manual_review" \
+                or ActionRegistry.get(action_id) is None:
+            if "sqli" in technique:
+                action_id = "web.sqli.detect"
+            elif "xss" in technique:
+                action_id = "web.xss.reflected"
+            elif "ssrf" in technique:
+                action_id = "web.ssrf.oob_detect"
+            else:
+                action_id = "verify.composite_oracle"
+
+        params = dict(hypothesis.params or {})
+        params.setdefault("url", url)
+        if param:
+            params.setdefault("param", param)
+        if action_id == "verify.composite_oracle":
+            params = {"url": url, **{
+                key: value for key, value in params.items()
+                if key in ("baseline_url", "method")
+            }}
+
+        result = await self.execute_action(action_id, params, url)
+        if result.get("blocked"):
+            hypothesis.status = "testing"
+            return {"status": "BLOCKED", **result}
+
+        if result.get("success"):
+            hypothesis.status = "confirmed"
+            self.bb.send(self.role, AgentRole.SUPERVISOR,
+                         "verification_result", payload={
+                             "hypothesis_id": hypothesis.id,
+                             "status": "CONFIRMED",
+                             "action_id": action_id,
+                             "evidence": result.get("evidence", {}),
+                         })
+            return {"status": "CONFIRMED", **result}
+
+        error = str(result.get("error", ""))
+        transient = any(term in error.lower()
+                        for term in ("timeout", "connection", "temporar"))
+        hypothesis.status = "testing" if transient else "rejected"
+        return {"status": "INCONCLUSIVE" if transient else "REJECTED",
+                **result}
 
     async def _verify_sqli(self, url: str, param: str,
                            hypothesis: Hypothesis) -> dict:

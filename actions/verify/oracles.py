@@ -6,7 +6,7 @@ from core.verification_oracle import (VerificationOracle, DifferentialAnalyzer,
 
 @action(
     id="verify.differential",
-    risk="SAFE",
+    risk="LOW",
     detectability="low",
     requires=["baseline_url", "test_url"],
     produces="VerificationResult",
@@ -36,7 +36,7 @@ async def verify_differential(ctx: ActionContext) -> ActionResult:
 
 @action(
     id="verify.reproducible",
-    risk="SAFE",
+    risk="LOW",
     detectability="low",
     requires=["url"],
     produces="VerificationResult",
@@ -146,7 +146,7 @@ async def verify_reproducible(ctx: ActionContext) -> ActionResult:
 
 @action(
     id="verify.timing_analysis",
-    risk="SAFE",
+    risk="LOW",
     detectability="low",
     requires=["baseline_url", "test_url"],
     produces="VerificationResult",
@@ -177,7 +177,7 @@ async def verify_timing(ctx: ActionContext) -> ActionResult:
 
 @action(
     id="verify.composite_oracle",
-    risk="SAFE",
+    risk="LOW",
     detectability="low",
     requires=["url"],
     produces="VerificationResult",

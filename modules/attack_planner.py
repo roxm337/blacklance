@@ -19,7 +19,7 @@ class LLMAttackPlanner(BaseModule):
         self.log("Building authorized testing plan from OSINT findings...")
 
         bundle = build_report_bundle(self.state, self.domain)
-        planner = AttackPlanner(self.config)
+        planner = AttackPlanner(self.config, budget=getattr(self, "budget", None))
         plan = await planner.build_plan(bundle)
         if not plan.get("top_hypotheses"):
             plan = fallback_plan(bundle)

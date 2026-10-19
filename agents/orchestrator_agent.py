@@ -1,7 +1,6 @@
 """LLM orchestrator agent — decides which modules to run via litellm."""
 
 import logging
-from litellm import acompletion
 from agents import load_system_prompt, get_llm_config
 
 logger = logging.getLogger("osint-agent")
@@ -56,9 +55,10 @@ SYSTEM_OVERRIDES = {
 class LLMOrchestrator:
     """LLM-driven orchestrator that decides next actions via litellm."""
 
-    def __init__(self, state, config: dict):
+    def __init__(self, state, config: dict, budget=None):
         self.state = state
         self.config = config
+        self.budget = budget
         self.llm = get_llm_config(config)
         self.model = self.llm["model"]
         self.system_prompt = self._build_system_prompt()
@@ -99,9 +99,13 @@ class LLMOrchestrator:
 
         from modules import get_all_module_ids, MODULE_REGISTRY
         pending = []
+        active_enabled = bool(
+            self.config.get("target", {}).get("active", False))
         for mid in get_all_module_ids():
             if mid not in completed and mid not in skipped and mid not in blocked:
                 entry = MODULE_REGISTRY.get(mid, {})
+                if entry.get("active") and not active_enabled:
+                    continue
                 pending.append(f"  [{entry.get('stage', '?')}] {mid}")
 
         return BUILD_CONTEXT_PROMPT.format(
@@ -134,6 +138,9 @@ class LLMOrchestrator:
             kwargs["api_key"] = self.llm["api_key"]
 
         try:
+            if self.budget is not None:
+                self.budget.consume_llm_call()
+            from litellm import acompletion
             response = await acompletion(**kwargs)
             content = response.choices[0].message.content.strip()
             logger.info(f"LLM raw response: {content[:500]}")
@@ -164,11 +171,16 @@ class LLMOrchestrator:
         completed = set(summary.get("modules_completed", []))
         skipped = set(summary.get("modules_skipped", []))
         blocked = set(summary.get("modules_blocked", []))
+        from modules import MODULE_REGISTRY
+        active_enabled = bool(
+            self.config.get("target", {}).get("active", False))
         pending = [
             module_id for module_id in get_all_module_ids()
             if module_id not in completed
             and module_id not in skipped
             and module_id not in blocked
+            and (active_enabled
+                 or not MODULE_REGISTRY.get(module_id, {}).get("active"))
         ]
         if pending:
             return f"RUN_MODULE:{pending[0]}"

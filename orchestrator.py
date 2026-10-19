@@ -13,10 +13,10 @@ import logging
 from state.manager import StateManager
 from modules import MODULE_REGISTRY, get_all_module_ids
 from tools.wrappers import (
-    close_engine, configure_http_limiter, configure_http_session, curl_with_status,
-    engine_stats,
+    close_engine, configure_http_budget, configure_http_limiter,
+    configure_http_session, curl_with_status, engine_stats,
 )
-from tools.external import configure_tool_backend
+from tools.external import configure_tool_backend, configure_tool_budget
 from core.attack_graph import AttackGraph, AttackPath
 from core.surface import seed_surface
 from core.budget_manager import BudgetManager, BudgetExceededError
@@ -146,7 +146,7 @@ class Orchestrator:
 
     def __init__(self, target: str, output_dir: str,
                  config_path: str = "config.yaml",
-                 mode: str = "auto"):
+                 mode: str = "auto", resume_budget: bool = False):
         self.raw_target = target
         self.output_dir = Path(output_dir)
         self.config = self._load_config(config_path)
@@ -170,10 +170,23 @@ class Orchestrator:
         self.config["target"]["raw_url"] = self.base_url
         self.config["target"]["scheme"] = urlparse(self.base_url).scheme
         self.config["target"]["mode"] = mode
+        self.config["target"]["active"] = mode == "active"
 
-        # State
         report_dir = self.output_dir / self.domain
-        self.        state = StateManager(str(report_dir))
+        self.state = StateManager(str(report_dir))
+        if resume_budget:
+            self.config.setdefault("budget_limits", {})["resume"] = True
+
+        # One budget follows the engagement through modules, pentest chains and
+        # autonomous agents. Counters are atomically checkpointed after every
+        # reservation so an interrupted run can be resumed deliberately.
+        self.budget = BudgetManager(
+            self.config,
+            checkpoint_path=self.state.state_dir / "budget.json",
+        )
+        configure_http_budget(self.budget)
+        configure_tool_budget(self.budget)
+
         configure_oob(self.config)
 
         # Chain execution. Off unless asked for, and the risk ceiling defaults
@@ -276,6 +289,10 @@ class Orchestrator:
         module_ids = get_all_module_ids()
 
         for module_id in module_ids:
+            if not self.budget.check():
+                print(f"  Budget exhausted — stopping pipeline: "
+                      f"{', '.join(self.budget.state.exceeded)}")
+                break
             # Skip if already completed
             if self.state.is_module_complete(module_id):
                 print(f"  ⏭ {module_id}: already complete, skipping "
@@ -284,6 +301,13 @@ class Orchestrator:
 
             entry = MODULE_REGISTRY.get(module_id)
             if not entry:
+                continue
+
+            # Auto mode is genuinely passive. A specifically requested module
+            # remains an explicit operator choice and is handled by run_module.
+            if entry.get("active") and self.mode != "active":
+                self.state.skip_module(
+                    module_id, "active module requires --active")
                 continue
 
             # Check dependencies
@@ -329,7 +353,7 @@ class Orchestrator:
         )
         configure_http_session(self.config)
 
-        agent = LLMOrchestrator(self.state, self.config)
+        agent = LLMOrchestrator(self.state, self.config, budget=self.budget)
 
         print(f"\n{'='*60}")
         print(f"  OSINT Agent — {self.target}")
@@ -339,6 +363,10 @@ class Orchestrator:
 
         max_iterations = 30
         for iteration in range(max_iterations):
+            if not self.budget.check():
+                print(f"  Budget exhausted — stopping LLM orchestration: "
+                      f"{', '.join(self.budget.state.exceeded)}")
+                break
             decision = await agent.decide_next()
             logger.info(f"LLM decision: {decision}")
 
@@ -477,8 +505,6 @@ class Orchestrator:
         print(f"{'='*60}\n")
 
         # Init budget
-        self.budget = BudgetManager(self.config)
-
         # A graph built only from prior recon is empty on a fresh target, and
         # an empty graph reports zero findings while looking indistinguishable
         # from a clean one. Read the surface out of the target's own assets
@@ -666,6 +692,7 @@ class Orchestrator:
         entry = MODULE_REGISTRY[module_id]
         module_class = entry["class"]
         module = module_class(self.state, self.config)
+        module.budget = getattr(self, "budget", None)
         run_id = self.state.begin_module_run(
             module_id,
             detectability=entry.get("detectability", ""),
@@ -748,6 +775,12 @@ Examples:
   # Pentest with active vuln scanning first
   python orchestrator.py -t euro2c.com --active --pentest
 
+  # Multi-agent assessment (exploit and verify are plan-only by default)
+  python orchestrator.py -t euro2c.com --agent
+
+  # Allow agent action execution, still bounded by the risk ceiling
+  python orchestrator.py -t euro2c.com --agent --execute --max-risk MEDIUM
+
   # List available modules
   python orchestrator.py -t euro2c.com --list-modules
 
@@ -774,8 +807,8 @@ Examples:
     parser.add_argument("--pentest", action="store_true",
                         help="Post-OSINT attack graph analysis + action execution")
     parser.add_argument("--execute", action="store_true",
-                        help="Actually run the proving action for each chain. "
-                             "Without this, pentest mode only prints chains.")
+                        help="Allow pentest proving actions and autonomous agent "
+                             "exploit/verify actions. Without this they are plan-only.")
     parser.add_argument("--max-risk", default="LOW",
                         choices=["SAFE", "LOW", "MEDIUM", "HIGH", "DESTRUCTIVE"],
                         help="Risk ceiling for executed actions (default: LOW). "
@@ -784,8 +817,11 @@ Examples:
                         help="Cap on actions executed per engagement (default: 25)")
     parser.add_argument("--max-chains", type=int, default=10,
                         help="Cap on chains executed per engagement (default: 10)")
+    parser.add_argument("--resume-budget", action="store_true",
+                        help="Resume counters from this target's last budget checkpoint")
     parser.add_argument("--agent", action="store_true",
-                        help="Autonomous multi-agent pentesting engagement")
+                        help="Autonomous multi-agent engagement (plan-only exploitation "
+                             "unless --execute is supplied)")
     parser.add_argument("--phase", choices=["plan", "recon", "vuln", "exploit", "verify", "report"],
                         help="Run a single agent phase")
     parser.add_argument("--tools", action="store_true",
@@ -883,10 +919,12 @@ Examples:
         output_dir=args.output,
         config_path=args.config,
         mode=mode,
+        resume_budget=bool(args.resume_budget),
     )
     orchestrator.execute_chains = bool(args.execute)
     orchestrator.max_risk = args.max_risk
     orchestrator.max_actions = args.max_actions
+    orchestrator.budget.configure_action_limit(args.max_actions)
     orchestrator.max_chains = args.max_chains
 
     # Stale configs run new features on invisible code defaults. Say so
@@ -901,6 +939,7 @@ Examples:
         "mode": mode,
         "execute": bool(args.execute),
         "max_risk": args.max_risk,
+        "max_actions": args.max_actions,
         "agent": bool(args.agent or args.phase),
     })
 
@@ -935,7 +974,14 @@ Examples:
                     confidence="CONFIRMED", sources=["user_target"],
                 )
 
-            supervisor = AgentSupervisor(orchestrator.state, orchestrator.config)
+            supervisor = AgentSupervisor(
+                orchestrator.state,
+                orchestrator.config,
+                budget=orchestrator.budget,
+                execute=bool(args.execute),
+                max_risk=RiskLevel(args.max_risk),
+                max_actions=args.max_actions,
+            )
 
             if args.phase:
                 result = await supervisor.run_single_phase(args.phase)

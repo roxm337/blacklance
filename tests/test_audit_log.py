@@ -78,6 +78,29 @@ def test_sensitive_params_redacted(tmp_path):
     assert rec["data"]["params"]["url"] != "<redacted>"
 
 
+def test_secrets_are_redacted_across_target_nested_results_and_generic_events(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.action(
+        "web.test",
+        "https://example.com/path?token=target-secret",
+        {"headers": {"Authorization": "Bearer param-secret"},
+         "monkey": "kept"},
+        risk="LOW",
+        result={"evidence": ["Cookie: sid=result-secret",
+                             {"refresh_token": "nested-secret"}]},
+    )
+    log.record("generic", {"message": "api_key=generic-secret"})
+    log.close()
+
+    action, generic = log.read_records()
+    serialized = json.dumps([action, generic])
+    for secret in ("target-secret", "param-secret", "result-secret",
+                   "nested-secret", "generic-secret"):
+        assert secret not in serialized
+    assert action["data"]["params"]["monkey"] == "kept"
+    assert log.verify()["ok"] is True
+
+
 def test_typed_events_serialize(tmp_path):
     log = AuditLog(tmp_path / "audit.jsonl")
     log.engagement_start("example.com", "agent")

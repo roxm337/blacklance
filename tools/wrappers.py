@@ -9,17 +9,19 @@ import time
 import base64
 import tempfile
 import os
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
 from tools import http_engine as _http_engine_mod
 from tools.http_engine import HttpEngine
-from tools.external import docker_wrap_shell
+from tools.external import (consume_tool_budget, docker_wrap_shell,
+                            terminate_process_tree)
 from tools.external import tool_available as _tool_available
 
 # Pooled aiohttp engine. Created lazily on first request and reused for the
 # whole run so connections (and TLS handshakes) are shared across modules.
 _engine: Optional[HttpEngine] = None
+_http_budget: Any = None
 
 # Global cookie jar for stateful web sessions across requests
 _COOKIE_JAR: str | None = None
@@ -146,6 +148,22 @@ def configure_http_limiter(max_concurrent: int = 5, max_per_minute: int = 60):
     _http_limiter = RateLimiter(max_concurrent, max_per_minute)
 
 
+def configure_http_budget(budget: Any = None):
+    """Attach one engagement budget to every shared HTTP request.
+
+    Kept duck-typed to avoid coupling the transport layer to the orchestrator.
+    Passing ``None`` restores the standalone-wrapper behavior used by modules
+    and tests outside an engagement.
+    """
+    global _http_budget
+    _http_budget = budget
+
+
+def _consume_http_budget() -> None:
+    if _http_budget is not None:
+        _http_budget.consume_request()
+
+
 def _missing(tool: str) -> bool:
     """True when the binary is absent: callers return their normal shape
     with error="missing: <tool>" instead of a false negative."""
@@ -166,12 +184,14 @@ async def bash(command: str, timeout: int = 120) -> dict:
     re-routed into the toolchain image (repo mounted at /work); anything
     else runs locally as before.
     """
+    consume_tool_budget()
     command = docker_wrap_shell(command)
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
         return {
@@ -181,13 +201,7 @@ async def bash(command: str, timeout: int = 120) -> dict:
             "error": None,
         }
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            # Reap, or the killed child lingers as a zombie (and a
-            # `docker run --rm` container keeps running detached).
-            await asyncio.wait_for(proc.wait(), 10)
-        except Exception:
-            pass
+        await terminate_process_tree(proc)
         return {"stdout": "", "stderr": "timeout", "exit_code": -1, "error": "timeout"}
     except Exception as e:
         return {"stdout": "", "stderr": str(e), "exit_code": -1, "error": str(e)}
@@ -272,15 +286,12 @@ async def _curl_subprocess(url: str, method: str = "GET",
             *cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout + 5)
         out = stdout.decode("utf-8", errors="replace").strip()
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await asyncio.wait_for(proc.wait(), 10)
-        except Exception:
-            pass
+        await terminate_process_tree(proc)
         return {"status": 0, "body": "", "error": "timeout"}
     except Exception as e:
         return {"status": 0, "body": "", "error": str(e)}
@@ -342,6 +353,10 @@ async def curl(url: str, method: str = "GET",
     hunter): the target's session credentials must never ride along to
     someone else's API. The caller's own headers (API keys) survive.
     """
+    # Reserve before either the aiohttp or subprocess transport is selected;
+    # otherwise HTTP/1.0 and fallback requests would bypass the same cap.
+    _consume_http_budget()
+
     if strip_global_auth:
         merged_headers = {str(k): v for k, v in (headers or {}).items()
                           if v is not None}

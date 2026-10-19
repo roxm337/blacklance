@@ -104,6 +104,8 @@ def test_shipped_config_has_no_silent_default_blocks():
         for key in ("delay_ms", "connections"):
             assert key in kr, (path, key)
         assert "max_concurrent_actions" in config["budget_limits"], path
+        assert "max_external_commands" in config["budget_limits"], path
+        assert "resume" in config["budget_limits"], path
         assert "module_timeout" in config, path
         assert "identities" in config["auth"], path
         if path.name == "config.example.yaml":

@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import re
+import signal
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,8 +38,47 @@ DOCKER_TOOLS = frozenset({
     "interactsh-client", "kr", "semgrep",
 })
 
-_BACKEND = {"mode": "local", "image": "osint-tools:latest"}
+_BACKEND = {
+    "mode": "local",
+    "image": "osint-tools:latest",
+    "network": "bridge",
+    "memory": "2g",
+    "cpus": "2",
+    "pids_limit": 512,
+}
 _DOCKER_OK: bool | None = None
+_TOOL_BUDGET = None
+
+_RAW_SOCKET_TOOLS = frozenset({"nmap", "naabu", "masscan"})
+
+
+def configure_tool_budget(budget=None) -> None:
+    """Attach the engagement budget to external process launches."""
+    global _TOOL_BUDGET
+    _TOOL_BUDGET = budget
+
+
+def consume_tool_budget() -> None:
+    if _TOOL_BUDGET is not None:
+        _TOOL_BUDGET.consume_external_command()
+
+
+async def terminate_process_tree(proc) -> None:
+    """Terminate a timed-out tool and any children it spawned."""
+    try:
+        if os.name != "nt" and getattr(proc, "pid", None):
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError, AttributeError):
+        try:
+            proc.kill()
+        except Exception:
+            return
+    try:
+        await asyncio.wait_for(proc.wait(), 10)
+    except Exception:
+        pass
 
 
 def configure_tool_backend(config: dict | None = None) -> str:
@@ -49,8 +89,28 @@ def configure_tool_backend(config: dict | None = None) -> str:
                or tools_cfg.get("backend", "local")).strip().lower()
     image = str(os.environ.get("OSINT_TOOLS_IMAGE", "")
                 or tools_cfg.get("image", "osint-tools:latest")).strip()
+    network = str(tools_cfg.get("network", "bridge") or "bridge").strip()
+    memory = str(tools_cfg.get("memory", "2g") or "2g").strip().lower()
+    cpus = str(tools_cfg.get("cpus", "2") or "2").strip()
+    try:
+        pids_limit = max(32, min(4096, int(
+            tools_cfg.get("pids_limit", 512) or 512)))
+    except (TypeError, ValueError):
+        pids_limit = 512
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", network):
+        network = "bridge"
+    if not re.fullmatch(r"[1-9][0-9]*(?:[bkmg])?", memory):
+        memory = "2g"
+    try:
+        cpus = str(max(0.1, min(64.0, float(cpus))))
+    except ValueError:
+        cpus = "2"
     _BACKEND["mode"] = mode if mode in ("local", "docker") else "local"
     _BACKEND["image"] = image or "osint-tools:latest"
+    _BACKEND["network"] = network
+    _BACKEND["memory"] = memory
+    _BACKEND["cpus"] = cpus
+    _BACKEND["pids_limit"] = pids_limit
     _DOCKER_OK = None
     return _BACKEND["mode"]
 
@@ -140,10 +200,24 @@ def docker_run_args(args: List[str], stdin: bool = False) -> List[str]:
     cmd = ["docker", "run", "--rm"]
     if stdin:
         cmd.append("-i")
+    cmd += _docker_policy_args(str(args[0]) if args else "")
     # argv form (no shell): the space in the path is safe as one element.
-    cmd += ["-v", f"{cwd}:/work", "-w", "/work",
-            "--network", "bridge", _BACKEND["image"]]
+    cmd += ["-v", f"{cwd}:/work", "-w", "/work", _BACKEND["image"]]
     return cmd + [_rewrite_arg(str(a), cwd) for a in args]
+
+
+def _docker_policy_args(tool: str = "") -> List[str]:
+    args = [
+        "--security-opt", "no-new-privileges:true",
+        "--cap-drop", "ALL",
+        "--pids-limit", str(_BACKEND["pids_limit"]),
+        "--memory", str(_BACKEND["memory"]),
+        "--cpus", str(_BACKEND["cpus"]),
+        "--network", str(_BACKEND["network"]),
+    ]
+    if tool in _RAW_SOCKET_TOOLS:
+        args += ["--cap-add", "NET_RAW", "--cap-add", "NET_ADMIN"]
+    return args
 
 
 def _shell_tool(command: str) -> str:
@@ -176,9 +250,11 @@ def docker_wrap_shell(command: str) -> str:
         encoded = base64.b64encode(pinned.encode()).decode()
     # shlex.quote: repo paths routinely contain spaces.
     volume = shlex.quote(f"{cwd}:/work")
+    tool = _shell_tool(command)
+    policy = " ".join(shlex.quote(part) for part in _docker_policy_args(tool))
+    image = shlex.quote(str(_BACKEND["image"]))
     return (f"printf %s {encoded} | base64 -d | docker run --rm -i "
-            f"-v {volume} -w /work --network bridge "
-            f"{_BACKEND['image']} sh")
+            f"{policy} -v {volume} -w /work {image} sh")
 
 
 def tool_available(name: str) -> bool:
@@ -207,6 +283,7 @@ async def run_command(args: List[str], timeout: int = 120,
     Docker backend: tool binaries run inside the toolchain image with
     the repo mounted at /work, so outputs land back in reports/.
     """
+    consume_tool_budget()
     if _docker_wants(args):
         args = docker_run_args(args, stdin=bool(stdin_data))
     try:
@@ -215,6 +292,7 @@ async def run_command(args: List[str], timeout: int = 120,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE if stdin_data else None,
+            start_new_session=os.name != "nt",
         )
         stdin_bytes = stdin_data.encode() if stdin_data else None
         stdout, stderr = await asyncio.wait_for(
@@ -227,11 +305,7 @@ async def run_command(args: List[str], timeout: int = 120,
             "error": None,
         }
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await asyncio.wait_for(proc.wait(), 10)
-        except Exception:
-            pass
+        await terminate_process_tree(proc)
         return {"stdout": "", "stderr": "timeout", "exit_code": -1, "error": "timeout"}
     except Exception as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1, "error": str(exc)}

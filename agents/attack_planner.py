@@ -6,9 +6,8 @@ import json
 import logging
 from typing import Any
 
-from litellm import acompletion
-
 from agents import get_llm_config
+from agents.plan_validation import parse_json_object, validate_attack_plan
 
 logger = logging.getLogger("osint-agent")
 
@@ -56,8 +55,9 @@ OSINT bundle:
 class AttackPlanner:
     """Generate a ranked offensive testing plan from report/state context."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, budget=None):
         self.config = config
+        self.budget = budget
         self.llm = get_llm_config(config)
         self.model = self.llm["model"]
 
@@ -77,6 +77,9 @@ class AttackPlanner:
             kwargs["api_key"] = self.llm["api_key"]
 
         try:
+            if self.budget is not None:
+                self.budget.consume_llm_call()
+            from litellm import acompletion
             response = await acompletion(**kwargs)
             content = response.choices[0].message.content.strip()
             return _parse_plan(content)
@@ -248,18 +251,11 @@ def _build_user_prompt(bundle: dict) -> str:
 
 
 def _parse_plan(content: str) -> dict:
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.strip("`")
-        if content.lower().startswith("json"):
-            content = content[4:].strip()
-    parsed = json.loads(content)
-    if not isinstance(parsed, dict):
-        raise ValueError("planner response was not a JSON object")
-    parsed.setdefault("top_hypotheses", [])
-    parsed.setdefault("module_sequence", [])
-    parsed.setdefault("watch_items", [])
-    return _attach_proving_actions(parsed)
+    from modules import get_all_module_ids
+    parsed = parse_json_object(content)
+    validated = validate_attack_plan(
+        parsed, module_ids=set(get_all_module_ids()))
+    return _attach_proving_actions(validated)
 
 
 # Category keyword -> (proving action, minimum risk ceiling). Mirrors

@@ -100,3 +100,55 @@ def test_llm_mode_runs_llm(dispatched, monkeypatch):
     import asyncio
     asyncio.run(_run(monkeypatch, _argv("--mode", "llm")))
     assert dispatched == [("llm", None)]
+
+
+def test_default_pipeline_never_runs_active_modules(tmp_path, monkeypatch):
+    """No flags must mean passive behavior, not merely a passive label."""
+    import asyncio
+    from modules import MODULE_REGISTRY
+    from orchestrator import Orchestrator
+
+    orchestrator = Orchestrator(
+        "example.com", str(tmp_path),
+        config_path=str(tmp_path / "missing.yaml"), mode="auto")
+    called = []
+
+    async def no_seed():
+        return None
+
+    async def record(module_id):
+        called.append(module_id)
+
+    monkeypatch.setattr(orchestrator, "_seed_surface", no_seed)
+    monkeypatch.setattr(orchestrator, "_run_module", record)
+    asyncio.run(orchestrator.run_all())
+
+    active = {mid for mid, entry in MODULE_REGISTRY.items()
+              if entry.get("active")}
+    assert called
+    assert active.isdisjoint(called)
+
+
+def test_active_pipeline_includes_active_modules(tmp_path, monkeypatch):
+    import asyncio
+    from modules import MODULE_REGISTRY
+    from orchestrator import Orchestrator
+
+    orchestrator = Orchestrator(
+        "example.com", str(tmp_path),
+        config_path=str(tmp_path / "missing.yaml"), mode="active")
+    called = []
+
+    async def no_seed():
+        return None
+
+    async def record(module_id):
+        called.append(module_id)
+
+    monkeypatch.setattr(orchestrator, "_seed_surface", no_seed)
+    monkeypatch.setattr(orchestrator, "_run_module", record)
+    asyncio.run(orchestrator.run_all())
+
+    active = {mid for mid, entry in MODULE_REGISTRY.items()
+              if entry.get("active")}
+    assert active <= set(called)

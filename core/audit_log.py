@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from core.validators import redact_for_log
+
 
 class AuditLogError(Exception):
     pass
@@ -95,7 +97,11 @@ class AuditLog:
                 "seq": self._seq,
                 "ts": _now(),
                 "event": event,
-                "data": data or {},
+                # Redact at the final persistence boundary so typed events,
+                # generic events and future callers receive the same OPSEC
+                # treatment. The sanitized representation is what the hash
+                # chain authenticates.
+                "data": _sanitize(data or {}),
                 "prev": self._last_hash,
             }
             h = hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
@@ -194,7 +200,7 @@ class AuditLog:
             "action_id": action_id,
             "target": target,
             "risk": risk,
-            "params": _sanitize(params),
+            "params": params,
             "result": _truncate(result),
         })
 
@@ -211,25 +217,34 @@ def _now() -> str:
 
 
 _SENSITIVE_KEYS = {
-    "password", "passwd", "secret", "token", "api_key", "apikey", "key",
-    "cookie", "authorization", "auth", "bearer", "sig", "signature", "hash",
-    "session", "sessionid", "credit", "card",
+    "password", "passwd", "secret", "token", "api_key", "apikey",
+    "access_token", "refresh_token", "auth_token", "private_key",
+    "cookie", "authorization", "auth", "bearer", "session",
+    "sessionid", "session_id", "client_secret", "credential",
 }
 
 
-def _sanitize(params: dict) -> dict:
-    out = {}
-    for key, value in (params or {}).items():
-        if any(s in str(key).lower() for s in _SENSITIVE_KEYS) and value:
-            out[str(key)] = "<redacted>"
-        elif isinstance(value, dict):
-            out[str(key)] = _sanitize(value)
-        elif isinstance(value, list):
-            out[str(key)] = [v if not isinstance(v, dict) else _sanitize(v)
-                             for v in value]
-        else:
-            out[str(key)] = value
-    return out
+def _sensitive_key(key: Any) -> bool:
+    normalized = str(key).strip().lower().replace("-", "_")
+    if normalized in _SENSITIVE_KEYS:
+        return True
+    return normalized.endswith(("_password", "_secret", "_token", "_cookie",
+                                "_credential", "_api_key"))
+
+
+def _sanitize(value: Any) -> Any:
+    """Recursively redact keyed secrets and credentials embedded in strings."""
+    if isinstance(value, dict):
+        return {
+            str(key): ("<redacted>" if _sensitive_key(key) and item
+                       else _sanitize(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize(item) for item in value]
+    if isinstance(value, str):
+        return redact_for_log(value)
+    return value
 
 
 def _truncate(obj: Any, max_len: int = 2000) -> Any:

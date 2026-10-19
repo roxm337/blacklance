@@ -461,6 +461,19 @@ class ChainExecutor:
         if self.audit is not None:
             ctx.audit = self.audit
 
+        if self.budget is not None:
+            try:
+                consume = getattr(self.budget, "consume_action", None)
+                if consume:
+                    consume()
+                else:
+                    self.budget.record_action()
+            except Exception as exc:
+                return EdgeOutcome(
+                    edge=planned.edge, action_id=planned.action_id,
+                    status="skipped", detail=str(exc) or "action budget exhausted",
+                )
+
         try:
             result = await ActionRegistry.execute(planned.action_id, ctx)
         except Exception as exc:
@@ -472,11 +485,6 @@ class ChainExecutor:
             )
 
         self._used += 1
-        if self.budget is not None:
-            try:
-                self.budget.record_action()
-            except Exception:
-                pass
 
         if not getattr(result, "success", False):
             return EdgeOutcome(
