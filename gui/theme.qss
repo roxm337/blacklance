@@ -801,3 +801,69 @@ QToolTip {
     background: #0f2318;
     border-color: #166534;
 }
+
+/* ── Nav rail count badges ────────────────────────────────────────────── */
+
+QLabel#navBadge {
+    background: #e11d48;
+    color: #ffffff;
+    border-radius: 7px;
+    font-size: 9px;
+    font-weight: 800;
+    min-width: 14px;
+    max-width: 20px;
+    padding: 0 2px;
+}
+
+/* ── Severity chips (triage filter row) ───────────────────────────────── */
+
+QLabel#severityChip {
+    background: #0d1420;
+    border: 1px solid #29384d;
+    border-radius: 10px;
+    color: #c7d2e0;
+    padding: 4px 12px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+QLabel#severityChip:hover {
+    border-color: #e11d48;
+    color: #ffffff;
+}
+
+QLabel#severityChip[severity="critical"] {
+    background: #2a0f16; border-color: #7f1d1d; color: #fecdd3;
+}
+QLabel#severityChip[severity="high"] {
+    background: #271f0a; border-color: #854d0e; color: #fde68a;
+}
+QLabel#severityChip[severity="medium"] {
+    background: #101d2f; border-color: #1d4ed8; color: #bfdbfe;
+}
+QLabel#severityChip[severity="low"] {
+    background: #0f2318; border-color: #166534; color: #bbf7d0;
+}
+QLabel#severityChip[severity="info"] {
+    background: #141b28; border-color: #40516b; color: #9fb0c7;
+}
+
+QLabel#severityChip[dim="true"] {
+    color: #5b6a80;
+    background: #0b111a;
+    border-color: #1c2739;
+}
+
+/* ── Button focus ring (keyboard operators) ───────────────────────────── */
+
+QPushButton:focus, QToolButton:focus, QCheckBox:focus, QRadioButton:focus {
+    border: 1px solid #e11d48;
+    outline: none;
+}
+
+/* ── Metric card hover ────────────────────────────────────────────────── */
+
+#metricCard:hover {
+    border-color: #3b5675;
+    background: #131c29;
+}

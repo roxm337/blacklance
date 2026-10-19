@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import sys
@@ -52,7 +53,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.graph import build_display_graph, render_attack_html, render_gravis_html
+from gui.graph import (
+    build_display_graph,
+    count_relations,
+    render_attack_html,
+    render_gravis_html,
+)
 from actions import ActionRegistry
 from agents import get_llm_config
 from core.keyvault import KEY_SPECS, KeyVault
@@ -246,6 +252,8 @@ class MainWindow(QMainWindow):
         ("settings", "Settings", QStyle.SP_FileDialogDetailedView,
          "LLM, runtime, scanner, tools and config editor"),
     ]
+    # Index of ("graph", ...) in SCREEN_DEFS above.
+    SCREEN_GRAPH_INDEX = 2
 
     def __init__(self):
         super().__init__()
@@ -257,6 +265,7 @@ class MainWindow(QMainWindow):
         self.current_assets = {"nodes": [], "edges": []}
         self.current_module = {}
         self.current_evidence = {"items": []}
+        self._read_errors: list[str] = []
         self.current_findings: list[dict] = []
         self.current_attack_graph: dict = {}
         self._identity_records: list[dict] = []
@@ -266,6 +275,16 @@ class MainWindow(QMainWindow):
         self.output_dir = ROOT_DIR / "reports"
         self.config_path = ROOT_DIR / "config.yaml"
         self._run_started_at: float | None = None
+        # Modules this run will touch: 1 for Single module / module actions,
+        # the full registry otherwise. The progress denominator must match
+        # the run's scope or a single-module run crawls at 2% forever.
+        self._run_scope_total = len(get_all_module_ids())
+        self._recent_targets: list[str] = list(
+            self._settings.value("recent_targets", "", type=str).split(";;")
+        ) if self._settings.value("recent_targets", "", type=str) else []
+        self.nav_badges: list[QLabel] = []
+        self.run_splitter: QSplitter | None = None
+        self.finding_splitter: QSplitter | None = None
         # Timers exist before _build_ui so signal wiring in it is safe.
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
@@ -279,6 +298,8 @@ class MainWindow(QMainWindow):
         self._target_reload_timer.setInterval(600)
         self._target_reload_timer.timeout.connect(self.load_results)
         self._build_ui()
+        # Drag a .yaml/.yml onto the window to load it as the config.
+        self.setAcceptDrops(True)
         self.target_input.textChanged.connect(
             lambda *_: self._target_reload_timer.start()
         )
@@ -312,8 +333,34 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 720)
         screen = self._settings.value("screen", 0, type=int)
         self.show_screen(screen if isinstance(screen, int) else 0)
+        # Restore pane splits so the operator's layout survives restarts.
+        for name, splitter in (
+            ("run_splitter", getattr(self, "run_splitter", None)),
+            ("finding_splitter", getattr(self, "finding_splitter", None)),
+        ):
+            state = self._settings.value(name)
+            if state is not None and splitter is not None:
+                try:
+                    splitter.restoreState(state)
+                except TypeError:
+                    pass
 
     def closeEvent(self, event):
+        # A running scan is a child QProcess: closing the window kills it
+        # mid-run. Confirm before throwing away operator time.
+        if self.process and self.process.state() != QProcess.NotRunning:
+            answer = QMessageBox.question(
+                self,
+                "Scan Running",
+                "A scan is still running. Stop it and quit?\n"
+                "(Unsaved progress in the current run is kept on disk.)",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                event.ignore()
+                return
+            self.stop_scan()
         # A closing window must cancel pending work: the debounced target
         # reload would otherwise fire from a hidden window long after close.
         self._target_reload_timer.stop()
@@ -327,7 +374,29 @@ class MainWindow(QMainWindow):
             )
             if hasattr(self, "screen_stack"):
                 self._settings.setValue("screen", self.screen_stack.currentIndex())
+            for name in ("run_splitter", "finding_splitter"):
+                splitter = getattr(self, name, None)
+                if splitter is not None:
+                    self._settings.setValue(name, splitter.saveState())
         super().closeEvent(event)
+
+    # ---- Drag & drop: a config file onto the window ---------------------
+
+    def dragEnterEvent(self, event):
+        mime = event.mimeData()
+        if mime.hasUrls() and any(
+            url.toLocalFile().lower().endswith((".yaml", ".yml"))
+            for url in mime.urls()
+        ):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith((".yaml", ".yml")):
+                self._load_config_path(Path(path))
+                event.acceptProposedAction()
+                return
 
     def _build_ui(self):
         root = QWidget()
@@ -411,6 +480,13 @@ class MainWindow(QMainWindow):
             self.nav_group.addButton(button, index)
             self.nav_buttons.append(button)
             rail_layout.addWidget(button)
+            # Count badge, top-right; hidden when zero. Kept as a sibling so
+            # the button's fixed size / text-under-icon layout is untouched.
+            badge = QLabel("", button)
+            badge.setObjectName("navBadge")
+            badge.setAlignment(Qt.AlignCenter)
+            badge.hide()
+            self.nav_badges.append(badge)
         rail_layout.addStretch(1)
         if self.nav_buttons:
             self.nav_buttons[0].setChecked(True)
@@ -424,6 +500,48 @@ class MainWindow(QMainWindow):
         if index < len(self.nav_buttons):
             self.nav_buttons[index].setChecked(True)
         self._settings.setValue("screen", index)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_nav_badges()
+
+    def _position_nav_badges(self):
+        # Badges are child labels of the nav buttons; park each one in the
+        # button's top-right corner (offset past the icon). Guarded: a
+        # resize can land while _build_ui is still constructing the rail.
+        buttons = getattr(self, "nav_buttons", [])
+        for button, badge in zip(buttons, getattr(self, "nav_badges", [])):
+            size = button.size()
+            badge.setGeometry(size.width() - 22, 2, 20, 14)
+
+    def _refresh_nav_badges(self):
+        """Populate nav-rail count badges so triage volume is visible at a glance."""
+        if not self.nav_badges:
+            return
+        # Triage (index 1) carries the open-findings count. Verdicts live in
+        # the _triage dict; some loaded findings also embed one inline.
+        findings = self.current_findings if isinstance(self.current_findings, list) else []
+        triage_count = 0
+        for finding in findings:
+            verdict = self._verdict_of(finding) or str(
+                (finding.get("triage") or {}).get("verdict") or ""
+            )
+            if not verdict or verdict == "untriaged":
+                triage_count += 1
+        self._set_nav_badge(1, triage_count, "untriaged finding(s)")
+        self._position_nav_badges()
+
+    def _set_nav_badge(self, index: int, count: int, noun: str):
+        if not 0 <= index < len(self.nav_badges):
+            return
+        badge = self.nav_badges[index]
+        if count > 0:
+            badge.setText(str(count) if count < 100 else "99+")
+            badge.setToolTip(f"{count} {noun}")
+            badge.show()
+        else:
+            badge.clear()
+            badge.hide()
 
     def _build_menu(self):
         file_menu = self.menuBar().addMenu("File")
@@ -445,6 +563,15 @@ class MainWindow(QMainWindow):
         reload_report.triggered.connect(self.load_results)
         file_menu.addAction(reload_report)
 
+        # Populated on demand so the menu never shows a stale list.
+        self.recent_targets_menu = file_menu.addMenu("Recent Targets")
+        self.recent_targets_menu.aboutToShow.connect(self._populate_recent_targets)
+
+        file_menu.addSeparator()
+        export_csv = QAction("Export Findings as CSV...", self)
+        export_csv.triggered.connect(self._export_findings_csv)
+        file_menu.addAction(export_csv)
+
         file_menu.addSeparator()
         quit_action = QAction("Quit", self)
         quit_action.setShortcut(QKeySequence("Ctrl+Q"))
@@ -458,6 +585,7 @@ class MainWindow(QMainWindow):
         operation_menu.addAction(run_action)
 
         stop_action = QAction("Stop", self)
+        stop_action.setShortcut(QKeySequence("Ctrl+."))
         stop_action.triggered.connect(self.stop_scan)
         operation_menu.addAction(stop_action)
 
@@ -474,11 +602,111 @@ class MainWindow(QMainWindow):
         save_settings.triggered.connect(self._save_settings_form)
         settings_menu.addAction(save_settings)
 
+        help_menu = self.menuBar().addMenu("Help")
+        shortcuts_action = QAction("Keyboard Shortcuts", self)
+        shortcuts_action.triggered.connect(self._show_shortcuts)
+        help_menu.addAction(shortcuts_action)
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
         # Ctrl+1..6 jump straight to a screen (the rail's tooltip order).
         for index in range(len(self.SCREEN_DEFS)):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
             shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(lambda i=index: self.show_screen(i))
+
+    # ---- Recent targets -------------------------------------------------
+
+    def _record_recent_target(self, target: str):
+        """Prepend target to the recent list (dedup, cap 8) and persist."""
+        target = (target or "").strip()
+        if not target:
+            return
+        self._recent_targets = [t for t in self._recent_targets if t != target]
+        self._recent_targets.insert(0, target)
+        del self._recent_targets[8:]
+        self._settings.setValue("recent_targets", ";;".join(self._recent_targets))
+
+    def _populate_recent_targets(self):
+        self.recent_targets_menu.clear()
+        if not self._recent_targets:
+            empty = QAction("(none yet)", self)
+            empty.setEnabled(False)
+            self.recent_targets_menu.addAction(empty)
+            return
+        for target in self._recent_targets:
+            action = QAction(target, self)
+            action.triggered.connect(lambda _checked=False, t=target: self._use_recent_target(t))
+            self.recent_targets_menu.addAction(action)
+
+    def _use_recent_target(self, target: str):
+        self.target_input.setText(target)
+        self.show_screen(0)
+        self.statusBar().showMessage(f"Target set to {target}", 3000)
+
+    # ---- Export ---------------------------------------------------------
+
+    def _export_findings_csv(self):
+        """Write the current (unfiltered) findings to a CSV the analyst picks."""
+        if not self.current_findings:
+            QMessageBox.information(self, "Export CSV", "No findings to export.")
+            return
+        default = str(self.output_dir / f"{self._target_output_name()}_findings.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Findings", default, "CSV Files (*.csv)"
+        )
+        if not path:
+            return
+        columns = [
+            "id", "title", "severity", "risk_score", "confidence", "verified",
+            "category", "module_id", "priority", "cwe", "owasp", "description",
+        ]
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(columns)
+                for finding in self.current_findings:
+                    row = []
+                    for column in columns:
+                        value = finding.get(column, "")
+                        if isinstance(value, (list, dict)):
+                            value = json.dumps(value, ensure_ascii=False)
+                        row.append(value)
+                    writer.writerow(row)
+        except OSError as error:
+            QMessageBox.warning(self, "Export CSV", f"Could not write file:\n{error}")
+            return
+        self.statusBar().showMessage(f"Exported {len(self.current_findings)} findings", 4000)
+        QMessageBox.information(
+            self, "Export CSV",
+            f"Exported {len(self.current_findings)} findings to:\n{path}",
+        )
+
+    # ---- Help -----------------------------------------------------------
+
+    def _show_shortcuts(self):
+        QMessageBox.information(
+            self,
+            "Keyboard Shortcuts",
+            "Ctrl+1..6\tSwitch screen (Run, Triage, Graph, Data, Report, Settings)\n"
+            "Ctrl+O\tOpen config file\n"
+            "Ctrl+R / F5\tReload current results\n"
+            "Ctrl+Enter\tStart run\n"
+            "Ctrl+Q\tQuit\n"
+            "Enter (target field)\tStart run\n"
+            "t / f / o\tTrue positive / False positive / Out of scope (table focused)\n"
+            "Ctrl+.\tStop run",
+        )
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "About OSINT Agent",
+            "OSINT Agent — red team ops console\n\n"
+            "Proof-before-severity OSINT and exposure-mapping framework.\n"
+            "Local-only: runs entirely from this workstation.",
+        )
 
     def _build_controls(self) -> QWidget:
         panel = QFrame()
@@ -525,7 +753,8 @@ class MainWindow(QMainWindow):
         for stage in range(1, 7):
             self.stage_filter_combo.addItem(f"Stage {stage}", stage)
         self.stage_filter_combo.setToolTip(
-            "Restrict the module list (and Auto runs) to one pipeline stage."
+            "Restrict the module picker to one pipeline stage "
+            "(Single module mode; Auto runs the full active chain)."
         )
         self.stage_filter_combo.currentIndexChanged.connect(self._refresh_module_list)
         self.module_combo = QComboBox()
@@ -702,7 +931,34 @@ class MainWindow(QMainWindow):
         settings_tabs.addTab(self._build_keys_settings_tab(), "API Keys")
         settings_tabs.addTab(self._build_raw_config_tab(), "Raw YAML")
         layout.addWidget(settings_tabs, 1)
+
+        # Filter: the Scanner/Actions tabs are long; typing narrows the
+        # group boxes across every tab by title so options stay reachable.
+        self.settings_search = QLineEdit()
+        self.settings_search.setPlaceholderText(
+            "Filter settings by section name (e.g. proxy, retries, keys)"
+        )
+        self.settings_search.setClearButtonEnabled(True)
+        self.settings_search.textChanged.connect(
+            lambda text: self._apply_settings_filter(settings_tabs, text)
+        )
+        layout.addWidget(self.settings_search)
+        self.settings_tabs = settings_tabs
         return panel
+
+    @staticmethod
+    def _apply_settings_filter(tabs: QTabWidget, query: str):
+        """Show only group boxes whose title matches `query` (case-insensitive)."""
+        needle = (query or "").strip().lower()
+        for index in range(tabs.count()):
+            page = tabs.widget(index)
+            visible = 0
+            for box in page.findChildren(QGroupBox):
+                match = not needle or needle in box.title().lower()
+                box.setVisible(match)
+                if match:
+                    visible += 1
+            tabs.setTabVisible(index, bool(visible) or not needle)
 
     def _build_llm_settings_tab(self) -> QWidget:
         tab = QWidget()
@@ -1725,6 +1981,7 @@ class MainWindow(QMainWindow):
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
         splitter.setSizes([380, 900])
+        self.run_splitter = splitter
         layout.addWidget(splitter, 1)
         return page
 
@@ -1777,6 +2034,22 @@ class MainWindow(QMainWindow):
         filter_row.addWidget(reset_filters_button)
         filter_row.addWidget(self.finding_count_label)
         findings_layout.addLayout(filter_row)
+
+        # Severity chips: at-a-glance distribution, click to filter.
+        self.severity_chip_row = QHBoxLayout()
+        self.severity_chip_row.setContentsMargins(0, 0, 0, 0)
+        self.severity_chip_row.setSpacing(6)
+        self._severity_chips: dict[str, QLabel] = {}
+        for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+            chip = QLabel(f"{sev} 0")
+            chip.setObjectName("severityChip")
+            chip.setProperty("severity", sev.lower())
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.mousePressEvent = lambda _e, s=sev: self._filter_by_severity(s)
+            self.severity_chip_row.addWidget(chip)
+            self._severity_chips[sev] = chip
+        self.severity_chip_row.addStretch(1)
+        findings_layout.addLayout(self.severity_chip_row)
 
         self.findings_table = QTableWidget(0, 10)
         self.findings_table.setHorizontalHeaderLabels([
@@ -1839,6 +2112,11 @@ class MainWindow(QMainWindow):
         self.filter_module_button = QPushButton("Filter by module")
         self.filter_module_button.setObjectName("btnGhost")
         self.filter_module_button.clicked.connect(self._filter_by_selected_module)
+        self.show_assets_button = QPushButton("Show in Assets")
+        self.show_assets_button.setObjectName("btnGhost")
+        self.show_assets_button.setToolTip(
+            "Jump to the Data → Assets tab filtered to this finding's assets")
+        self.show_assets_button.clicked.connect(self._show_selected_in_assets)
         verdict_row.addWidget(self.tp_button)
         verdict_row.addWidget(self.fp_button)
         verdict_row.addWidget(self.oos_button)
@@ -1846,6 +2124,7 @@ class MainWindow(QMainWindow):
         verdict_row.addWidget(self.note_button)
         verdict_row.addWidget(self.open_evidence_button)
         verdict_row.addWidget(self.filter_module_button)
+        verdict_row.addWidget(self.show_assets_button)
         verdict_row.addStretch(1)
         detail_layout.addLayout(verdict_row)
         detail_layout.addWidget(self.finding_detail, 1)
@@ -1855,6 +2134,7 @@ class MainWindow(QMainWindow):
         finding_splitter.addWidget(detail_container)
         finding_splitter.setStretchFactor(0, 3)
         finding_splitter.setStretchFactor(1, 2)
+        self.finding_splitter = finding_splitter
         findings_layout.addWidget(finding_splitter, 1)
 
         # Keyboard: focus filter, triage letters when the table has focus.
@@ -1887,6 +2167,31 @@ class MainWindow(QMainWindow):
         self.finding_confidence_combo.setCurrentIndex(0)
         self.finding_verified_combo.setCurrentIndex(0)
         self.finding_triage_combo.setCurrentIndex(0)
+
+    def _filter_by_severity(self, severity: str):
+        """Click a severity chip to toggle that severity in the filter combo."""
+        index = self.finding_severity_combo.findText(severity)
+        if index < 0:
+            return
+        # Toggle: clicking the active severity clears back to "All".
+        if self.finding_severity_combo.currentText() == severity:
+            self.finding_severity_combo.setCurrentIndex(0)
+        else:
+            self.finding_severity_combo.setCurrentIndex(index)
+
+    def _update_severity_chips(self):
+        """Refresh the per-severity counts shown on the triage chips."""
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        for finding in self.current_findings:
+            sev = str(finding.get("severity", "")).upper()
+            if sev in counts:
+                counts[sev] += 1
+        for sev, chip in self._severity_chips.items():
+            chip.setText(f"{sev} {counts[sev]}")
+            # De-emphasise empty buckets so populated ones stand out.
+            chip.setProperty("dim", counts[sev] == 0)
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
 
     def _selected_findings(self) -> list[dict]:
         """Every selected row, not just the current one — a 10-row selection
@@ -1940,6 +2245,31 @@ class MainWindow(QMainWindow):
         module_id = str(finding.get("module_id", ""))
         if module_id:
             self.finding_search.setText(module_id)
+
+    def _show_selected_in_assets(self):
+        """Jump to Data → Assets, filtered to this finding's assets."""
+        finding = self._selected_finding()
+        if not finding:
+            self.statusBar().showMessage("Select a finding first", 3000)
+            return
+        keys = [str(k) for k in (finding.get("asset_keys") or []) if k]
+        if not keys:
+            self.statusBar().showMessage("This finding has no linked assets", 3000)
+            return
+        # Data screen is index 3 (run, triage, graph, data, report, settings);
+        # Assets is its first sub-tab.
+        self.show_screen(3)
+        if hasattr(self, "data_tabs"):
+            self.data_tabs.setCurrentIndex(0)
+        entry = getattr(self, "_table_filters", {}).get(self.assets_table)
+        if entry:
+            # asset_keys are "type:value"; the table's Value column holds
+            # the value, so strip the prefix to get a matchable query.
+            first = keys[0]
+            query = first.split(":", 1)[1] if ":" in first else first
+            entry[0].setText(query)
+        self.statusBar().showMessage(
+            f"Assets filtered to {finding.get('id')} ({len(keys)} linked)", 4000)
 
     def _build_graph_screen(self) -> QWidget:
         """Screen 2: asset graph + attack graph side by side in sub-tabs."""
@@ -2030,6 +2360,7 @@ class MainWindow(QMainWindow):
         tabs.setDocumentMode(True)
         tabs.tabBar().setUsesScrollButtons(True)
         tabs.tabBar().setDrawBase(False)
+        self.data_tabs = tabs
         self._table_filters: dict[QTableWidget, tuple[QLineEdit, QLabel, QComboBox | None]] = {}
 
         self.assets_table = QTableWidget(0, 4)
@@ -2058,15 +2389,16 @@ class MainWindow(QMainWindow):
             "Modules",
         )
 
-        self.evidence_table = QTableWidget(0, 5)
-        self.evidence_table.setHorizontalHeaderLabels(["ID", "Module", "Type", "Subject", "Path"])
+        self.evidence_table = QTableWidget(0, 6)
+        self.evidence_table.setHorizontalHeaderLabels(
+            ["ID", "Module", "Type", "Subject", "Path", "Findings"])
         self.evidence_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.evidence_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.evidence_table.cellDoubleClicked.connect(self._open_evidence_cell)
         tabs.addTab(self._wrap_data_tab(self.evidence_table, "Filter evidence…"), "Evidence")
 
-        self.submissions_table = QTableWidget(0, 3)
-        self.submissions_table.setHorizontalHeaderLabels(["File", "Size", "Path"])
+        self.submissions_table = QTableWidget(0, 4)
+        self.submissions_table.setHorizontalHeaderLabels(["File", "Finding", "Size", "Path"])
         self.submissions_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.submissions_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.submissions_table.cellDoubleClicked.connect(self._open_submission_cell)
@@ -2207,6 +2539,15 @@ class MainWindow(QMainWindow):
         self.attack_plan_path_label.setMinimumWidth(0)
         path_row.addWidget(self.report_path_label, 1)
         path_row.addWidget(self.attack_plan_path_label, 1)
+        report_buttons = QVBoxLayout()
+        report_buttons.setSpacing(4)
+        open_report_btn = QPushButton("Open Report")
+        open_report_btn.clicked.connect(self.open_report)
+        copy_path_btn = QPushButton("Copy Report Path")
+        copy_path_btn.clicked.connect(self._copy_report_path)
+        report_buttons.addWidget(open_report_btn)
+        report_buttons.addWidget(copy_path_btn)
+        path_row.addLayout(report_buttons)
         layout.addLayout(path_row)
 
         tabs = QTabWidget()
@@ -2292,11 +2633,11 @@ class MainWindow(QMainWindow):
         return False, f"LLM key missing for {model or 'configured model'}"
 
     def _prefer_llm_if_ready(self):
-        ready, _message = self._llm_status()
-        if ready and hasattr(self, "mode_combo"):
-            index = self.mode_combo.findText("LLM")
-            if index >= 0:
-                self.mode_combo.setCurrentIndex(index)
+        # Surface readiness only. Auto-switching the mode on startup would
+        # silently override whatever the operator last chose (Auto is the
+        # safe default); they opt into LLM via the mode combo or the
+        # AI Guided Run button.
+        self._update_operation_context()
 
     def start_llm_scan(self):
         index = self.mode_combo.findText("LLM")
@@ -2324,10 +2665,14 @@ class MainWindow(QMainWindow):
         )
         if not selected:
             return
-        self.config_path = Path(selected)
+        self._load_config_path(Path(selected))
+
+    def _load_config_path(self, path: Path):
+        """Point the app at a config file (file dialog or drag & drop)."""
+        self.config_path = path
         self._load_settings_form()
         self._update_operation_context()
-        self.status_label.setText(f"Config: {self.config_path.name}")
+        self._set_status("ok", f"Config: {self.config_path.name}")
 
     def _confirm_engagement(self) -> bool:
         """Gate chain execution at MEDIUM and above behind an explicit yes."""
@@ -2361,8 +2706,20 @@ class MainWindow(QMainWindow):
         if not self._confirm_engagement():
             return
 
+        self._record_recent_target(target)
         mode = self.mode_combo.currentText()
         module = self.module_combo.currentData() if mode == "Single module" else None
+        # An empty combo in Single module mode used to fall through to a
+        # full Auto scan — the opposite of what the operator asked for.
+        if mode == "Single module" and not module:
+            QMessageBox.warning(
+                self,
+                "No Module Selected",
+                "Single module mode needs a module in the picker.\n"
+                "Pick a module, or switch the mode to Auto.",
+            )
+            return
+        self._run_scope_total = 1 if module else len(get_all_module_ids())
         args = build_scan_args(
             target=target,
             output_dir=self.output_dir,
@@ -2377,10 +2734,18 @@ class MainWindow(QMainWindow):
             max_chains=self.max_chains_spin.value(),
         )
 
+        # Applies to every mode, not just Single module/LLM: an Auto run
+        # with a stale report on disk used to skip regeneration because
+        # the "no report yet" fallback already satisfied the old check.
+        # The reporting exclusion only matters in Single module mode, where
+        # the operator explicitly ran the reporting module (it writes the
+        # report itself). In Auto the module combo is disabled.
         self.report_after_process = (
             self.auto_report_check.isChecked()
-            and mode in ("Single module", "LLM")
-            and self.module_combo.currentData() != "reporting"
+            and not (
+                mode == "Single module"
+                and self.module_combo.currentData() == "reporting"
+            )
         )
         self.running_report = False
         self._start_process(args)
@@ -2411,6 +2776,7 @@ class MainWindow(QMainWindow):
             config_path=self.config_path,
             module=module_id,
         )
+        self._run_scope_total = 1
         self._start_process(args, report_run=report_run)
 
     def open_report(self):
@@ -2419,6 +2785,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Report Missing", "No report exists for this target yet.")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _copy_report_path(self):
+        """Copy the report path so the analyst can attach/paste it elsewhere."""
+        path = self._report_path()
+        QApplication.clipboard().setText(str(path))
+        self.statusBar().showMessage(f"Report path copied: {path}", 4000)
 
     def open_target_folder(self):
         path = self.output_dir / self._target_output_name()
@@ -2442,6 +2814,24 @@ class MainWindow(QMainWindow):
             self.operation_state_label.setProperty("state", state)
             self.operation_state_label.style().unpolish(self.operation_state_label)
             self.operation_state_label.style().polish(self.operation_state_label)
+        self._refresh_window_title(state, text)
+
+    def _refresh_window_title(self, state: str = "idle", text: str = ""):
+        """Keep the OS title bar informative: target + current state.
+
+        Operators running several windows side-by-side need to tell them
+        apart without focusing each one, and a scan's state should be
+        readable from the taskbar/dock.
+        """
+        target = self.target_input.text().strip() if hasattr(self, "target_input") else ""
+        title = "OSINT Agent"
+        if target:
+            title += f" — {target}"
+        state_word = {"idle": "Ready", "busy": "Running", "ok": "OK", "error": "Error"}.get(state)
+        if state_word and state != "idle":
+            detail = f": {text}" if text and text != state_word else ""
+            title += f" — {state_word}{detail}"
+        self.setWindowTitle(title)
 
     @staticmethod
     def _format_elapsed(seconds: float) -> str:
@@ -2457,9 +2847,9 @@ class MainWindow(QMainWindow):
         if self._run_started_at is None:
             return
         elapsed = self._format_elapsed(time.monotonic() - self._run_started_at)
-        total = max(len(get_all_module_ids()), 1)
+        total = max(getattr(self, "_run_scope_total", 0), 1)
         completed = len((self.current_module or {}).get("completed", []))
-        self.status_label.setText(f"Running · {completed}/{total} · {elapsed}")
+        self.status_label.setText(f"Running · {min(completed, total)}/{total} · {elapsed}")
 
     def _poll_run_state(self):
         """Tail state/module.json so metrics move while the engine runs.
@@ -2474,7 +2864,7 @@ class MainWindow(QMainWindow):
             self.current_module = module
             stats = module.get("stats", {})
             completed = len(module.get("completed", []))
-            total = max(len(get_all_module_ids()), 1)
+            total = max(getattr(self, "_run_scope_total", 0), 1)
             self.progress_bar.setValue(min(100, int((completed / total) * 100)))
             suffix = f", {self._incomplete_count(module)} incomplete" \
                 if self._incomplete_count(module) else ""
@@ -2484,7 +2874,41 @@ class MainWindow(QMainWindow):
             self.blocked_value.setText(str(len(module.get("blocked", []))))
             self.incomplete_value.setText(str(self._incomplete_count(module)))
             self.requests_value.setText(str(stats.get("total_requests", "-")))
+        # Every 4th tick (~3s) also refresh the data tables, so findings
+        # and assets collected mid-run appear live instead of only after
+        # the whole chain finishes.
+        self._poll_data_counter = getattr(self, "_poll_data_counter", 0) + 1
+        if self._poll_data_counter % 4 == 1:
+            self._poll_data_tables()
         self._tick_run_progress()
+
+    def _poll_data_tables(self):
+        """Reload findings/assets/evidence tables while a run is active.
+
+        Only module.json used to be polled, so the tables stayed frozen
+        for the entire run. A corrupt or missing file here keeps the
+        previous table contents (same policy as load_results) and never
+        fights the busy status pill.
+        """
+        state_dir = self.output_dir / self._target_output_name() / "state"
+        self._read_errors = []
+        findings = self._read_json(state_dir / "findings.json", None)
+        assets = self._read_json(state_dir / "assets.json", None)
+        evidence = self._read_json(state_dir / "evidence.json", None)
+        self._read_errors = []
+        if isinstance(findings, dict) and isinstance(findings.get("findings"), list):
+            self._load_findings(findings["findings"])
+            self.findings_value.setText(str(len(findings["findings"])))
+            self._update_risk_metrics(findings["findings"], {})
+        if isinstance(assets, dict) and isinstance(assets.get("nodes"), list):
+            self._load_assets(assets["nodes"])
+            self.current_assets = assets
+            self.assets_value.setText(str(len(assets["nodes"])))
+            self.relations_value.setText(str(count_relations(assets)))
+        if isinstance(evidence, dict) and isinstance(evidence.get("items"), list):
+            self._load_evidence(evidence["items"])
+            self.current_evidence = evidence
+            self.evidence_value.setText(str(len(evidence["items"])))
 
     def _restore_run_buttons(self):
         self.run_button.setEnabled(True)
@@ -2604,10 +3028,30 @@ class MainWindow(QMainWindow):
         self._restore_run_buttons()
         self._sync_mode()
 
+    def _update_risk_metrics(self, findings_list: list[dict], summary_bundle: dict):
+        """Max Risk / Crit-High from live findings; report summary as fallback.
+
+        These two metrics used to read the report-time summary snapshot
+        only, so they showed "-" until the first report and went stale
+        after any CLI run that added findings.
+        """
+        if findings_list:
+            self.max_risk_value.setText(
+                str(max(int(f.get("risk_score") or 0) for f in findings_list)))
+            self.critical_high_value.setText(str(sum(
+                1 for f in findings_list
+                if str(f.get("severity", "")).upper() in ("CRITICAL", "HIGH")
+            )))
+        else:
+            risk = summary_bundle.get("risk", {})
+            self.max_risk_value.setText(str(risk.get("max_score", "-")))
+            self.critical_high_value.setText(str(risk.get("critical_high", "-")))
+
     def load_results(self):
         target = self.target_input.text().strip()
         if not target:
             return
+        self._read_errors = []
         base = self.output_dir / self._target_output_name()
         state_dir = base / "state"
         module = self._read_json(state_dir / "module.json", {})
@@ -2615,11 +3059,36 @@ class MainWindow(QMainWindow):
         findings = self._read_json(state_dir / "findings.json", {"findings": []})
         evidence = self._read_json(state_dir / "evidence.json", {"items": []})
         summary_bundle = self._read_json(self._summary_path(), {})
+        # A corrupt file must not zero the UI: keep the previous
+        # in-memory store for it and flag the problem. Returning the
+        # default used to read as "the run produced nothing".
+        failed = set(self._read_errors)
+        if "module.json" in failed:
+            module = self.current_module if isinstance(self.current_module, dict) else {}
+        if "assets.json" in failed:
+            assets = (self.current_assets if isinstance(self.current_assets, dict)
+                      else {"nodes": [], "edges": []})
+        if "findings.json" in failed:
+            findings_list = list(self.current_findings)
+        else:
+            findings_list = (findings.get("findings", [])
+                             if isinstance(findings, dict) else [])
+        if "evidence.json" in failed:
+            evidence = (self.current_evidence if isinstance(self.current_evidence, dict)
+                        else {"items": []})
+        if not isinstance(module, dict):
+            module = {}
+        if not isinstance(assets, dict):
+            assets = {"nodes": [], "edges": []}
+        if not isinstance(evidence, dict):
+            evidence = {"items": []}
+        nodes = assets.get("nodes", [])
+        evidence_items = evidence.get("items", [])
 
-        self.assets_value.setText(str(len(assets.get("nodes", []))))
-        self.relations_value.setText(str(len(assets.get("edges", []))))
-        self.findings_value.setText(str(len(findings.get("findings", []))))
-        self.evidence_value.setText(str(len(evidence.get("items", []))))
+        self.assets_value.setText(str(len(nodes)))
+        self.relations_value.setText(str(count_relations(assets)))
+        self.findings_value.setText(str(len(findings_list)))
+        self.evidence_value.setText(str(len(evidence_items)))
         stats = module.get("stats", {})
         self.requests_value.setText(str(stats.get("total_requests", "-")))
         self.completed_value.setText(str(len(module.get("completed", []))))
@@ -2628,9 +3097,10 @@ class MainWindow(QMainWindow):
         self.incomplete_value.setText(str(self._incomplete_count(module)))
         active_count = sum(1 for mid, entry in MODULE_REGISTRY.items() if entry.get("active"))
         self.active_value.setText(str(active_count))
-        risk = summary_bundle.get("risk", {})
-        self.max_risk_value.setText(str(risk.get("max_score", "-")))
-        self.critical_high_value.setText(str(risk.get("critical_high", "-")))
+        # Live risk: computed from findings in state instead of the
+        # report-time summary snapshot, so Max Risk / Crit-High never lag
+        # behind findings that changed since the last report run.
+        self._update_risk_metrics(findings_list, summary_bundle)
 
         report_path = self._report_path()
         report_display = self._display_path(report_path) if report_path.exists() else "-"
@@ -2644,10 +3114,10 @@ class MainWindow(QMainWindow):
             attack_plan_display if attack_plan_path.exists() else "No AI attack plan generated yet"
         )
         self.attack_plan_path_label.setToolTip(str(attack_plan_path) if attack_plan_path.exists() else "")
-        self._load_findings(findings.get("findings", []))
-        self._load_assets(assets.get("nodes", []))
+        self._load_findings(findings_list)
+        self._load_assets(nodes)
         self._load_modules(module)
-        self._load_evidence(evidence.get("items", []))
+        self._load_evidence(evidence_items)
         self._load_submissions()
         self._load_summary_json(summary_bundle)
         self.current_assets = assets
@@ -2656,6 +3126,12 @@ class MainWindow(QMainWindow):
         self._update_operation_context()
         self.refresh_graph()
         self._load_attack_graph()
+        if failed:
+            self._set_status(
+                "error",
+                "Corrupt: " + ", ".join(sorted(failed)),
+                "Showing last good data",
+            )
         if report_path.exists():
             report_text = report_path.read_text(errors="replace")
             self.report_preview.setMarkdown(report_text)
@@ -2714,7 +3190,7 @@ class MainWindow(QMainWindow):
         completed = len(module_state.get("completed", []))
         skipped = len(module_state.get("skipped", []))
         incomplete = self._incomplete_count(module_state)
-        total = max(len(get_all_module_ids()), 1)
+        total = max(getattr(self, "_run_scope_total", 0), 1)
         progress = min(100, int((completed / total) * 100))
         self.progress_bar.setValue(progress)
         suffix = f", {incomplete} incomplete" if incomplete else ""
@@ -2728,7 +3204,7 @@ class MainWindow(QMainWindow):
             self.operation_state_label.setText("Ready")
 
         asset_count = len(self.current_assets.get("nodes", [])) if isinstance(self.current_assets, dict) else 0
-        edge_count = len(self.current_assets.get("edges", [])) if isinstance(self.current_assets, dict) else 0
+        edge_count = count_relations(self.current_assets) if isinstance(self.current_assets, dict) else 0
         evidence_count = len(self.current_evidence.get("items", [])) if isinstance(self.current_evidence, dict) else 0
         self.exposure_label.setText(
             f"Exposure map: {asset_count} assets / {edge_count} relations / {evidence_count} evidence items"
@@ -2764,6 +3240,7 @@ class MainWindow(QMainWindow):
 
     def _apply_finding_filter(self, *_args):
         """Reduce the findings table to the rows matching the filter bar."""
+        self._refresh_nav_badges()
         search = self.finding_search.text().strip().lower()
         severity = self.finding_severity_combo.currentText()
         confidence = self.finding_confidence_combo.currentText()
@@ -2796,13 +3273,19 @@ class MainWindow(QMainWindow):
                     str(finding.get("id", "")),
                     str(finding.get("title", "")),
                     str(finding.get("category", "")),
+                    str(finding.get("module_id", "")),
                     str(finding.get("description", "")),
                 ]).lower()
                 if search not in haystack:
                     continue
             selected.append(finding)
         self._filtered_findings = selected
+        self._update_severity_chips()
         self._populate_findings(selected)
+        # Keep the graph's finding annotations in sync with the triage
+        # filter, but only re-render while the graph is on screen.
+        if self.screen_stack.currentIndex() == self.SCREEN_GRAPH_INDEX:
+            self.refresh_graph()
 
     def _finding_sort_key(self, column: int):
         def key(finding: dict):
@@ -2949,7 +3432,8 @@ class MainWindow(QMainWindow):
             f"Category: {finding.get('category', '-')}   "
             f"Verified: {'yes' if finding.get('verified') else 'no'}",
             f"CWE: {', '.join(finding.get('cwe') or []) or '-'}   "
-            f"OWASP: {finding.get('owasp') or '-'}",            f"Triage: {VERDICT_LABELS.get(verdict, verdict) or 'untriaged'}"
+            f"OWASP: {finding.get('owasp') or '-'}",
+            f"Triage: {VERDICT_LABELS.get(verdict, verdict) or 'untriaged'}"
             + (f"   Note: {note}" if note else ""),
             "",
             str(finding.get("description") or "").strip(),
@@ -3078,18 +3562,35 @@ class MainWindow(QMainWindow):
     def _open_finding_evidence(self, finding: dict):
         refs = {str(ref) for ref in (finding.get("evidence_refs") or [])}
         target_dir = self.output_dir / self._target_output_name()
+        resolvable = []
         for item in self.current_evidence.get("items", []):
             if str(item.get("id", "")) not in refs:
                 continue
             path = target_dir / str(item.get("path", ""))
             if path.exists():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
-                return
-        QMessageBox.information(
-            self, "No Evidence File",
-            "This finding has no evidence file on disk (only inline text or refs "
-            "that no longer resolve).",
+                resolvable.append((str(item.get("id", "")), path))
+        if not resolvable:
+            QMessageBox.information(
+                self, "No Evidence File",
+                "This finding has no evidence file on disk (only inline text or refs "
+                "that no longer resolve).",
+            )
+            return
+        if len(resolvable) == 1:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolvable[0][1])))
+            return
+        # Several files back this finding: pick instead of silently
+        # opening whichever came first in state order.
+        labels = [f"{eid}  ({path.name})" for eid, path in resolvable]
+        choice, accepted = QInputDialog.getItem(
+            self, "Open Evidence",
+            f"{len(resolvable)} evidence files back this finding:",
+            labels, 0, False,
         )
+        if not accepted:
+            return
+        index = labels.index(choice)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolvable[index][1])))
 
     def _triage_path(self) -> Path:
         target = self._target_output_name()
@@ -3103,7 +3604,12 @@ class MainWindow(QMainWindow):
         path = self._triage_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(self._triage, indent=2, sort_keys=True))
+            # Atomic: truncate-then-write left a window where a reload
+            # could read a half-written file and treat it as empty,
+            # silently dropping every verdict.
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(self._triage, indent=2, sort_keys=True))
+            os.replace(tmp, path)
         except OSError as exc:
             QMessageBox.warning(self, "Save Failed", str(exc))
 
@@ -3212,6 +3718,12 @@ class MainWindow(QMainWindow):
     def _load_evidence(self, items: list[dict]):
         self.evidence_table.setSortingEnabled(False)
         self.evidence_table.setRowCount(len(items))
+        # Reverse evidence_refs so each evidence row shows which findings
+        # cite it — without this the evidence table was a dead end.
+        cited_by: dict[str, list[str]] = {}
+        for finding in self.current_findings:
+            for ref in finding.get("evidence_refs") or []:
+                cited_by.setdefault(str(ref), []).append(str(finding.get("id", "")))
         for row, item in enumerate(items):
             values = [
                 item.get("id", ""),
@@ -3219,6 +3731,7 @@ class MainWindow(QMainWindow):
                 item.get("type", ""),
                 str(item.get("subject", "")),
                 item.get("path", ""),
+                ", ".join(cited_by.get(str(item.get("id", "")), [])),
             ]
             for col, value in enumerate(values):
                 self.evidence_table.setItem(row, col, QTableWidgetItem(value))
@@ -3229,13 +3742,17 @@ class MainWindow(QMainWindow):
         target = self._target_output_name()
         submission_dir = self.output_dir / target / "submissions"
         files = sorted(submission_dir.glob("*.md")) if submission_dir.exists() else []
+        # INDEX.md is an operator bookkeeping file, not a submission.
+        files = [p for p in files if p.name != "INDEX.md"]
         self.submissions_table.setSortingEnabled(False)
         self.submissions_table.setRowCount(len(files))
         for row, path in enumerate(files):
-            values = [path.name, str(path.stat().st_size), str(path)]
+            # Submission files are named <finding_id>_<slug>.md (bounty_submission).
+            finding_id = path.name.split("_", 1)[0] if path.name.startswith("FINDING-") else ""
+            values = [path.name, finding_id, str(path.stat().st_size), str(path)]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if col == 1:
+                if col == 2:
                     item.setData(Qt.UserRole, path.stat().st_size)
                 self.submissions_table.setItem(row, col, item)
         self.submissions_table.setSortingEnabled(True)
@@ -3962,7 +4479,7 @@ class MainWindow(QMainWindow):
             self._refresh_key_status()
             self._refresh_tools_status()
             self._update_operation_context()
-            self.status_label.setText("Settings saved")
+            self._set_status("ok", "Settings saved")
 
     def _refresh_identities_table(self):
         if not hasattr(self, "identities_table"):
@@ -4089,7 +4606,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Save Failed", str(exc))
             return
         self._load_settings_form()
-        self.status_label.setText("Raw config applied")
+        self._set_status("ok", "Raw config applied")
 
     def _write_config(self, config: dict) -> bool:
         try:
@@ -4211,7 +4728,7 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _open_submission_cell(self, row: int, _col: int):
-        item = self.submissions_table.item(row, 2)
+        item = self.submissions_table.item(row, 3)
         if item and Path(item.text()).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(item.text()))
 
@@ -4223,7 +4740,9 @@ class MainWindow(QMainWindow):
             assets,
             aggregate=self.graph_aggregate_check.isChecked(),
             aggregate_threshold=10,
-            findings=self.current_findings,
+            # Annotate from the filtered set so the graph's "what hurts
+            # here" markers match what the triage table is showing.
+            findings=self._filtered_findings,
         )
         nodes = graph["nodes"]
         edges = graph["edges"]
@@ -4253,8 +4772,8 @@ class MainWindow(QMainWindow):
         render_key = (
             len(nodes),
             len(edges),
-            str(nodes[0].get("id", "")) if nodes else "",
-            str(nodes[-1].get("id", "")) if nodes else "",
+            str(nodes[0].get("key", "")) if nodes else "",
+            str(nodes[-1].get("key", "")) if nodes else "",
             self.graph_labels_check.isChecked(),
             self.graph_edges_check.isChecked(),
             self.graph_aggregate_check.isChecked(),
@@ -4351,11 +4870,20 @@ class MainWindow(QMainWindow):
         )
 
     def _read_json(self, path: Path, default):
+        """Read JSON, recording corrupt files so load_results can warn.
+
+        A missing file is normal (first run for this target); a file that
+        exists but fails to parse is not. That used to silently return the
+        default, which zeroed tables and metrics with no explanation.
+        """
         if not path.exists():
             return default
         try:
             return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as exc:
+            errors = getattr(self, "_read_errors", None)
+            if errors is not None:
+                errors.append(path.name)
             return default
 
     def _read_config(self) -> dict:
@@ -4432,6 +4960,20 @@ class MainWindow(QMainWindow):
     def install_missing_tools(self):
         if self.process and self.process.state() != QProcess.NotRunning:
             self.statusBar().showMessage("Already running — wait for the current process", 3000)
+            return
+        # Under the docker backend the tools ship inside the image; running
+        # the host installer would waste minutes installing binaries nothing
+        # will call. Point at the image build instead.
+        backend = getattr(self, "_tools_backend_mode", None) or configure_tool_backend(self._read_config())
+        if backend == "docker":
+            QMessageBox.information(
+                self,
+                "Docker Backend Active",
+                "Tools run inside the osint-tools image under the docker "
+                "backend, so there is nothing to install on this host.\n\n"
+                "If tools show as missing, build (or rebuild) the image:\n\n"
+                "docker build -f docker/Dockerfile.tools -t osint-tools:latest .",
+            )
             return
         # `--install-tools` still demands -t because the parser marks it
         # required; the target is irrelevant to the install itself.

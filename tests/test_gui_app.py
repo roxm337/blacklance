@@ -42,6 +42,7 @@ def test_gui_loads_advanced_state_tabs(tmp_path):
     submission_dir = state.output_dir / "submissions"
     submission_dir.mkdir()
     (submission_dir / "INDEX.md").write_text("# Index")
+    (submission_dir / "FINDING-0001_open-redirect.md").write_text("# Report")
     (state.output_dir / "example.com_summary.json").write_text(
         '{"risk":{"max_score":80,"critical_high":1}}'
     )
