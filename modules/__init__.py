@@ -57,6 +57,7 @@ from .cors_audit import CORSAudit
 from .open_redirect import OpenRedirectScan
 from .http_smuggling import HTTPSmuggling
 from .cms_deep_scan import CMSDeepScan
+from .tech_playbook import TechPlaybook
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -217,6 +218,13 @@ MODULE_REGISTRY = {
     },
     "misconfig_probes": {
         "class": MisconfigProbes,
+        "stage": 4,
+        "detectability": "low",
+        "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "tech_playbook": {
+        "class": TechPlaybook,
         "stage": 4,
         "detectability": "low",
         "depends_on": ["tech_detection"],
