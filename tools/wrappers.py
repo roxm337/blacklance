@@ -831,11 +831,19 @@ async def epss_score(cves: list[str]) -> dict:
     return scores
 
 
-async def osv_query(package: str, ecosystem: str = "") -> dict:
-    """Query OSV for package vulnerabilities."""
+async def osv_query(package: str, ecosystem: str = "", version: str = "") -> dict:
+    """Query OSV for package vulnerabilities.
+
+    When `version` is given, OSV returns only the vulnerabilities whose
+    affected ranges include that version — precise, authoritative
+    version-range matching for free, instead of every vuln the package ever
+    had. Without it, all package vulns come back (the old behaviour).
+    """
     payload = {"package": {"name": package}}
     if ecosystem:
         payload["package"]["ecosystem"] = ecosystem
+    if version:
+        payload["version"] = str(version)
     data = await curl_json(
         "https://api.osv.dev/v1/query",
         method="POST",

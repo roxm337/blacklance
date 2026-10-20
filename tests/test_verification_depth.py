@@ -485,7 +485,7 @@ def test_kev_exact_without_version_is_high_not_critical():
                  "name": "Test RCE", "match_strength": "exact",
                  "matched_term": "wordpress"}]
 
-    async def fake_nvd(term):
+    async def fake_nvd(term, results_per_page=5):
         return []
 
     with patch.object(el, "check_cisa_kev", new=fake_kev), \
@@ -514,7 +514,7 @@ def test_kev_exact_with_version_is_critical():
                  "name": "Test RCE", "match_strength": "exact",
                  "matched_term": "wordpress"}]
 
-    async def fake_nvd(term):
+    async def fake_nvd(term, results_per_page=5):
         return []
 
     with patch.object(el, "check_cisa_kev", new=fake_kev), \
@@ -540,7 +540,7 @@ def test_kev_adjacent_and_nvd_are_medium_leads():
                  "name": "Test bug", "match_strength": "substring",
                  "matched_term": "word"}]
 
-    async def fake_nvd(term):
+    async def fake_nvd(term, results_per_page=5):
         return [{"id": "CVE-2024-0003", "cvss_score": 9.8,
                  "description": "x" * 120}]
 

@@ -230,12 +230,21 @@ class TechDetection(BaseModule):
                 tech["wordpress_version"] = wp_match.group(1)
                 tech["cms"] = f"WordPress {wp_match.group(1)}"
 
-            # Check plugins
+            # Check plugins, and capture each plugin's version from the
+            # readme "Stable tag:" line. The version is what makes a plugin
+            # CVE confirmable instead of a name-only lead — WordPress plugins
+            # (LayerSlider, Slider Revolution, …) are a prime CVE surface, and
+            # their slug+version maps straight to NVD/WPScan CPE ranges.
             plugins = self.config.get("wordlists", {}).get("wp_plugins", [])
+            product_versions = tech.setdefault("product_versions", {})
             for plugin in plugins[:30]:
                 r = await curl(f"{base_url}/wp-content/plugins/{plugin}/readme.txt")
                 if r.get("status") == 200:
                     tech["plugins"].append(plugin)
+                    tag = re.search(r"(?im)^\s*stable\s+tag:\s*([0-9][0-9.]*)",
+                                    r.get("body", "") or "")
+                    if tag:
+                        product_versions[plugin] = tag.group(1)
 
             # Theme detection from body
             theme_match = re.search(r'/wp-content/themes/([^/"\']+)', body)
