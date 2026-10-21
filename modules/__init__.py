@@ -64,6 +64,8 @@ from .account_takeover import AccountTakeover
 from .path_traversal import PathTraversal
 from .xxe_scan import XXEScan
 from .crlf_audit import CRLFAudit
+from .auth_bypass import AuthBypass
+from .bfla_audit import BFLAAudit
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -276,6 +278,20 @@ MODULE_REGISTRY = {
         "stage": 5,
         "detectability": "medium",
         "depends_on": ["parameter_discovery"],
+        "active": True,
+    },
+    "bfla_audit": {
+        "class": BFLAAudit,
+        "stage": 4,
+        "detectability": "low",
+        "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "auth_bypass": {
+        "class": AuthBypass,
+        "stage": 5,
+        "detectability": "high",
+        "depends_on": ["tech_detection"],
         "active": True,
     },
     "fast_exposure_scan": {
