@@ -158,6 +158,52 @@ def test_docker_ready_falls_back_to_qualified_reference(monkeypatch):
     assert "docker.io/library/osint-tools:latest" in seen
 
 
+def test_configure_backend_keeps_docker_cache_across_identical_calls(monkeypatch):
+    """configure_tool_backend runs once per BaseModule.__init__; identical
+    config must not re-probe docker each time (that flakiness made present
+    tools report 'not installed' mid-run). The probe caches until the backend
+    actually changes."""
+    import subprocess as _subprocess
+    import tools.external as external
+
+    probes = {"n": 0}
+
+    class _Proc:
+        returncode = 0
+        stdout = "imageid"
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["docker", "image", "inspect"]:
+            probes["n"] += 1
+        return _Proc()
+
+    cfg = {"tools": {"backend": "docker", "image": "osint-tools:latest"}}
+    try:
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+        external.configure_tool_backend(cfg)       # local -> docker: resets cache
+        assert external.tool_available("nuclei")   # first real probe
+        for _ in range(57):                         # 57 module inits
+            external.configure_tool_backend(cfg)
+            assert external.tool_available("nuclei")
+        assert probes["n"] == 1                     # inspected once, not 58 times
+    finally:
+        external._DOCKER_OK = None
+        external.configure_tool_backend({})
+
+
+def test_configure_backend_resets_cache_when_backend_changes():
+    import tools.external as external
+    try:
+        external.configure_tool_backend(
+            {"tools": {"backend": "docker"}})
+        external._DOCKER_OK = True
+        external.configure_tool_backend({"tools": {"backend": "local"}})
+        assert external._DOCKER_OK is None          # real change invalidates
+    finally:
+        external._DOCKER_OK = None
+        external.configure_tool_backend({})
+
+
 def test_parse_dalfox_jsonl():
     results = parse_dalfox_jsonl(
         '{"type":"v","data":"https://example.com/?q=x","payload":"<x>"}\n'

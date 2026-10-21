@@ -107,13 +107,22 @@ def configure_tool_backend(config: dict | None = None) -> str:
         cpus = str(max(0.1, min(64.0, float(cpus))))
     except ValueError:
         cpus = "2"
-    _BACKEND["mode"] = mode if mode in ("local", "docker") else "local"
-    _BACKEND["image"] = image or "osint-tools:latest"
+    resolved_mode = mode if mode in ("local", "docker") else "local"
+    resolved_image = image or "osint-tools:latest"
+    # Only invalidate the docker-readiness probe when the backend actually
+    # changes. This function is called from every BaseModule.__init__ (once
+    # per module), and resetting the cache each time re-ran `docker image
+    # inspect` 57 times a run — any one slow or transient failure cached
+    # "unreachable", so a docker tool that preflight proved present reported
+    # "not installed" for the rest of the run. Stable config → one probe.
+    if resolved_mode != _BACKEND["mode"] or resolved_image != _BACKEND["image"]:
+        _DOCKER_OK = None
+    _BACKEND["mode"] = resolved_mode
+    _BACKEND["image"] = resolved_image
     _BACKEND["network"] = network
     _BACKEND["memory"] = memory
     _BACKEND["cpus"] = cpus
     _BACKEND["pids_limit"] = pids_limit
-    _DOCKER_OK = None
     return _BACKEND["mode"]
 
 
