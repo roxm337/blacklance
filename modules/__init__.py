@@ -68,6 +68,8 @@ from .auth_bypass import AuthBypass
 from .bfla_audit import BFLAAudit
 from .file_access_bypass import FileAccessBypass
 from .metrics_exposure import MetricsExposure
+from .jwt_audit import JWTAudit
+from .csrf_audit import CSRFAudit
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -305,6 +307,20 @@ MODULE_REGISTRY = {
     },
     "metrics_exposure": {
         "class": MetricsExposure,
+        "stage": 4,
+        "detectability": "low",
+        "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "jwt_audit": {
+        "class": JWTAudit,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "csrf_audit": {
+        "class": CSRFAudit,
         "stage": 4,
         "detectability": "low",
         "depends_on": ["tech_detection"],
