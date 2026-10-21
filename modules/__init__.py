@@ -66,6 +66,8 @@ from .xxe_scan import XXEScan
 from .crlf_audit import CRLFAudit
 from .auth_bypass import AuthBypass
 from .bfla_audit import BFLAAudit
+from .file_access_bypass import FileAccessBypass
+from .metrics_exposure import MetricsExposure
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -293,6 +295,20 @@ MODULE_REGISTRY = {
         "detectability": "high",
         "depends_on": ["tech_detection"],
         "active": True,
+    },
+    "file_access_bypass": {
+        "class": FileAccessBypass,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "metrics_exposure": {
+        "class": MetricsExposure,
+        "stage": 4,
+        "detectability": "low",
+        "depends_on": ["tech_detection"],
+        "active": False,
     },
     "fast_exposure_scan": {
         "class": FastExposureScan,
