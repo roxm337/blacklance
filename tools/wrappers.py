@@ -12,7 +12,7 @@ import os
 from typing import Any, Optional
 from urllib.parse import quote, urlencode
 
-from core.deadline import deadline_reached
+from core.deadline import clamp_timeout, deadline_reached
 from tools import http_engine as _http_engine_mod
 from tools.http_engine import HttpEngine
 from tools.external import (consume_tool_budget, docker_wrap_shell,
@@ -268,6 +268,7 @@ async def bash(command: str, timeout: int = 120) -> dict:
     if deadline_reached():
         return {"stdout": "", "stderr": "", "exit_code": -1,
                 "error": "deadline_exceeded"}
+    timeout = clamp_timeout(timeout)
     consume_tool_budget()
     command = docker_wrap_shell(command)
     try:
@@ -443,6 +444,7 @@ async def curl(url: str, method: str = "GET",
     if deadline_reached():
         return {"status": 0, "body": "", "error": "deadline_exceeded",
                 "time_ms": 0, "url": url, "history": []}
+    timeout = clamp_timeout(timeout)
 
     # Reserve before either the aiohttp or subprocess transport is selected;
     # otherwise HTTP/1.0 and fallback requests would bypass the same cap.

@@ -80,29 +80,83 @@ def _preview(value) -> str:
     return (text[:12] + "…" + text[-4:]) if len(text) > 24 else text
 
 
-def parse_next_data(html: str) -> dict:
-    """Parse the `__NEXT_DATA__` blob embedded in a Next.js page.
+def extract_next_build_id(html: str) -> str:
+    """The Next.js buildId from a page, for both routers.
 
-    Returns {found, build_id, page, routes_hint, leaked:[...]}. `leaked` is the
-    sensitive-key/secret scan over the whole blob (pageProps is the usual
-    offender). `build_id` is the key to the /_next/data/<buildId>/ SSR-data
-    endpoints.
+    Appears in static asset URLs (`/_next/static/<buildId>/_buildManifest.js`)
+    and, on the pages router, as a `buildId` field. The buildId keys the
+    /_next/data/ and build-manifest endpoints.
     """
     m = re.search(
-        r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-        html or "", re.S | re.I)
-    if not m:
-        return {"found": False}
+        r"/_next/static/([A-Za-z0-9_-]{6,})/(?:_buildManifest|_ssgManifest|_app|chunks)",
+        html or "")
+    if m:
+        return m.group(1)
+    m = re.search(r'"buildId"\s*:\s*"([^"]+)"', html or "")
+    return m.group(1) if m else ""
+
+
+def _rsc_flight_payloads(html: str) -> list:
+    """Decode the strings pushed into the App Router's RSC flight stream.
+
+    App Router (Next 13+) streams server→client data as
+    `self.__next_f.push([1,"<escaped json>"])` instead of a single
+    __NEXT_DATA__ blob. Each push carries a JSON-string chunk; decoding it is
+    how server-component props (the App Router equivalent of the pageProps
+    leak) become visible.
+    """
+    payloads = []
+    for m in re.finditer(r'self\.__next_f\.push\(\[\d+\s*,\s*("(?:[^"\\]|\\.)*")',
+                         html or ""):
+        try:
+            payloads.append(json.loads(m.group(1)))
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return payloads
+
+
+def _maybe_json(text):
+    """Return the decoded object if `text` is JSON, else the raw string."""
     try:
-        data = json.loads(m.group(1).strip())
-    except (json.JSONDecodeError, ValueError):
-        return {"found": True, "parse_error": True}
-    return {
-        "found": True,
-        "build_id": data.get("buildId", ""),
-        "page": data.get("page", ""),
-        "leaked": scan_sensitive_json(data.get("props", {})),
-    }
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return text
+
+
+def parse_next_data(html: str) -> dict:
+    """Parse a Next.js page's data bridge — pages *and* App Router.
+
+    Returns {found, router, build_id, page, leaked:[...]}. `leaked` is the
+    sensitive-key/secret scan over the server→client data: `props.pageProps`
+    on the pages router, the RSC flight stream on the App Router.
+    """
+    html = html or ""
+    # Pages router: single __NEXT_DATA__ JSON blob.
+    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                  html, re.S | re.I)
+    if m:
+        try:
+            data = json.loads(m.group(1).strip())
+        except (json.JSONDecodeError, ValueError):
+            return {"found": True, "router": "pages", "parse_error": True}
+        return {
+            "found": True, "router": "pages",
+            "build_id": data.get("buildId", "") or extract_next_build_id(html),
+            "page": data.get("page", ""),
+            "leaked": scan_sensitive_json(data.get("props", {})),
+        }
+
+    # App Router: RSC flight stream, or at least Next static assets present.
+    if "self.__next_f" in html or "/_next/static/" in html:
+        leaked = []
+        for payload in _rsc_flight_payloads(html):
+            leaked.extend(scan_sensitive_json(_maybe_json(payload)))
+        return {
+            "found": True, "router": "app",
+            "build_id": extract_next_build_id(html),
+            "page": "/", "leaked": leaked[:40],
+        }
+    return {"found": False}
 
 
 def extract_next_routes(build_manifest_js: str) -> list:

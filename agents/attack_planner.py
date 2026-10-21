@@ -71,7 +71,10 @@ class AttackPlanner:
                 {"role": "user", "content": prompt},
             ],
             "temperature": self.llm.get("temperature", 0.1),
-            "max_tokens": max(int(self.llm.get("max_tokens", 2000)), 1600),
+            # Plans are long; a low cap truncates the JSON and loses the whole
+            # LLM plan to the fallback. Floor at 4000 (recovery handles the
+            # rest if a model still cuts off).
+            "max_tokens": max(int(self.llm.get("max_tokens", 4000)), 4000),
         }
         if self.llm.get("api_key"):
             kwargs["api_key"] = self.llm["api_key"]

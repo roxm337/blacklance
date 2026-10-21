@@ -13,6 +13,16 @@ def test_json_parser_decodes_one_object_without_greedy_trailing_content():
     assert parsed == {"focus": "safe"}
 
 
+def test_json_parser_recovers_truncated_llm_output():
+    # A plan cut off mid-string (hit the token cap) still yields the
+    # hypotheses that arrived instead of being lost to the fallback.
+    truncated = ('{"hypotheses":[{"title":"SQLi on id","category":"sql"},'
+                 '{"title":"XSS on sea')
+    parsed = parse_json_object(truncated)
+    assert parsed["hypotheses"][0]["title"] == "SQLi on id"
+    assert len(parsed["hypotheses"]) == 2
+
+
 def test_supervisor_plan_bounds_types_scores_actions_and_modules():
     plan = validate_supervisor_plan({
         "focus": ["wrong type"],

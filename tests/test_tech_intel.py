@@ -42,6 +42,24 @@ def test_parse_next_data_absent():
     assert parse_next_data("<html>no next here</html>") == {"found": False}
 
 
+def test_parse_next_data_app_router_rsc_flight():
+    # App Router streams server data via self.__next_f.push, not __NEXT_DATA__.
+    html = (
+        '<html><script src="/_next/static/Ab12Cd34/_buildManifest.js"></script>'
+        r'<script>self.__next_f.push([1,"{\"user\":{\"access_token\":\"livesecret12345\"}}"])</script>'
+        '</html>')
+    nd = parse_next_data(html)
+    assert nd["found"] and nd["router"] == "app"
+    assert nd["build_id"] == "Ab12Cd34"
+    assert any("access_token" in h["path"] for h in nd["leaked"])
+
+
+def test_extract_next_build_id_from_chunks():
+    from core.tech_intel import extract_next_build_id
+    assert extract_next_build_id(
+        '<script src="/_next/static/XyZ999/chunks/main.js">') == "XyZ999"
+
+
 def test_extract_next_routes_skips_assets():
     js = '{"/":["a.js"],"/blog/[slug]":["b.js"],"/x.css":[],"/dashboard":["c.js"]}'
     routes = extract_next_routes(js)

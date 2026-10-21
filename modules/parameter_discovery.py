@@ -267,13 +267,28 @@ class ParameterDiscovery(BaseModule):
                         "status": result.get("status", 0)}
             return None
 
+        # Control name: one no real app routes. If the marker still reflects
+        # under it, the page echoes the whole query string back (SPA
+        # client-side hydration, debug echo), so every "reflection" on that
+        # page is noise — not an injectable backend parameter. This is what
+        # kept feeding q/s/search… as fake params on Next.js/React SPAs and
+        # made the pentest burn 180s per param on SQLi that never applied.
+        import uuid as _uuid
+        control = "zq" + _uuid.uuid4().hex[:8]
+        probe_names = list(names) + [control]
         probed = await asyncio.gather(
-            *(probe(page, name) for page in pages for name in names),
+            *(probe(page, name) for page in pages for name in probe_names),
             return_exceptions=True,
         )
-        seeded = [p for p in probed if isinstance(p, dict)]
+        results = [p for p in probed if isinstance(p, dict)]
+        echo_pages = {p["url"] for p in results if p["parameter"] == control}
+        seeded = [p for p in results
+                  if p["parameter"] != control and p["url"] not in echo_pages]
+        if echo_pages:
+            self.log(f"  {len(echo_pages)} page(s) echo arbitrary query params "
+                     f"(client-side hydration) — reflection seeds dropped as noise")
         self.log(f"  Reflection seeding: {len(seeded)} reflecting "
-                 f"(page, param) pairs from {len(pages) * len(names)} probes")
+                 f"(page, param) pairs from {len(pages) * len(probe_names)} probes")
         if seeded:
             self.state.add_evidence(
                 self.id,

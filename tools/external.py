@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 from typing import List, Optional
 
+from core.deadline import clamp_timeout as _clamp_timeout
 from core.deadline import deadline_reached as _deadline_reached
 from core.validators import redact_for_log
 
@@ -290,6 +291,7 @@ async def run_command(args: List[str], timeout: int = 120,
     if _deadline_reached():
         return {"stdout": "", "stderr": "", "exit_code": -1,
                 "error": "deadline_exceeded"}
+    timeout = _clamp_timeout(timeout)
     consume_tool_budget()
     if _docker_wants(args):
         args = docker_run_args(args, stdin=bool(stdin_data))

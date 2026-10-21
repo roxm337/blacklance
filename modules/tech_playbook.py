@@ -184,14 +184,19 @@ class TechPlaybook(BaseModule):
         if not nd.get("found"):
             return
         build_id = nd.get("build_id", "")
+        router = nd.get("router", "?")
+        self.log(f"  [nextjs] {router} router, buildId={build_id or 'unknown'}, "
+                 f"{len(nd.get('leaked') or [])} leaked field(s)")
         if nd.get("leaked"):
+            source = ("__NEXT_DATA__ props" if router == "pages"
+                      else "RSC flight stream")
             self.state.add_finding(
-                title="Next.js __NEXT_DATA__ leaks sensitive data",
+                title=f"Next.js server data leak ({router} router)",
                 severity="HIGH", confidence="FIRM",
                 category="Information Disclosure",
-                description="[Next.js] The server→client data blob embedded in "
-                            "the page carries sensitive fields in its SSR props "
-                            "— exposed to any visitor viewing source.",
+                description=f"[Next.js] The server→client {source} carries "
+                            f"sensitive fields exposed to any visitor viewing "
+                            f"source.",
                 evidence=[f"{item['kind']} at {item['path']}: {item['preview']}"
                           for item in nd["leaked"][:12]],
                 remediation="Never pass secrets/tokens through getServerSideProps "

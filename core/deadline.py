@@ -47,3 +47,25 @@ def deadline_remaining() -> float:
 def deadline_reached() -> bool:
     """Has the current module's I/O budget run out?"""
     return _deadline is not None and time.monotonic() >= _deadline
+
+
+def clamp_timeout(requested: float) -> float:
+    """Cap a request/subprocess timeout at the time left before the deadline.
+
+    Short-circuiting only new calls is not enough: a 120s tool subprocess or a
+    45s HTTP request *launched* just before the deadline runs its own full
+    timeout straight through the orchestrator's hard kill, which is exactly how
+    cors/open-redirect/subdomain modules still hit 300s. Clamping means an
+    in-flight call cannot outlive the module it belongs to — it is cut to
+    whatever time remains, so the loop regains control and flushes.
+    """
+    try:
+        requested = float(requested)
+    except (TypeError, ValueError):
+        return requested
+    if _deadline is None:
+        return requested
+    remaining = _deadline - time.monotonic()
+    if remaining <= 0:
+        return requested  # deadline_reached() handles this; don't pass <=0 on
+    return min(requested, remaining)

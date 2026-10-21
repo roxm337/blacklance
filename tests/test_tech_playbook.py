@@ -131,7 +131,7 @@ def test_nextjs_analyzer_leak_and_routes(monkeypatch):
     asyncio.run(m.run())
 
     titles = [f["title"] for f in st.findings["findings"]]
-    assert "Next.js __NEXT_DATA__ leaks sensitive data" in titles
+    assert "Next.js server data leak (pages router)" in titles
     # Routes from the build manifest became url assets.
     urls = [a["value"] for a in st.get_assets_by_type("url")]
     assert "https://example.com/admin" in urls

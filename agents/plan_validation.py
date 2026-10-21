@@ -12,16 +12,61 @@ _ROLES = {"recon", "vuln_analyst", "exploitation", "verification"}
 
 
 def parse_json_object(text: str) -> dict:
-    """Decode the first complete JSON object without greedy brace matching."""
+    """Decode the first complete JSON object without greedy brace matching.
+
+    LLMs that hit their token cap return JSON cut off mid-string or mid-array
+    — `raw_decode` then raises and the whole plan is lost to the fallback.
+    When the clean decode fails, recover the largest valid object by closing
+    the open string and brackets, so a truncated plan still yields the
+    hypotheses that did arrive rather than nothing.
+    """
     if not isinstance(text, str):
         raise ValueError("planner response was not text")
     start = text.find("{")
     if start < 0:
         raise ValueError("planner response contained no JSON object")
-    value, _end = json.JSONDecoder().raw_decode(text[start:])
+    body = text[start:]
+    try:
+        value, _end = json.JSONDecoder().raw_decode(body)
+    except json.JSONDecodeError:
+        value = _recover_truncated_json(body)
     if not isinstance(value, dict):
         raise ValueError("planner response was not a JSON object")
     return value
+
+
+def _recover_truncated_json(body: str) -> Any:
+    """Best-effort decode of a truncated JSON object: close the dangling
+    string and any open brackets, drop a trailing comma, and parse."""
+    stack = []
+    in_str = False
+    escaped = False
+    for ch in body:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+    repaired = body
+    if in_str:
+        repaired += '"'
+    repaired = repaired.rstrip()
+    if repaired.endswith(","):
+        repaired = repaired[:-1]
+    repaired += "".join(reversed(stack))
+    return json.loads(repaired)
 
 
 def _text(value: Any, *, limit: int, default: str = "") -> str:
