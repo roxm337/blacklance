@@ -60,6 +60,8 @@ from .cms_deep_scan import CMSDeepScan
 from .tech_playbook import TechPlaybook
 from .oauth_audit import OAuthAudit
 from .cache_audit import CacheAudit
+from .account_takeover import AccountTakeover
+from .path_traversal import PathTraversal
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -245,6 +247,20 @@ MODULE_REGISTRY = {
         "detectability": "low",
         "depends_on": ["tech_detection"],
         "active": False,
+    },
+    "account_takeover": {
+        "class": AccountTakeover,
+        "stage": 5,
+        "detectability": "high",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "path_traversal": {
+        "class": PathTraversal,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["parameter_discovery"],
+        "active": True,
     },
     "fast_exposure_scan": {
         "class": FastExposureScan,
