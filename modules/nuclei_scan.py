@@ -50,6 +50,13 @@ TECH_TAG_MAP = {
     "IIS": ["iis"],
     "PHP": ["php"],
     "Laravel": ["laravel"],
+    "Next.js": ["nextjs"],
+    "Django": ["django"],
+    "Rails": ["rails", "ruby"],
+    "Express": ["nodejs", "express"],
+    "ASP.NET": ["aspnet", "iis"],
+    "Angular": ["angular"],
+    "Vue.js": ["vuejs"],
 }
 
 
@@ -85,6 +92,12 @@ class NucleiScan(BaseModule):
             for tech_name in [cms, server, framework] + vendor_products:
                 if tech_name:
                     detected_tech.add(str(tech_name).split(" ")[0])
+        # The tech playbook fingerprints stacks precisely (Next.js, Django,
+        # Rails, Spring Boot…) — use its labels so nuclei runs the right
+        # templates even when the coarse webapp attrs missed the framework.
+        for stack in self.state.get_assets_by_type("tech_stack"):
+            for label in (stack.get("attrs", {}) or {}).get("labels", []) or []:
+                detected_tech.add(str(label))
 
         # Build tag list. Do not add the broad "cve" tag to first-pass scans;
         # it creates a very large template run. Use detected tech tags first.
