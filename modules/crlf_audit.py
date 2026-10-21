@@ -18,8 +18,11 @@ import uuid
 from modules.base import BaseModule
 from tools.wrappers import curl
 
-# CR/LF in the encodings servers decode but filters miss.
-_CRLF_SEQS = ("%0d%0a", "%0D%0A", "%0a", "%E5%98%8D%E5%98%8A", "\r\n")
+# CR/LF in the encodings servers decode but filters miss. A raw "\r\n" in the
+# query makes a malformed URL the client rejects before it ever reaches the
+# server, so only the encoded forms — which actually test the server's own
+# decoding — are used.
+_CRLF_SEQS = ("%0d%0a", "%0D%0A", "%0a", "%E5%98%8D%E5%98%8A")
 # Parameters most likely to reach a response header.
 _HEADER_PARAMS = (
     "url", "redirect", "redirect_uri", "redirect_url", "next", "return",
