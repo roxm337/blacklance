@@ -58,6 +58,8 @@ from .open_redirect import OpenRedirectScan
 from .http_smuggling import HTTPSmuggling
 from .cms_deep_scan import CMSDeepScan
 from .tech_playbook import TechPlaybook
+from .oauth_audit import OAuthAudit
+from .cache_audit import CacheAudit
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -225,6 +227,20 @@ MODULE_REGISTRY = {
     },
     "tech_playbook": {
         "class": TechPlaybook,
+        "stage": 4,
+        "detectability": "low",
+        "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "oauth_audit": {
+        "class": OAuthAudit,
+        "stage": 4,
+        "detectability": "low",
+        "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "cache_audit": {
+        "class": CacheAudit,
         "stage": 4,
         "detectability": "low",
         "depends_on": ["tech_detection"],

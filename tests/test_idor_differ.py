@@ -724,10 +724,15 @@ class TestNoFalsePositives:
         assert env.findings() == [], "IDOR requires two accounts"
 
     @served
-    async def test_missing_config_is_skipped_not_crashed(self, env):
+    async def test_missing_config_runs_unauthenticated_lead_probe(self, env):
+        # With no identities configured, the module no longer skips outright:
+        # it falls back to an unauthenticated BOLA lead probe. It must not
+        # crash, and any lead it files is explicitly TENTATIVE (never a
+        # cross-account claim, which still requires two accounts).
         env.config["auth"] = {}
-        assert await env.run_module() == "skipped"
-        assert env.findings() == []
+        assert await env.run_module() in ("done", "skipped")
+        for f in env.findings():
+            assert f["confidence"] == "TENTATIVE"
 
     @served
     async def test_invalid_identity_shape_does_not_crash_the_module(self, env):

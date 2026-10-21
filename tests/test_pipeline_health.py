@@ -71,13 +71,16 @@ def test_no_probe_hint_already_allowed():
 
 
 def test_idor_records_skip_reason_without_identities(tmp_path):
+    # With no identities AND no discovered object endpoints, the unauthenticated
+    # lead probe has nothing to test, so it still skips — now with a reason that
+    # reflects why (no endpoints), not a bare "no identities".
     from modules.idor_differ import IdorDiffer
     state = StateManager(str(tmp_path / "run"))
     module = IdorDiffer(state, {"target": {"domain": "example.com"}})
     assert asyncio.run(module.run()) == "skipped"
     reasons = [s for s in state.module["skipped"]
                if s["module_id"] == "idor_differ"]
-    assert reasons and reasons[-1]["reason"] == "no identities configured"
+    assert reasons and reasons[-1]["reason"] == "no object endpoints to probe"
 
 
 def test_auth_probes_concurrently_first_success_wins(tmp_path):

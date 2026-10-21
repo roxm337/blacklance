@@ -32,6 +32,7 @@ from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 from core.auth_harness import AuthHarness, Identity, fingerprint_body
 from modules.base import BaseModule
+from tools.wrappers import curl_with_status
 
 # Statuses that mean "the server actually enforced authorisation".
 DENIED_STATUSES = {401, 403}
@@ -494,9 +495,9 @@ class IdorDiffer(BaseModule):
         harness = AuthHarness(self.config)
         self._merge_discovered_identities(harness)
         if not harness.identities:
-            self.log("No identities in auth.identities — nothing to compare.")
-            self.state.skip_module(self.id, "no identities configured")
-            return "skipped"
+            self.log("No identities in auth.identities — running "
+                     "unauthenticated BOLA lead probe instead of skipping.")
+            return await self._unauthenticated_leads()
 
         await harness.establish_all(self._base_url())
         usable = harness.usable
@@ -505,6 +506,9 @@ class IdorDiffer(BaseModule):
             self.log(f"  {identity.name}: {marker} — {identity.verification_note}")
 
         if not usable:
+            # Identities were configured but none verified. That is a broken
+            # credential to surface, not a cue to silently guess — aborting
+            # keeps the operator honest about what was actually tested.
             self.log("No session survived verification; refusing to guess.")
             self.state.skip_module(self.id, "no verified sessions")
             return "skipped"
@@ -589,6 +593,78 @@ class IdorDiffer(BaseModule):
         harness.adopt_discovered(self.state, log=self.log)
 
     # ── Phase 1: endpoint discovery ──────────────────────────────
+
+    async def _unauthenticated_leads(self) -> str:
+        """Without two accounts a BOLA cannot be *proven*, but it can be
+        surfaced as a lead: if adjacent object ids return distinct, real
+        objects while a guaranteed-absent id does not, the endpoint is
+        enumerable and worth validating with a second account. A control
+        (absent) id gates out servers that answer 200 to everything.
+        """
+        templates = await self._collect_templates()
+        templates = [t for t in templates if t.kind in ("numeric", "uuid")
+                     and t.id_values]
+        if not templates:
+            self.state.skip_module(self.id, "no object endpoints to probe")
+            return "skipped"
+
+        leads = 0
+        for template in templates[:12]:
+            if self.should_stop(reserve=8):
+                break
+            ref = sorted(template.id_values)[0]
+            sibling = self._sibling_ref(ref, template.kind)
+            absent = _absent_ref(ref)
+            u0, u1, uc = (template.url_for(ref), template.url_for(sibling),
+                          template.url_for(absent))
+            if not (u0 and u1 and uc) or sibling == ref:
+                continue
+            r0 = await curl_with_status(u0, no_session=True)
+            r1 = await curl_with_status(u1, no_session=True)
+            rc = await curl_with_status(uc, no_session=True)
+            b0, b1, bc = (r0.get("body", "") or "", r1.get("body", "") or "",
+                          rc.get("body", "") or "")
+            # Both siblings are real 200 objects, they differ from each other,
+            # and the absent control is NOT a 200 — so the server is not just
+            # echoing one page for every id.
+            if (r0.get("status") == 200 and r1.get("status") == 200
+                    and rc.get("status") != 200
+                    and len(b0) > 50 and len(b1) > 50
+                    and b0 != b1 and b0 != bc):
+                leads += 1
+                self.state.add_finding(
+                    title="Enumerable object references (potential IDOR/BOLA)",
+                    severity="MEDIUM", confidence="TENTATIVE",
+                    category="Broken Access Control",
+                    description="Adjacent object ids return distinct, real "
+                                "objects without authentication while an absent "
+                                "id does not — the reference is enumerable. "
+                                "Confirm cross-account access with two accounts "
+                                "to establish impact.",
+                    evidence=[f"{u0} -> 200 ({len(b0)}B)",
+                              f"{u1} -> 200 ({len(b1)}B, distinct)",
+                              f"absent {uc} -> {rc.get('status')}"],
+                    remediation="Enforce per-object authorization server-side; "
+                                "do not rely on unguessable ids.",
+                    asset_keys=[f"webapp:{self._base_url()}"],
+                    verification={"method": "idor_enumeration_lead"})
+
+        self.state.complete_module(self.id)
+        self.log(f"Unauthenticated BOLA probe: {leads} lead(s) across "
+                 f"{len(templates)} endpoint(s)")
+        return "done"
+
+    @staticmethod
+    def _sibling_ref(ref: str, kind: str) -> str:
+        if kind == "numeric":
+            try:
+                return str(int(ref) - 1 if int(ref) > 1 else int(ref) + 1)
+            except (TypeError, ValueError):
+                return ref
+        if kind == "uuid":
+            import uuid as _uuid
+            return str(_uuid.uuid4())
+        return ref
 
     async def _collect_templates(self) -> list:
         templates: dict[str, ObjectTemplate] = {}
