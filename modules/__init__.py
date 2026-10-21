@@ -62,6 +62,7 @@ from .oauth_audit import OAuthAudit
 from .cache_audit import CacheAudit
 from .account_takeover import AccountTakeover
 from .path_traversal import PathTraversal
+from .xxe_scan import XXEScan
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -260,6 +261,13 @@ MODULE_REGISTRY = {
         "stage": 5,
         "detectability": "medium",
         "depends_on": ["parameter_discovery"],
+        "active": True,
+    },
+    "xxe_scan": {
+        "class": XXEScan,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["tech_detection"],
         "active": True,
     },
     "fast_exposure_scan": {
