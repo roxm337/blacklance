@@ -70,6 +70,7 @@ from .file_access_bypass import FileAccessBypass
 from .metrics_exposure import MetricsExposure
 from .jwt_audit import JWTAudit
 from .csrf_audit import CSRFAudit
+from .stored_xss import StoredXSS
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -325,6 +326,13 @@ MODULE_REGISTRY = {
         "detectability": "low",
         "depends_on": ["tech_detection"],
         "active": False,
+    },
+    "stored_xss": {
+        "class": StoredXSS,
+        "stage": 5,
+        "detectability": "high",
+        "depends_on": ["tech_detection"],
+        "active": True,
     },
     "fast_exposure_scan": {
         "class": FastExposureScan,
