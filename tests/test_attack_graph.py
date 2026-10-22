@@ -124,3 +124,67 @@ def test_save_load_graph():
     assert "edges" in loaded
 
     shutil.rmtree(tmpdir)
+
+
+def test_ssrf_finding_reaches_a_cloud_metadata_goal():
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://test.com/fetch?url=1"
+    state.add_asset("url", f"url:{url}", url, confidence="FIRM")
+    fid = state.add_finding(
+        "SSRF", "HIGH", "FIRM", "SSRF",
+        "Parameter fetches arbitrary URLs", asset_keys=[f"url:{url}"],
+    )
+    graph = AttackGraph(state)
+    graph.build()
+
+    assert "goal:cloud_metadata" in graph.nodes
+    chained = [e for e in graph.edges
+               if e.target_id == "goal:cloud_metadata"]
+    assert len(chained) == 1
+    assert chained[0].action_id == "web.ssrf.cloud_metadata"
+    assert chained[0].attrs["via"] == fid
+
+    chains = graph.find_chains()
+    assert any(n.id == "goal:cloud_metadata"
+               for c in chains for n in c.nodes)
+
+    shutil.rmtree(tmpdir)
+
+
+def test_a_non_ssrf_finding_does_not_invent_a_metadata_chain():
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://test.com/search?q=1"
+    state.add_asset("url", f"url:{url}", url, confidence="FIRM")
+    state.add_finding(
+        "SQLi", "HIGH", "FIRM", "SQL Injection",
+        "Union based", asset_keys=[f"url:{url}"],
+    )
+    graph = AttackGraph(state)
+    graph.build()
+
+    assert "goal:cloud_metadata" not in graph.nodes
+
+    shutil.rmtree(tmpdir)
+
+
+def test_ssrf_finding_without_a_testable_surface_is_not_chained():
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    state.add_asset("domain", "domain:test.com", "test.com",
+                    confidence="CONFIRMED")
+    state.add_finding(
+        "SSRF", "HIGH", "FIRM", "SSRF", "x", asset_keys=["domain:test.com"],
+    )
+    graph = AttackGraph(state)
+    graph.build()
+
+    assert "goal:cloud_metadata" in graph.nodes
+    assert [e for e in graph.edges
+            if e.target_id == "goal:cloud_metadata"] == []
+
+    shutil.rmtree(tmpdir)

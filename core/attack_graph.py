@@ -170,6 +170,56 @@ class AttackGraph:
 
         # Infer transition edges from tech + vuln combinations
         self._infer_transitions()
+        # A finding names the entry leg; these edges name the payoff and the
+        # action that can prove it, so the executor is aimed at what the bug
+        # reaches rather than re-testing the entry point.
+        self._infer_exploitation_goals()
+
+    # Category -> the goal it can reach and the registered action that proves
+    # the second leg. Deliberately narrow: a chain is only proposed when a
+    # proving action exists and the finding points at a surface that action can
+    # be armed against. Everything else stays a claim instead of a chain.
+    EXPLOITATION_GOALS = (
+        ("ssrf", "goal:cloud_metadata", "Cloud metadata credentials",
+         "web.ssrf.cloud_metadata"),
+        ("xxe", "goal:cloud_metadata", "Cloud metadata credentials",
+         "web.ssrf.cloud_metadata"),
+    )
+
+    def _infer_exploitation_goals(self):
+        """Turn a finding into an exploit chain to the impact that follows."""
+        seen: set[tuple[str, str]] = set()
+        for finding in self.state.findings.get("findings", []):
+            category = str(finding.get("category", "")).lower()
+            match = next(
+                (entry for entry in self.EXPLOITATION_GOALS
+                 if entry[0] in category), None)
+            if match is None:
+                continue
+            _, goal_id, label, action_id = match
+            if goal_id not in self.nodes:
+                self.nodes[goal_id] = AttackNode(
+                    id=goal_id, label=label, node_type="goal",
+                    confidence="TENTATIVE",
+                )
+            for key in finding.get("asset_keys", []):
+                node = self.nodes.get(key)
+                if node is None or node.node_type not in TESTABLE_NODE_TYPES:
+                    continue
+                url, param = self._surface(node)
+                if not url or not param:
+                    continue
+                pair = (key, goal_id)
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                self.edges.append(AttackEdge(
+                    source_id=key, target_id=goal_id,
+                    edge_type="pivot", action_id=action_id,
+                    likelihood=0.6, impact=0.9,
+                    attrs={"via": str(finding.get("id", "")),
+                           "category": category},
+                ))
 
     def _infer_transitions(self):
         """Detect common attack transitions from node types and attributes."""

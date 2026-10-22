@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 
 from actions.registry import ActionMeta, ActionRegistry, RiskLevel
-from core.attack_graph import AttackEdge, AttackNode
+from core.attack_graph import AttackEdge, AttackGraph, AttackNode
 from core.chain_executor import ChainExecutor, risk_allows
 from state.manager import StateManager
 
@@ -669,3 +669,21 @@ def test_promote_confirmed_floors_at_medium():
         [_chain(action_id="test.probe", impact=0.1)]))
     assert report.ran
     assert _findings(state)[0]["severity"] == "MEDIUM"
+
+
+def test_ssrf_chain_is_armed_at_the_parameter_that_carries_it():
+    state = _state()
+    url = "https://example.test/fetch?url=1"
+    state.add_asset("url", f"url:{url}", url, confidence="FIRM")
+    state.add_finding("SSRF", "HIGH", "FIRM", "SSRF", "x",
+                      asset_keys=[f"url:{url}"])
+    graph = AttackGraph(state)
+    graph.build()
+    chains = graph.find_chains()
+    chain = next(c for c in chains
+                 if any(n.id == "goal:cloud_metadata" for n in c.nodes))
+
+    planned = ChainExecutor(state, {}).plan(chain)
+    assert [p.action_id for p in planned] == ["web.ssrf.cloud_metadata"]
+    assert planned[0].params["url"] == url
+    assert planned[0].params["param"] == "url"
