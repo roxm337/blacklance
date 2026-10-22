@@ -480,7 +480,7 @@ def test_kev_exact_without_version_is_high_not_critical():
     module = ExploitLookup(state, _config())
     import modules.exploit_lookup as el
 
-    async def fake_kev(terms):
+    async def fake_kev(terms, config=None):
         return [{"cve": "CVE-2024-0001", "product": "WordPress",
                  "name": "Test RCE", "match_strength": "exact",
                  "matched_term": "wordpress"}]
@@ -509,7 +509,7 @@ def test_kev_exact_with_version_is_critical():
     module = ExploitLookup(state, _config())
     import modules.exploit_lookup as el
 
-    async def fake_kev(terms):
+    async def fake_kev(terms, config=None):
         return [{"cve": "CVE-2024-0001", "product": "WordPress",
                  "name": "Test RCE", "match_strength": "exact",
                  "matched_term": "wordpress"}]
@@ -535,7 +535,7 @@ def test_kev_adjacent_and_nvd_are_medium_leads():
     module = ExploitLookup(state, _config())
     import modules.exploit_lookup as el
 
-    async def fake_kev(terms):
+    async def fake_kev(terms, config=None):
         return [{"cve": "CVE-2024-0002", "product": "WordPress Plugin X",
                  "name": "Test bug", "match_strength": "substring",
                  "matched_term": "word"}]

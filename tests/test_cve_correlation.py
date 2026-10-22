@@ -48,7 +48,7 @@ def test_confirmed_cve_finding_from_version_in_range(monkeypatch, tmp_path):
             },
         ]
 
-    async def no_kev(terms):
+    async def no_kev(terms, config=None):
         return []
 
     monkeypatch.setattr(mod, "nvd_cve_search", fake_nvd)

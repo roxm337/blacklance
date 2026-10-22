@@ -46,6 +46,10 @@ ALLOWLIST = {
     "tls_audit.py": "TLS handshake, not HTTP status",
     "cms_deep_scan.py": "uses dropescan fingerprints, not raw status",
     "nuclei_scan.py": "delegates to nuclei, which does its own verification",
+    "cve_validation.py": "gates on version fingerprints and JSON markers; the "
+                         "readme 200 is only read for a version line, and the "
+                         "wp2shell probe needs block_cannot_read plus a "
+                         "boolean differential before it files",
     "port_scan_module.py": "TCP connect, not HTTP",
     # The oracle is not the status — it is a before/after comparison, so a 200
     # is a precondition rather than the evidence. Gating these on a catch-all

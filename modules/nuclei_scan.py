@@ -1,11 +1,14 @@
 """Stage 4: Nuclei vulnerability scan with technology-targeted templates."""
 
+import re
 import time
 
 from modules.base import BaseModule
 from tools.external import (nuclei_scan, nuclei_multi, nuclei_templates_info,
                             nuclei_update_templates, tool_available)
 
+
+CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.I)
 
 SEVERITY_MAP = {
     "INFO": "INFO",
@@ -178,6 +181,15 @@ class NucleiScan(BaseModule):
                 await self._record_matches(fresh, finding_counts, target_url,
                                            group, detected_tech, rate_limit))
 
+        # Targeted per-CVE pass: a CVE already attached to a finding (version
+        # correlation, KEV intel, validator output) gets its own template run
+        # by id. The broad "cve" tag pass below scans thousands of unrelated
+        # templates; this one runs the handful that can actually match.
+        if self._cfg().get("per_cve", True):
+            low_info_all.extend(
+                await self._per_cve_pass(target_url, rate_limit, stop_at,
+                                         seen, finding_counts, detected_tech))
+
         if self._allow_full_cve_pass(target_url, webapp_assets):
             remaining = stop_at - time.monotonic()
             if remaining > 150:
@@ -263,9 +275,95 @@ class NucleiScan(BaseModule):
         )
         return "done"
 
+    def _candidate_cves(self) -> list:
+        """CVE ids already attached to a finding, for targeted template runs."""
+        found = set()
+        for finding in (self.state.findings or {}).get("findings", []) or []:
+            blob = " ".join(str(item) for item in [
+                finding.get("title", ""),
+                finding.get("description", ""),
+                *(finding.get("evidence") or []),
+            ])
+            found.update(m.group(0).upper() for m in CVE_RE.finditer(blob))
+            for cve in (finding.get("intelligence") or {}).get("cves") or []:
+                if CVE_RE.match(str(cve)):
+                    found.add(str(cve).upper())
+        return sorted(found)
+
+    @staticmethod
+    def _match_intel(match: dict, intel_by_cve: dict | None) -> dict | None:
+        found = CVE_RE.search(str(match.get("template_id", "") or ""))
+        if not found:
+            return None
+        cve = found.group(0).upper()
+        intel = dict((intel_by_cve or {}).get(cve) or {})
+        cves = list(intel.get("cves") or [])
+        if cve not in cves:
+            cves.append(cve)
+        intel["cves"] = cves
+        return intel
+
+    async def _per_cve_pass(self, target_url: str, rate_limit: int,
+                            stop_at: float, seen: set, finding_counts: dict,
+                            detected_tech: set) -> list:
+        """Run the templates that name a CVE we already have a reason to test."""
+        cfg = self._cfg()
+        candidates = self._candidate_cves()
+        if not candidates:
+            return []
+        try:
+            limit = int(cfg.get("per_cve_max", 6) or 6)
+            per_seconds = int(cfg.get("per_cve_seconds", 90) or 90)
+        except (TypeError, ValueError):
+            limit, per_seconds = 6, 90
+        candidates = candidates[:limit]
+        self.log(f"  Per-CVE pass: {', '.join(candidates)}")
+
+        intel_by_cve = {}
+        try:
+            from modules.exploit_lookup import kev_lookup_cves
+            for cve, entry in (await kev_lookup_cves(
+                    candidates, self.config)).items():
+                intel_by_cve[cve] = {"kev": True, "cve": cve,
+                                     "kev_name": entry.get("name", "")}
+        except Exception as exc:  # KEV is an enrichment, never a blocker
+            self.log(f"  Per-CVE KEV lookup failed: {exc}")
+
+        low_info = []
+        for cve in candidates:
+            remaining = stop_at - time.monotonic()
+            if remaining < 45:
+                self.log(f"  Per-CVE pass stopped at {cve}: time-box")
+                break
+            timeout = int(max(30, min(per_seconds, remaining - 20)))
+            try:
+                result = await nuclei_scan(
+                    target_url,
+                    rate_limit=rate_limit,
+                    timeout=timeout,
+                    ids=[cve],
+                    severity=["low", "medium", "high", "critical"],
+                )
+            except Exception as exc:
+                self.log(f"  Per-CVE {cve} raised: {exc}")
+                continue
+            fresh = []
+            for match in result.get("results", []) or []:
+                key = (match.get("template_id", ""), match.get("matched_at", ""))
+                if key not in seen:
+                    seen.add(key)
+                    fresh.append(match)
+            if not fresh:
+                continue
+            low_info.extend(await self._record_matches(
+                fresh, finding_counts, target_url, [f"cve:{cve}"],
+                detected_tech, rate_limit, intel_by_cve=intel_by_cve))
+        return low_info
+
     async def _record_matches(self, matches: list, finding_counts: dict,
                                 target_url: str, tags: list, detected_tech: set,
-                                rate_limit: int) -> list:
+                                rate_limit: int,
+                                intel_by_cve: dict | None = None) -> list:
         """Persist one batch of matches as evidence + findings immediately.
 
         Findings land per batch rather than at the end of the run, so a
@@ -289,6 +387,7 @@ class NucleiScan(BaseModule):
         for match in matches:
             severity = SEVERITY_MAP.get(str(match.get("severity", "INFO")).upper(), "INFO")
             finding_counts[severity] = finding_counts.get(severity, 0) + 1
+            intelligence = self._match_intel(match, intel_by_cve)
 
             # Create individual findings for HIGH/CRITICAL
             if severity in ("HIGH", "CRITICAL"):
@@ -322,6 +421,7 @@ class NucleiScan(BaseModule):
                                   "template": match.get("template_id", ""),
                                   "url": match.get("matched_at", "")}
                     if confirmed else {},
+                    intelligence=intelligence,
                 )
             elif severity == "MEDIUM":
                 self.state.add_finding(
@@ -337,6 +437,7 @@ class NucleiScan(BaseModule):
                     evidence_refs=[evidence_id],
                     remediation="Review and remediate according to template description.",
                     asset_keys=[f"webapp:{target_url}"],
+                    intelligence=intelligence,
                 )
 
         # LOW/INFO matches accumulate for one end-of-run appendix.

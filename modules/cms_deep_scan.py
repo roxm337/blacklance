@@ -425,11 +425,16 @@ class CMSDeepScan(BaseModule):
                 "finding. "
             )
 
+        intelligence = {"cves": cves[:10]}
+        if in_kev:
+            intelligence["kev"] = True
+
         return {
             "title": headline,
             "severity": severity,
             "confidence": confidence,
             "category": "CMS Vulnerability",
+            "intelligence": intelligence,
             "description": (
                 f"{detail}Reported against {host} for {component} by "
                 f"{', '.join(sorted({s['source'] for s in group}))}."
@@ -477,6 +482,18 @@ class CMSDeepScan(BaseModule):
         finding.setdefault("evidence", []).append(
             f"EPSS {top_cve}: {top.get('epss', 0.0):.3f} "
             f"(percentile {top.get('percentile', 0.0):.2f})")
+        # Prioritization reads intelligence/epss_score, not verification:
+        # attaching only to verification made the EPSS call decorative.
+        intelligence = finding.setdefault("intelligence", {})
+        try:
+            top_epss = float(top.get("epss", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            top_epss = 0.0
+        try:
+            previous = float(intelligence.get("epss") or 0.0)
+        except (TypeError, ValueError):
+            previous = 0.0
+        intelligence["epss"] = max(previous, top_epss)
         verification = finding.setdefault("verification", {})
         verification["epss"] = {cve: scores[cve].get("epss", 0.0)
                                for cve in sorted(scores)}

@@ -457,6 +457,18 @@ modules:
       - "/adminer.php"
       - "/backup.sql"
 
+  exploit_lookup:
+    # The CISA KEV feed is ~5 MB; modules share one download. A stale
+    # catalog silently downgrades today's exploited CVE to a guess.
+    kev_cache_hours: 24
+
+  cve_validation:
+    enabled: true
+    # Pause between curated CVE playbooks (wp2shell, UpdraftPlus, SharePoint,
+    # Oracle HTTP Server, Rails). Version matches are FIRM; only a live
+    # oracle (the wp2shell boolean differential) may confirm.
+    delay_seconds: 0.5
+
   nuclei_scan:
     full_cve_on_confirmed_apex: true
     # full_cve: false            # legacy kill-switch for the CVE pass
@@ -468,6 +480,11 @@ modules:
     # because it downloads hundreds of MB from GitHub mid-engagement.
     max_age_days: 30
     update_templates: false
+    # Target the CVE ids we already believe apply (from CMS intel and
+    # findings) directly, instead of running the whole cve tag set.
+    per_cve: true
+    per_cve_max: 6
+    per_cve_seconds: 90
 
   xss_scan:
     max_points: 80

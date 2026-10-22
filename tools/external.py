@@ -529,7 +529,8 @@ async def nuclei_scan(target_url: str,
                       timeout: int = 600,
                       tags: Optional[List[str]] = None,
                       severity: Optional[List[str]] = None,
-                      templates: Optional[str] = None) -> dict:
+                      templates: Optional[str] = None,
+                      ids: Optional[List[str]] = None) -> dict:
     if not tool_available("nuclei"):
         return {"available": False, "results": [], "error": "missing"}
 
@@ -552,6 +553,10 @@ async def nuclei_scan(target_url: str,
         args.extend(["-severity", ",".join(severity)])
     if templates:
         args.extend(["-t", templates])
+    if ids:
+        # `-id` is the documented selector for template IDs (CVE-2026-…);
+        # `-t` expects a path and only sometimes resolves an id.
+        args.extend(["-id", ",".join(ids)])
 
     result = await run_command(args, timeout=timeout)
     return {

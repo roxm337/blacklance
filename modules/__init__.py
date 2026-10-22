@@ -71,6 +71,7 @@ from .metrics_exposure import MetricsExposure
 from .jwt_audit import JWTAudit
 from .csrf_audit import CSRFAudit
 from .stored_xss import StoredXSS
+from .cve_validation import CVEValidation
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -450,6 +451,13 @@ MODULE_REGISTRY = {
     },
     "nuclei_scan": {
         "class": NucleiScan,
+        "stage": 5,
+        "detectability": "high",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "cve_validation": {
+        "class": CVEValidation,
         "stage": 5,
         "detectability": "high",
         "depends_on": ["tech_detection"],

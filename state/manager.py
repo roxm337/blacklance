@@ -38,6 +38,33 @@ def _finding_host(asset_keys) -> str:
     return ""
 
 
+def _merge_intelligence(existing: dict, incoming: dict) -> dict:
+    """Union vulnerability intel without letting a weaker claim win.
+
+    KEV is sticky (once exploited, always exploited); CVSS and EPSS take the
+    stronger value. Everything else keeps the first value so a later module
+    cannot overwrite a named CVE with a guess.
+    """
+    merged = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if key == "kev":
+            merged["kev"] = bool(merged.get("kev")) or bool(value)
+        elif key in ("cvss", "epss"):
+            try:
+                merged[key] = max(float(merged.get(key) or 0), float(value or 0))
+            except (TypeError, ValueError):
+                merged[key] = max(merged.get(key) or 0, value or 0)
+        elif key == "cves":
+            seen = list(merged.get("cves") or [])
+            for cve in value or []:
+                if cve not in seen:
+                    seen.append(cve)
+            merged["cves"] = seen
+        elif key not in merged:
+            merged[key] = value
+    return merged
+
+
 def _clean_evidence(evidence) -> list:
     """Drop empty and whitespace-only evidence lines.
 
@@ -260,7 +287,8 @@ class StateManager:
                     verified: bool = False,
                     verification: Optional[dict] = None,
                     cwe: Optional[list] = None,
-                    owasp: Optional[str] = None) -> str:
+                    owasp: Optional[str] = None,
+                    intelligence: Optional[dict] = None) -> str:
         from core.scoring import score_finding
         from core.taxonomy import classify
         if risk_score is None:
@@ -313,7 +341,7 @@ class StateManager:
                         existing, severity, confidence, risk_score,
                         description, evidence, remediation, asset_keys,
                         evidence_refs, verified, verification,
-                        current_module,
+                        current_module, intelligence,
                     )
                     self._dirty = True
                     return existing["id"]
@@ -340,6 +368,8 @@ class StateManager:
             "verified": bool(verified),
             "verification": verification or {},
         }
+        if intelligence:
+            finding["intelligence"] = dict(intelligence)
         self.findings["findings"].append(finding)
         self.module["stats"]["total_findings"] = len(self.findings["findings"])
         self._dirty = True
@@ -351,7 +381,8 @@ class StateManager:
                        asset_keys: Optional[list],
                        evidence_refs: Optional[list], verified: bool,
                        verification: Optional[dict],
-                       current_module: str) -> None:
+                       current_module: str,
+                       intelligence: Optional[dict] = None) -> None:
         """Fold a duplicate claim into the finding already on record."""
         existing["last_seen"] = self._now()
         if int(risk_score or 0) > int(existing.get("risk_score") or 0):
@@ -380,6 +411,9 @@ class StateManager:
             merged_verification = dict(verification)
             merged_verification.update(existing.get("verification") or {})
             existing["verification"] = merged_verification
+        if intelligence:
+            existing["intelligence"] = _merge_intelligence(
+                existing.get("intelligence") or {}, intelligence)
 
     def get_findings_by_severity(self, severity: str) -> list:
         return [f for f in self.findings["findings"] if f["severity"] == severity]

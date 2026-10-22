@@ -256,6 +256,18 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
      "warn past this template age; stale sets miss CVEs"),
     ("modules.nuclei_scan.update_templates", False,
      "refresh templates before scanning (downloads, opt-in)"),
+    ("modules.nuclei_scan.per_cve", True,
+     "target confirmed CVE ids directly instead of the whole cve set"),
+    ("modules.nuclei_scan.per_cve_max", 6,
+     "CVE ids to target per run"),
+    ("modules.nuclei_scan.per_cve_seconds", 90,
+     "time-box for the per-CVE pass"),
+    ("modules.exploit_lookup.kev_cache_hours", 24,
+     "CISA KEV catalog cache lifetime"),
+    ("modules.cve_validation.enabled", True,
+     "run curated CVE validation playbooks"),
+    ("modules.cve_validation.delay_seconds", 0.5,
+     "pause between CVE playbooks"),
 )
 
 
