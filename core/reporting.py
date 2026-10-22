@@ -11,6 +11,7 @@ from core.fingerprints import finding_url as _finding_url
 from core.history import (annotate, annotate_assets,
                           load as load_history, regression,
                           save as save_history)
+from core.poc import write_pocs
 from core.scoring import score_label
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -126,6 +127,7 @@ def write_report_bundle(state: Any, target: str) -> dict:
     paths["regression"].write_text(
         json.dumps(regression(bundle, diff, asset_diff), indent=2,
                    default=str))
+    paths["pocs"] = Path(write_pocs(state, target, bundle, output_dir)["dir"])
     return {key: str(path) for key, path in paths.items()}
 
 
