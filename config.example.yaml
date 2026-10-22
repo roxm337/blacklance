@@ -381,6 +381,8 @@ modules:
 
   ssti_scan:
     max_points: 40               # template-injection points probed per run
+    error_based: true            # blind fallback: engine exceptions name the marker
+    error_max_points: 8          # points that get the error-probe budget
 
   nosql_scan:
     max_points: 40               # NoSQL-injection points probed per run
