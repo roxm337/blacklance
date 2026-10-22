@@ -101,6 +101,7 @@ def write_report_bundle(state: Any, target: str) -> dict:
         "summary": output_dir / f"{target}_summary.json",
         "findings": output_dir / f"{target}_findings.json",
         "sarif": output_dir / f"{target}.sarif",
+        "defectdojo": output_dir / f"{target}_defectdojo.json",
     }
     paths["report"].write_text(render_markdown(bundle))
     paths["executive_summary"].write_text(render_executive_summary(bundle))
@@ -108,6 +109,8 @@ def write_report_bundle(state: Any, target: str) -> dict:
     paths["findings"].write_text(json.dumps(state.findings, indent=2, default=str))
     paths["sarif"].write_text(json.dumps(render_sarif(bundle), indent=2,
                                          default=str))
+    paths["defectdojo"].write_text(
+        json.dumps(render_defectdojo(bundle), indent=2, default=str))
     return {key: str(path) for key, path in paths.items()}
 
 
@@ -206,6 +209,68 @@ def render_sarif(bundle: dict) -> dict:
             },
             "results": results,
         }],
+    }
+
+
+DEFECTDOJO_SEVERITY = {
+    "CRITICAL": "Critical",
+    "HIGH": "High",
+    "MEDIUM": "Medium",
+    "LOW": "Low",
+    "INFO": "Info",
+}
+DEFECTDOJO_RANK = {"Critical": "S0", "High": "S1", "Medium": "S2",
+                   "Low": "S3", "Info": "S4"}
+
+
+def render_defectdojo(bundle: dict) -> dict:
+    """DefectDojo "Generic Findings Import" payload.
+
+    `unique_id_from_tool` uses the same content fingerprint as SARIF, so the
+    importer updates a finding across re-scans instead of duplicating it when
+    finding IDs are renumbered.
+    """
+    findings = []
+    for finding in bundle.get("findings") or []:
+        url = _finding_url(finding)
+        severity = DEFECTDOJO_SEVERITY.get(
+            str(finding.get("severity") or "").upper(), "Info")
+        verification = finding.get("verification") or {}
+        description = str(finding.get("description") or "")
+        if verification:
+            description += "\n\nVerification: " + json.dumps(
+                verification, default=str)
+        evidence = finding.get("evidence") or []
+        if evidence:
+            description += "\n\nEvidence:\n" + "\n".join(
+                f"- {str(item)[:400]}" for item in evidence[:10])
+        item = {
+            "title": str(finding.get("title") or "(untitled)"),
+            "severity": severity,
+            "numerical_severity": DEFECTDOJO_RANK[severity],
+            "description": description.strip(),
+            "active": True,
+            "verified": bool(finding.get("verified")),
+            "false_p": False,
+            "duplicate": False,
+            "dynamic_finding": bool(url),
+            "static_finding": not bool(url),
+            "unique_id_from_tool": _fingerprint(finding, url),
+            "component_name": url or str(
+                (bundle.get("metadata") or {}).get("target") or ""),
+            "date": str(finding.get("created_at") or ""),
+            "endpoints": [url] if url else [],
+        }
+        if finding.get("risk_score") is not None:
+            item["tags"] = [f"risk:{finding['risk_score']}"]
+        findings.append(item)
+    return {
+        "findings": findings,
+        "metadata": {
+            "generated_at": (bundle.get("metadata") or {}).get("generated_at"),
+            "tool": "OSINT Agent",
+            "target": (bundle.get("metadata") or {}).get("target"),
+        },
     }
 
 
