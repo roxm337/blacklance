@@ -2,11 +2,13 @@
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
+from core.fingerprints import fingerprint as _fingerprint
+from core.fingerprints import finding_url as _finding_url
+from core.history import annotate, load as load_history, regression, save as save_history
 from core.scoring import score_label
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -111,6 +113,14 @@ def write_report_bundle(state: Any, target: str) -> dict:
                                          default=str))
     paths["defectdojo"].write_text(
         json.dumps(render_defectdojo(bundle), indent=2, default=str))
+    history_path = output_dir / "findings_history.json"
+    annotated, updated, diff = annotate(bundle["findings"],
+                                        load_history(history_path))
+    bundle["findings"] = annotated
+    save_history(history_path, updated)
+    paths["regression"] = output_dir / f"{target}_regression.json"
+    paths["regression"].write_text(
+        json.dumps(regression(bundle, diff), indent=2, default=str))
     return {key: str(path) for key, path in paths.items()}
 
 
@@ -127,28 +137,6 @@ def _rule_id(category: str) -> str:
     slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in
                    (category or "finding"))
     return "-".join(part for part in slug.split("-") if part) or "finding"
-
-
-def _finding_url(finding: dict) -> str:
-    for key in finding.get("asset_keys") or []:
-        text = str(key)
-        if text.startswith("url:http"):
-            return text[4:]
-    verification = finding.get("verification") or {}
-    for key in ("url", "bypass_url"):
-        value = str(verification.get(key) or "")
-        if value.startswith("http"):
-            return value
-    return ""
-
-
-def _fingerprint(finding: dict, url: str) -> str:
-    material = "|".join([
-        str(finding.get("category", "")),
-        str(finding.get("title", "")),
-        url,
-    ])
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def render_sarif(bundle: dict) -> dict:
