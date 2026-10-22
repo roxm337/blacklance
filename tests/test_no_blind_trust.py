@@ -53,6 +53,9 @@ ALLOWLIST = {
     "cache_deception.py": "requires a digest match between an authenticated "
                           "and an anonymous response plus a cache HIT/Age; a "
                           "200 is only a precondition",
+    "llm_surface.py": "200 is a precondition; proof is a completion payload "
+                      "(choices[0].message.content) from a credential-free "
+                      "request",
     "port_scan_module.py": "TCP connect, not HTTP",
     # The oracle is not the status — it is a before/after comparison, so a 200
     # is a precondition rather than the evidence. Gating these on a catch-all

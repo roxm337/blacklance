@@ -296,6 +296,13 @@ modules:
     # single-host check can show.
     max_targets: 10
 
+  llm_surface:
+    enabled: true
+    max_endpoints: 25
+    probe_common_paths: true        # GET the five usual LLM paths
+    probe_completion: false         # one benign prompt to test anonymous access
+    model: ''                       # fallback model id when /v1/models is closed
+
   open_redirect:
     enabled: true
 
