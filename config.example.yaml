@@ -308,6 +308,13 @@ modules:
     # shapes, so this is the real bound on request volume.
     max_targets: 40
 
+  client_proto_pollution:
+    enabled: true
+    # Loads pages headless and reads Object.prototype back out of the realm.
+    max_pages: 3
+    timeout_ms: 15000
+    wait_ms: 800
+
   cache_deception:
     enabled: true
     # Proves a private page is served from cache to an anonymous client.

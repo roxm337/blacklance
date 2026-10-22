@@ -73,6 +73,7 @@ from .csrf_audit import CSRFAudit
 from .stored_xss import StoredXSS
 from .cve_validation import CVEValidation
 from .cache_deception import CacheDeception
+from .client_proto_pollution import ClientProtoPollution
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -466,6 +467,13 @@ MODULE_REGISTRY = {
     },
     "cache_deception": {
         "class": CacheDeception,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "client_proto_pollution": {
+        "class": ClientProtoPollution,
         "stage": 5,
         "detectability": "medium",
         "depends_on": ["tech_detection"],
