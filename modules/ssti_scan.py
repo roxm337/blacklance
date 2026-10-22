@@ -9,6 +9,9 @@ evidence of nothing — it is the evaluation that counts.
 """
 
 from core.probe_targets import iter_probe_points
+from core.waf_evasion import (encoded_variants, is_payload_blocked,
+                              payload_block_codes, raw_param_url,
+                              ssti_variants)
 from modules.base import BaseModule
 from tools.wrappers import curl
 
@@ -134,41 +137,109 @@ class SSTIScan(BaseModule):
             control_count = control_body.count("49")
             for label, payload in SSTI_PAYLOADS:
                 response = await self._fetch(inject_param(url, param, payload))
+                if (self._waf_adaptive()
+                        and is_payload_blocked(response, self._block_codes())):
+                    bypass = await self._bypass(
+                        url, param, payload, control_count,
+                        response.get("status"))
+                    if bypass:
+                        self._file_evaluation(label, payload, url, param,
+                                              bypass["body"], bypass)
+                        return True
+                    continue
                 if response["status"] not in (200, 201):
                     continue
                 body = response["body"]
                 if body.count("49") > control_count and payload not in body:
-                    self.state.add_finding(
-                        title=(f"Server-Side Template Injection ({label}): "
-                               f"{param}"),
-                        severity="HIGH",
-                        confidence="CONFIRMED",
-                        category="SSTI",
-                        description=(
-                            f"Payload `{payload}` on parameter {param} "
-                            f"evaluated server-side to 49 while the control "
-                            f"string stayed literal: a {label} template "
-                            f"engine renders attacker input."),
-                        evidence=[
-                            f"URL: {url}",
-                            f"Parameter: {param}",
-                            f"Payload: {payload}",
-                            f"Response: {body[:300]}",
-                        ],
-                        remediation="Never render user input as a template; "
-                                    "use logic-less templates with "
-                                    "autoescaping, or sandbox the engine with "
-                                    "no attribute access.",
-                        asset_keys=[f"url:{url}"],
-                        verified=True,
-                        verification={"method": "ssti_arithmetic_differential",
-                                      "url": url, "param": param},
-                    )
+                    self._file_evaluation(label, payload, url, param, body)
                     return True
 
         if not error_based:
             return False
         return await self._test_errors(url, param, control_body)
+
+    def _file_evaluation(self, label: str, payload: str, url: str, param: str,
+                         body: str, bypass: dict | None = None) -> None:
+        evidence = [
+            f"URL: {url}",
+            f"Parameter: {param}",
+            f"Payload: {payload}",
+            f"Response: {body[:300]}",
+        ]
+        description = (
+            f"Payload `{payload}` on parameter {param} evaluated "
+            f"server-side to 49 while the control string stayed literal: "
+            f"a {label} template engine renders attacker input.")
+        verification = {"method": "ssti_arithmetic_differential",
+                        "url": url, "param": param}
+        if bypass:
+            evidence.append(
+                f"WAF bypass: {bypass['mutation']} at {bypass['test_url']}")
+            description += (
+                f" The edge blocked the plain payload (HTTP "
+                f"{bypass.get('blocked_status', 'block')}); the "
+                f"`{bypass['mutation']}` variant reached the engine with "
+                "identical semantics and produced the same computed value.")
+            verification.update({"waf_bypass": bypass["mutation"],
+                                 "bypass_url": bypass["test_url"]})
+        self.state.add_finding(
+            title=f"Server-Side Template Injection ({label}): {param}",
+            severity="HIGH",
+            confidence="CONFIRMED",
+            category="SSTI",
+            description=description,
+            evidence=evidence,
+            remediation="Never render user input as a template; use "
+                        "logic-less templates with autoescaping, or sandbox "
+                        "the engine with no attribute access.",
+            asset_keys=[f"url:{url}"],
+            verified=True,
+            verification=verification,
+        )
+
+    async def _bypass(self, url: str, param: str, payload: str,
+                      control_count: int,
+                      blocked_status=None) -> dict | None:
+        """Re-send a blocked probe with semantics-preserving mutations.
+
+        A 200 alone is not a bypass: the caller's oracle (49 more than the
+        control, payload absent) must fire on the mutated response.
+        """
+        from core.validators import inject_param
+
+        codes = self._block_codes()
+        for name, value in ssti_variants(payload):
+            candidate = inject_param(url, param, value)
+            result = await self._fetch(candidate)
+            if is_payload_blocked(result, codes):
+                continue
+            if self._evaluated(result, control_count, payload):
+                return {"mutation": name, "test_url": candidate,
+                        "body": result["body"],
+                        "blocked_status": blocked_status}
+        for name, wire in encoded_variants(payload):
+            candidate = raw_param_url(url, param, wire)
+            result = await self._fetch(candidate)
+            if is_payload_blocked(result, codes):
+                continue
+            if self._evaluated(result, control_count, payload):
+                return {"mutation": name, "test_url": candidate,
+                        "body": result["body"],
+                        "blocked_status": blocked_status}
+        return None
+
+    @staticmethod
+    def _evaluated(result: dict, control_count: int, payload: str) -> bool:
+        if result.get("status") not in (200, 201):
+            return False
+        body = result.get("body", "") or ""
+        return body.count("49") > control_count and payload not in body
+
+    def _waf_adaptive(self) -> bool:
+        return self._cfg().get("waf_adaptive", True) is not False
+
+    def _block_codes(self) -> set:
+        return payload_block_codes(self.config)
 
     async def _test_errors(self, url: str, param: str,
                            control_body: str) -> bool:

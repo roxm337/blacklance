@@ -149,6 +149,10 @@ budget_limits:
 waf:
   block_codes: [503, 429]
   honeypot_codes: [500]
+  # A payload-block answer (403/406 from the edge) is a signature match, not
+  # an answer; adaptive probes retry with semantics-preserving mutations and
+  # re-run their own oracle.
+  payload_block_codes: [403, 406, 429, 501, 503]
 
 modules:
   auto_run: true
@@ -398,6 +402,7 @@ modules:
     max_points: 40               # template-injection points probed per run
     error_based: true            # blind fallback: engine exceptions name the marker
     error_max_points: 8          # points that get the error-probe budget
+    waf_adaptive: true           # retry blocked payloads with safe mutations
 
   nosql_scan:
     max_points: 40               # NoSQL-injection points probed per run
