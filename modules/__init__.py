@@ -72,6 +72,7 @@ from .jwt_audit import JWTAudit
 from .csrf_audit import CSRFAudit
 from .stored_xss import StoredXSS
 from .cve_validation import CVEValidation
+from .cache_deception import CacheDeception
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -460,6 +461,13 @@ MODULE_REGISTRY = {
         "class": CVEValidation,
         "stage": 5,
         "detectability": "high",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "cache_deception": {
+        "class": CacheDeception,
+        "stage": 5,
+        "detectability": "medium",
         "depends_on": ["tech_detection"],
         "active": True,
     },

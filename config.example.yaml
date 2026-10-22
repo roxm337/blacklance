@@ -308,6 +308,14 @@ modules:
     # shapes, so this is the real bound on request volume.
     max_targets: 40
 
+  cache_deception:
+    enabled: true
+    # Proves a private page is served from cache to an anonymous client.
+    # Needs a verified identity: without one there is nothing to prove.
+    max_paths: 4
+    max_shapes: 3
+    private_paths: []            # override the built-in list
+
   cms_deep_scan:
     enabled: true
 
