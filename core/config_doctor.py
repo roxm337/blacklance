@@ -216,6 +216,8 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
      "front-end URLs desync-tested per run"),
     ("modules.http_smuggling.te_cl", True,
      "also probe the TE.CL framing disagreement"),
+    ("modules.http_smuggling.h2", True,
+     "probe H2.CL/H2.TE when the server negotiates h2"),
     ("modules.llm_surface.enabled", True,
      "inventory chat/completion/embedding endpoints"),
     ("modules.llm_surface.max_endpoints", 25,

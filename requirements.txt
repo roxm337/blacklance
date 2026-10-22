@@ -14,3 +14,4 @@ beautifulsoup4>=4.11 # HTML parsing for advanced scraping
 lxml>=4.9         # XML/HTML parsing
 playwright>=1.45  # Browser-rendered crawl (also run: playwright install chromium)
 jarm       # TLS fingerprinting
+h2>=4.1           # HTTP/2 smuggling probes (H2.CL/H2.TE)

@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm
+          pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm h2
           pip install pytest pytest-asyncio
 
       - name: Compile check (3.10 syntax gate)
@@ -89,7 +89,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm
+          pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm h2
           pip install pytest pytest-asyncio PySide6 "gravis==0.1.0" "setuptools<81"
 
       - name: Run GUI tests (offscreen)

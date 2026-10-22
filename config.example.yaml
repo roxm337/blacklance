@@ -298,6 +298,7 @@ modules:
   http_smuggling:
     enabled: true
     te_cl: true                     # also try the TE.CL framing disagreement
+    h2: true                        # H2.CL/H2.TE when ALPN negotiates h2
 
     # Hosts to hand to smuggler. Left empty, URLs from recon are used.
     # Results land as TENTATIVE, never as confirmed findings: smuggling needs a
