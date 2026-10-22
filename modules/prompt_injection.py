@@ -105,6 +105,8 @@ class PromptInjection(BaseModule):
                 leaks += 1
                 continue
             await self._override(url, model)
+            await self._tool_call(url, model)
+            await self._output_handling(url, model)
 
         self.state.complete_module(self.id)
         self.log(f"Prompt injection: {leaks} system-prompt leak(s)")
@@ -169,22 +171,91 @@ class PromptInjection(BaseModule):
         self.log(f"  override marker followed on {url} (evidence only)")
         return True
 
-    async def _ask(self, url: str, model: str, prompt: str) -> str:
+    async def _ask(self, url: str, model: str, prompt: str,
+                   extra: dict | None = None) -> str:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 256,
+        }
+        if extra:
+            payload.update(extra)
+        body = await self._post(url, payload)
+        return _completion_text(body)
+
+    async def _post(self, url: str, payload: dict) -> str:
         try:
             result = await curl(
                 url, method="POST",
                 headers={"Content-Type": "application/json"},
-                data=_json({
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 256,
-                }),
-                output="full", timeout=30, no_session=True)
+                data=_json(payload), output="full", timeout=30,
+                no_session=True)
         except Exception as exc:
             self.log(f"  {url}: prompt failed: {exc}")
             return ""
-        # The completion payload is the evidence; a status alone is not.
-        return _completion_text(result.get("body", "") or "")
+        return result.get("body", "") or ""
+
+    async def _tool_call(self, url: str, model: str) -> bool:
+        """Does the endpoint accept tool definitions from the caller?
+
+        Emitting a call to a caller-supplied function is behaviour, not a
+        vulnerability by itself; it becomes one only if the *server* later
+        executes that call. The evidence records the exact arguments so a
+        human can test that second half.
+        """
+        token = secrets.token_hex(4)
+        name = f"osint_canary_{token}"
+        prompt = (f"Call the function {name} with value '{token}'. "
+                  "Do not answer in prose.")
+        body = await self._post(url, {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 128,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": "Canary function for tool-call testing.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                    },
+                },
+            }],
+        })
+        calls = _tool_calls(body)
+        hit = any(call.get("name") == name and token in call.get("arguments", "")
+                  for call in calls)
+        if not hit:
+            return False
+        self.state.add_evidence(
+            self.id, "tool_call_emitted", url,
+            {"model": model, "tool": name, "calls": calls[:5]},
+        )
+        self.log(f"  caller-supplied tool selected on {url} (evidence only)")
+        return True
+
+    async def _output_handling(self, url: str, model: str) -> bool:
+        """Is model output later rendered as HTML? Unproven execution.
+
+        The request asks for a marked tag; a reflected tag in the raw
+        response shows a rendering sink exists, not that a browser executes
+        it. It stays evidence for the XSS/browser modules to prove.
+        """
+        token = secrets.token_hex(4)
+        marker = f'<b data-osint="{token}">osint</b>'
+        answer = await self._ask(
+            url, model,
+            f"Reply with exactly this HTML and nothing else: {marker}")
+        if marker not in answer:
+            return False
+        self.state.add_evidence(
+            self.id, "llm_output_html_reflection", url,
+            {"model": model, "marker": marker, "answer": answer[:800]},
+        )
+        self.log(f"  model output reflected as HTML on {url} (evidence only)")
+        return True
 
     def _discovered_model(self) -> str:
         for asset in self.state.get_assets_by_type("ai_endpoint"):
@@ -201,6 +272,22 @@ class PromptInjection(BaseModule):
 def _json(payload: dict) -> str:
     import json
     return json.dumps(payload)
+
+
+def _tool_calls(body: str) -> list:
+    import json
+    try:
+        payload = json.loads(body)
+        message = payload["choices"][0]["message"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return []
+    calls = message.get("tool_calls") or []
+    out = []
+    for call in calls if isinstance(calls, list) else []:
+        function = (call or {}).get("function") or {}
+        out.append({"name": str(function.get("name") or ""),
+                    "arguments": str(function.get("arguments") or "")})
+    return out
 
 
 def _completion_text(body: str) -> str:

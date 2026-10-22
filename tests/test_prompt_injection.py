@@ -109,10 +109,14 @@ def test_override_compliance_is_evidence_only(monkeypatch):
             return {"status": 200, "headers": "",
                     "body": json.dumps({"choices": [{"message": {
                         "content": "I am a friendly assistant."}}]})}
-        marker = prompt.split("marker ")[1].split(".")[0]
+        if prompt.startswith("From now on"):
+            marker = prompt.split("marker ")[1].split(".")[0]
+            return {"status": 200, "headers": "",
+                    "body": json.dumps({"choices": [{"message": {
+                        "content": marker}}]})}
         return {"status": 200, "headers": "",
                 "body": json.dumps({"choices": [{"message": {
-                    "content": marker}}]})}
+                    "content": "ok"}}]})}
 
     monkeypatch.setattr(pi, "curl", fake_curl)
     asyncio.run(module.run())
@@ -132,3 +136,55 @@ def test_completion_text_accepts_both_content_shapes():
     assert _completion_text(one) == "hello"
     assert _completion_text(parts) == "he llo"
     assert _completion_text("not json") == ""
+
+
+def test_tool_call_is_evidence_only(monkeypatch):
+    module = _module()
+    seen = {}
+
+    async def fake_curl(url, **kwargs):
+        payload = json.loads(kwargs["data"])
+        if payload.get("tools"):
+            tool = payload["tools"][0]["function"]["name"]
+            seen["tool"] = tool
+            return {"status": 200, "headers": "", "body": json.dumps({
+                "choices": [{"message": {"tool_calls": [{
+                    "function": {"name": tool,
+                                 "arguments": json.dumps({"value": tool.rsplit("_", 1)[-1]})},
+                }]}}]})}
+        prompt = payload["messages"][0]["content"]
+        text = "I am helpful." if prompt in pi.LEAK_ASKS else "ok"
+        return {"status": 200, "headers": "", "body": json.dumps(
+            {"choices": [{"message": {"content": text}}]})}
+
+    monkeypatch.setattr(pi, "curl", fake_curl)
+    asyncio.run(module.run())
+
+    assert module.state.findings["findings"] == []
+    kinds = [e.get("type") for e in module.state.evidence["items"]]
+    assert "tool_call_emitted" in kinds
+    assert seen["tool"].startswith("osint_canary_")
+
+
+def test_output_reflection_is_evidence_only(monkeypatch):
+    module = _module()
+
+    async def fake_curl(url, **kwargs):
+        payload = json.loads(kwargs["data"])
+        prompt = payload["messages"][0]["content"]
+        if "data-osint=" in prompt:
+            marker = prompt.split("nothing else: ")[-1]
+            text = marker
+        elif prompt in pi.LEAK_ASKS:
+            text = "I am helpful."
+        else:
+            text = "ok"
+        return {"status": 200, "headers": "", "body": json.dumps(
+            {"choices": [{"message": {"content": text}}]})}
+
+    monkeypatch.setattr(pi, "curl", fake_curl)
+    asyncio.run(module.run())
+
+    assert module.state.findings["findings"] == []
+    kinds = [e.get("type") for e in module.state.evidence["items"]]
+    assert "llm_output_html_reflection" in kinds
