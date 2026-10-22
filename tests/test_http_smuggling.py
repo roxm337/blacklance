@@ -51,7 +51,7 @@ def _run(tool_present=True, results=(), module_cfg=None):
          patch.object(HTTPSmuggling, "_ambiguous",
                       lambda self, target: _always_ambiguous(self, target)), \
          patch.object(HTTPSmuggling, "_desync_oracle",
-                      lambda self, target: _never_oracle(self, target)):
+                      lambda self, target, mode="cl_te": _never_oracle(self, target)):
         import asyncio
         status = asyncio.run(module.run())
     return status, state
@@ -115,7 +115,7 @@ def test_each_target_gets_its_own_finding():
          patch.object(HTTPSmuggling, "_ambiguous",
                       lambda self, target: _always_ambiguous(self, target)), \
          patch.object(HTTPSmuggling, "_desync_oracle",
-                      lambda self, target: _never_oracle(self, target)):
+                      lambda self, target, mode="cl_te": _never_oracle(self, target)):
         module._targets = lambda: ["https://a.test", "https://b.test"]
         import asyncio
         asyncio.run(module.run())
@@ -180,7 +180,7 @@ def test_the_target_list_is_capped(configured, expected):
          patch.object(HTTPSmuggling, "_ambiguous",
                       lambda self, target: _always_ambiguous(self, target)), \
          patch.object(HTTPSmuggling, "_desync_oracle",
-                      lambda self, target: _never_oracle(self, target)):
+                      lambda self, target, mode="cl_te": _never_oracle(self, target)):
         module._targets = lambda: hosts
         import asyncio
         asyncio.run(module.run())

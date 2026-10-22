@@ -208,6 +208,8 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
      "request-smuggling oracle (needs the smuggler tool)"),
     ("modules.http_smuggling.max_targets", 10,
      "front-end URLs desync-tested per run"),
+    ("modules.http_smuggling.te_cl", True,
+     "also probe the TE.CL framing disagreement"),
     ("modules.prototype_pollution.enabled", True,
      "prototype-pollution probes (mutates process state, no cleanup)"),
     ("modules.prototype_pollution.endpoints", [],
