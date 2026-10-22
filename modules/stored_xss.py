@@ -16,7 +16,7 @@ import uuid
 
 from core.auth_harness import AuthHarness
 from modules.base import BaseModule
-from tools.wrappers import curl, curl_with_status
+from tools.wrappers import curl
 
 # Common text fields a record stores and later renders.
 _TEXT_FIELDS = ("comment", "message", "text", "content", "body", "review",
@@ -26,14 +26,36 @@ _WRITE_HINTS = ("feedback", "comment", "review", "complaint", "message",
                 "post", "note", "memory", "product")
 
 
+def payload_for(marker: str) -> str:
+    """The stored-XSS probe payload. `alert('xss<marker>')` fires cleanly in a
+    real browser (vs a bare `onerror=xss<marker>`, which only throws a
+    ReferenceError) while keeping the marker for reflection matching."""
+    return f"\"><img src=x onerror=alert('xss{marker}')>"
+
+
 def stored_reflection(body: str, marker: str) -> bool:
-    """True iff the raw (unescaped) XSS payload for `marker` is served back."""
+    """True iff the unescaped `<img … onerror=…xss<marker>…>` tag is served
+    back — i.e. the markup survived with its angle brackets intact."""
     body = body or ""
-    raw = f"<img src=x onerror=xss{marker}>"
-    if raw in body:
-        return True
-    # Also accept a bare unescaped tag carrying the marker.
-    return bool(re.search(r"<[a-z]+[^>]*xss" + re.escape(marker), body, re.I))
+    # A bare, unescaped tag carrying the marker. The quotes/parens of the
+    # payload vary once stored, so match on the tag shape + the marker rather
+    # than the exact literal.
+    return bool(re.search(r"<img\b[^>]*onerror[^>]*xss" + re.escape(marker),
+                          body, re.I))
+
+
+def _content_type(headers_text: str) -> str:
+    for line in (headers_text or "").splitlines():
+        if line.lower().startswith("content-type:"):
+            return line.split(":", 1)[1].split(";")[0].strip()
+    return ""
+
+
+def is_html_response(headers_text: str) -> bool:
+    """Does the response declare an HTML content type? Only then is an
+    unescaped tag a rendered-HTML sink rather than a JSON/text echo."""
+    ct = _content_type(headers_text).lower()
+    return "text/html" in ct or "application/xhtml" in ct
 
 
 class StoredXSS(BaseModule):
@@ -93,7 +115,7 @@ class StoredXSS(BaseModule):
 
     async def _probe(self, base: str, url: str, headers: dict) -> bool:
         marker = uuid.uuid4().hex[:10]
-        payload = f'"><img src=x onerror=xss{marker}>'
+        payload = payload_for(marker)
         for field in _TEXT_FIELDS[:4]:
             if self.should_stop(reserve=8):
                 break
@@ -104,29 +126,52 @@ class StoredXSS(BaseModule):
                            headers={"Content-Type": "application/json", **headers})
             except Exception:  # noqa: BLE001
                 continue
-            # Re-read the collection and look for the unescaped payload.
+            # Re-read with full headers: the content type decides whether an
+            # unescaped tag is a rendered-HTML sink (proven XSS) or a JSON/text
+            # echo (stored, but client-side rendering unproven).
             try:
-                r = await curl_with_status(url, timeout=12,
-                                           headers=headers or None)
+                r = await curl(url, output="full", timeout=12,
+                               headers=headers or None)
             except Exception:  # noqa: BLE001
                 continue
-            if stored_reflection(r.get("body", ""), marker):
+            if not stored_reflection(r.get("body", ""), marker):
+                continue
+            html = is_html_response(str(r.get("headers", "")))
+            if html:
                 self.state.add_finding(
                     title="Stored / persistent XSS",
-                    severity="HIGH", confidence="CONFIRMED",
+                    severity="HIGH", confidence="CONFIRMED", verified=True,
                     category="Injection",
                     description=f"A payload submitted to the '{field}' field of "
-                                f"{url} is stored and served back with its markup "
-                                f"intact (not HTML-encoded) — it executes in the "
-                                f"browser of every viewer of this content.",
-                    evidence=[f"POST {url} {field}=<img onerror> payload",
-                              f"GET {url} → payload returned unescaped"],
+                                f"{url} is stored and served back in an HTML "
+                                f"response with its markup intact (not encoded) — "
+                                f"it executes in the browser of every viewer.",
+                    evidence=[f"POST {url} {field}=<img onerror=alert()> payload",
+                              f"GET {url} → HTML response, payload returned unescaped"],
                     remediation="Output-encode stored content for the HTML "
                                 "context on render; validate/sanitise on input.",
                     asset_keys=[f"webapp:{base}"],
-                    verification={"method": "stored_xss_unescaped_reflection",
+                    verification={"method": "stored_xss_html_reflection",
                                   "url": url})
-                return True
+            else:
+                ctype = _content_type(str(r.get("headers", ""))) or "non-HTML"
+                self.state.add_finding(
+                    title="Stored input reflected unescaped (potential stored XSS)",
+                    severity="MEDIUM", confidence="FIRM",
+                    category="Injection",
+                    description=f"A payload submitted to the '{field}' field of "
+                                f"{url} is stored and returned unescaped, but in a "
+                                f"{ctype} response — this is stored XSS only if a "
+                                f"client renders this value as HTML. Confirm the "
+                                f"rendering sink before claiming execution.",
+                    evidence=[f"POST {url} {field}=<img onerror=alert()> payload",
+                              f"GET {url} → {ctype} response, payload returned raw"],
+                    remediation="Encode on the HTML render path; if this value is "
+                                "ever inserted into the DOM as HTML, it is XSS.",
+                    asset_keys=[f"webapp:{base}"],
+                    verification={"method": "stored_unescaped_nonhtml",
+                                  "url": url})
+            return True
         return False
 
 
