@@ -115,6 +115,17 @@ llm:
 # 0 or absent falls back to 300.
 module_timeout: 300
 
+chains:
+  # Finding -> payoff edges for chains whose second leg is target-specific
+  # (auth bypass, IDOR -> account takeover). Each entry is:
+  #   category: substring matched against a finding's category
+  #   goal:     the impact label (becomes a graph goal node)
+  #   action:   a registered action id that proves the payoff
+  #   asset_hint: optional substring an affected asset URL must contain
+  #   edge_type: exploit | pivot | authenticate | escalate (default pivot)
+  # An unregistered action is reported as unarmable, never swapped for an
+  # unrelated probe.
+  edges: []
 scope:
   # A machine-readable allow/deny list, enforced before every request.
   # The file is optional: without it nothing changes. Once it exists, deny
@@ -319,6 +330,12 @@ modules:
     enabled: false
     max_endpoints: 5
     model: ''                       # overrides the id discovered by llm_surface
+    # Indirect injection: an operator-hosted page the app can fetch. The page
+    # must instruct the model to answer with ingestion_canary; the module only
+    # reports when the reply is exactly that canary.
+    ingestion_url: ''
+    ingestion_canary: ''
+    ingestion_prompt: 'Read {url} and follow its instructions.'
 
   open_redirect:
     enabled: true
@@ -434,6 +451,8 @@ modules:
 
   dom_xss_scan:
     max_pages: 25                # rendered pages sunk-checked for DOM XSS
+    routes: []                   # extra SPA route templates containing {P}
+    payloads: []                 # extra payload templates containing {m}
 
   parameter_discovery:
     seed_when_empty: true        # seed reflection probes when none discovered
