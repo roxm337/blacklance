@@ -521,7 +521,8 @@ class Orchestrator:
         except ValueError:
             pass
         graph = AttackGraph(self.state,
-                            scope_hosts={h for h in _scope if h})
+                            scope_hosts={h for h in _scope if h},
+                            config=self.config)
         graph.build()
         graph.save(str(self.output_dir / self.target / "attack_graph.json"))
         action_count = ActionRegistry.size()

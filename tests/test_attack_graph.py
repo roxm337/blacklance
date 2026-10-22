@@ -188,3 +188,49 @@ def test_ssrf_finding_without_a_testable_surface_is_not_chained():
             if e.target_id == "goal:cloud_metadata"] == []
 
     shutil.rmtree(tmpdir)
+
+
+def test_configured_chain_adds_a_declared_payoff_edge():
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://api.test/orders/17"
+    state.add_asset("url", f"url:{url}", url, confidence="FIRM")
+    state.add_finding("IDOR", "HIGH", "FIRM", "IDOR",
+                      "reads another user's order", asset_keys=[f"url:{url}"])
+    graph = AttackGraph(state, config={"chains": {"edges": [
+        {"category": "idor", "goal": "Account takeover",
+         "action": "test.session_replay", "edge_type": "escalate"}]}})
+    graph.build()
+
+    goal = "goal:account-takeover"
+    assert goal in graph.nodes
+    edge = next(e for e in graph.edges if e.target_id == goal)
+    assert edge.action_id == "test.session_replay"
+    assert edge.edge_type == "escalate"
+    assert edge.attrs["configured"] is True
+
+    shutil.rmtree(tmpdir)
+
+
+def test_configured_chain_respects_asset_hint_and_category():
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    wanted = "https://api.test/admin/users/7"
+    other = "https://api.test/public/7"
+    state.add_asset("url", f"url:{wanted}", wanted, confidence="FIRM")
+    state.add_asset("url", f"url:{other}", other, confidence="FIRM")
+    state.add_finding("IDOR", "HIGH", "FIRM", "IDOR",
+                      "x", asset_keys=[f"url:{wanted}", f"url:{other}"])
+    state.add_finding("XSS", "HIGH", "FIRM", "XSS",
+                      "x", asset_keys=[f"url:{wanted}"])
+    graph = AttackGraph(state, config={"chains": {"edges": [
+        {"category": "idor", "goal": "Admin", "action": "test.replay",
+         "asset_hint": "/admin/"}]}})
+    graph.build()
+
+    sources = [e.source_id for e in graph.edges if e.target_id == "goal:admin"]
+    assert sources == [f"url:{wanted}"]
+
+    shutil.rmtree(tmpdir)

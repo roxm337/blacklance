@@ -200,6 +200,13 @@ class ChainExecutor:
         for edge in chain.edges:
             candidates = self._select_action(edge, chain)
             if not candidates:
+                if edge.action_id and not ActionRegistry.get(edge.action_id):
+                    self.unarmable.append(EdgeOutcome(
+                        edge=edge, action_id=edge.action_id,
+                        status="no_action",
+                        detail=(f"declared action '{edge.action_id}' is not "
+                                "registered in this build")))
+                    continue
                 if edge.edge_type in EDGE_ACTIONS:
                     # A known edge type with no proving action (extract):
                     # say so out loud instead of dropping it silently or,
@@ -355,7 +362,12 @@ class ChainExecutor:
         the graph actually has.
         """
         candidates = []
-        if edge.action_id and ActionRegistry.get(edge.action_id):
+        if edge.action_id:
+            if not ActionRegistry.get(edge.action_id):
+                # A configured chain named an action this build does not
+                # have. Guessing another probe would test something the
+                # operator never asked for, so report it as unarmable.
+                return []
             candidates.append((edge.action_id, "declared on edge"))
 
         target = self._node(edge.target_id, chain)

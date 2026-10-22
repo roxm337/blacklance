@@ -72,8 +72,10 @@ class AttackGraph:
 
     probe_plan: dict = {}
 
-    def __init__(self, state: StateManager, scope_hosts: set | None = None):
+    def __init__(self, state: StateManager, scope_hosts: set | None = None,
+                 config: dict | None = None):
         self.state = state
+        self.config = config or {}
         self.nodes: dict[str, AttackNode] = {}
         self.edges: list[AttackEdge] = []
         # Hosts that count as the target app. Nodes outside the scope
@@ -174,6 +176,7 @@ class AttackGraph:
         # action that can prove it, so the executor is aimed at what the bug
         # reaches rather than re-testing the entry point.
         self._infer_exploitation_goals()
+        self._infer_configured_chains()
 
     # Category -> the goal it can reach and the registered action that proves
     # the second leg. Deliberately narrow: a chain is only proposed when a
@@ -220,6 +223,61 @@ class AttackGraph:
                     attrs={"via": str(finding.get("id", "")),
                            "category": category},
                 ))
+
+    EDGE_TYPES = {"exploit", "pivot", "extract", "authenticate", "escalate"}
+
+    def _infer_configured_chains(self):
+        """Operator-declared finding -> payoff edges for target-shaped chains.
+
+        Generic chaining can only automate transitions whose second leg has a
+        registered action and a surface the graph knows (SSRF -> metadata).
+        Auth bypass and IDOR -> ATO depend on the application's own endpoints
+        and tokens, so the operator declares them in `chains.edges`; the graph
+        still builds the edge, the executor still enforces risk and budget,
+        and an action id that is not registered is reported as unarmable
+        instead of being replaced by an unrelated probe.
+        """
+        specs = ((self.config.get("chains") or {}).get("edges") or [])
+        seen: set[tuple[str, str, str]] = set()
+        for spec in specs if isinstance(specs, list) else []:
+            if not isinstance(spec, dict):
+                continue
+            category = str(spec.get("category") or "").strip().lower()
+            action = str(spec.get("action") or "").strip()
+            goal = str(spec.get("goal") or "").strip()
+            if not (category and action and goal):
+                continue
+            edge_type = str(spec.get("edge_type") or "pivot").lower()
+            if edge_type not in self.EDGE_TYPES:
+                edge_type = "pivot"
+            hint = str(spec.get("asset_hint") or "").strip()
+            goal_id = "goal:" + _slug(goal)
+            if goal_id not in self.nodes:
+                self.nodes[goal_id] = AttackNode(
+                    id=goal_id, label=goal, node_type="goal",
+                    confidence="TENTATIVE",
+                )
+            for finding in self.state.findings.get("findings", []):
+                if category not in str(finding.get("category", "")).lower():
+                    continue
+                for key in finding.get("asset_keys", []):
+                    node = self.nodes.get(key)
+                    if node is None or node.node_type not in TESTABLE_NODE_TYPES:
+                        continue
+                    url, _ = self._surface(node)
+                    if not url or (hint and hint not in url):
+                        continue
+                    pair = (key, goal_id, action)
+                    if pair in seen:
+                        continue
+                    seen.add(pair)
+                    self.edges.append(AttackEdge(
+                        source_id=key, target_id=goal_id,
+                        edge_type=edge_type, action_id=action,
+                        likelihood=0.5, impact=0.9,
+                        attrs={"via": str(finding.get("id", "")),
+                               "configured": True},
+                    ))
 
     def _infer_transitions(self):
         """Detect common attack transitions from node types and attributes."""
@@ -584,3 +642,8 @@ class AttackGraph:
 
     def save(self, path: str | Path):
         Path(path).write_text(json.dumps(self.to_dict(), indent=2))
+
+
+def _slug(value: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in value)
+    return "-".join(part for part in cleaned.split("-") if part) or "goal"

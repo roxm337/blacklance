@@ -687,3 +687,16 @@ def test_ssrf_chain_is_armed_at_the_parameter_that_carries_it():
     assert [p.action_id for p in planned] == ["web.ssrf.cloud_metadata"]
     assert planned[0].params["url"] == url
     assert planned[0].params["param"] == "url"
+
+
+def test_unregistered_declared_action_is_not_replaced_by_a_guess():
+    ex = ChainExecutor(_state(), {})
+    chain = FakeChain(
+        nodes={"n1": _node("n1", "url", url="https://example.test/a?q=1"),
+               "n2": _node("n2", "goal")},
+        edges=[AttackEdge(source_id="n1", target_id="n2", edge_type="exploit",
+                          likelihood=0.5, impact=0.9,
+                          action_id="test.not_installed")],
+    )
+    assert ex.plan(chain) == []
+    assert ex.unarmable and "not_installed" in ex.unarmable[0].action_id
