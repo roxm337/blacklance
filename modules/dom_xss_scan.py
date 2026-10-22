@@ -84,69 +84,112 @@ class DomXSSScan(BaseModule):
             pages.append(self.base_url)
         return pages
 
+    def _payloads(self, cfg: dict) -> list:
+        payloads = list(DOM_PAYLOADS)
+        for extra in cfg.get("payloads") or []:
+            if isinstance(extra, str) and "{m}" in extra and extra not in payloads:
+                payloads.append(extra)
+        return payloads
+
     async def _test_page(self, page_url: str) -> bool:
         """Inject markers into query and fragment; confirm DOM execution."""
-        from urllib.parse import parse_qsl, urlparse
-        from core.validators import inject_param
+        from urllib.parse import quote
 
-        try:
-            parsed = urlparse(page_url)
-        except ValueError:
+        cfg = self._cfg()
+        base, candidates = injection_templates(
+            page_url, cfg.get("routes") or [])
+        if not base:
             return False
-        # SPA fragment routes carry the page identity after #: /#/search
-        # is a different sink surface than /, and dropping the fragment
-        # tests the wrong page entirely.
-        route = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
-        if parsed.fragment:
-            route += "#" + parsed.fragment.split("?")[0]
-        base = route
-        candidates = [f"{base}?q={{P}}", f"{base}#q={{P}}",
-                      f"{base}?search={{P}}", f"{base}#__q={{P}}"]
-        # A page whose own query string (or fragment query) names
-        # parameters gets those too.
-        from urllib.parse import parse_qsl
-        existing = []
-        try:
-            existing.extend(name for name, _ in parse_qsl(
-                parsed.query or "", keep_blank_values=True))
-            if parsed.fragment and "?" in parsed.fragment:
-                existing.extend(name for name, _ in parse_qsl(
-                    parsed.fragment.split("?", 1)[1], keep_blank_values=True))
-        except ValueError:
-            pass
-        for name in existing[:5]:
-            candidates.append(inject_param(base, name, "{P}"))
 
         for template in candidates:
-            marker = f"domxss{secrets.token_hex(4)}"
-            expected = marker * 2
-            payload = DOM_PAYLOADS[0].format(m=marker)
-            url = template.replace("{P}", payload, 1)
-            from urllib.parse import quote
-            url = url.replace(payload, quote(payload, safe=""), 1)
-            if await _browser_executes(url, expected, self.config):
-                self.state.add_finding(
-                    title=f"DOM XSS Executed: {base}",
-                    severity="HIGH",
-                    confidence="CONFIRMED",
-                    category="XSS",
-                    description=(
-                        f"Payload injected into {template.split('{P}')[0]}… "
-                        f"executed in a real browser: the DOM contained the "
-                        f"execution marker. Client-side code renders URL input "
-                        f"as markup."),
-                    evidence=[f"Page: {base}", f"Payload: {payload}",
-                              f"Marker executed: {expected}"],
-                    remediation="Never sink URL input into innerHTML; use "
-                                "textContent, sanitize with DOMPurify, and "
-                                "enforce a strict CSP.",
-                    asset_keys=[f"url:{base}"],
-                    verified=True,
-                    verification={"method": "browser_dom_execution",
-                                  "url": url},
-                )
-                return True
+            for payload_template in self._payloads(cfg):
+                marker = f"domxss{secrets.token_hex(4)}"
+                expected = marker * 2
+                payload = payload_template.format(m=marker)
+                url = template.replace("{P}", payload, 1)
+                url = url.replace(payload, quote(payload, safe=""), 1)
+                if await _browser_executes(url, expected, self.config):
+                    self.state.add_finding(
+                        title=f"DOM XSS Executed: {base}",
+                        severity="HIGH",
+                        confidence="CONFIRMED",
+                        category="XSS",
+                        description=(
+                            f"Payload injected into {template.split('{P}')[0]}… "
+                            f"executed in a real browser: the DOM contained the "
+                            f"execution marker. Client-side code renders URL "
+                            f"input as markup."),
+                        evidence=[f"Page: {base}", f"Payload: {payload}",
+                                  f"Marker executed: {expected}"],
+                        remediation="Never sink URL input into innerHTML; use "
+                                    "textContent, sanitize with DOMPurify, and "
+                                    "enforce a strict CSP.",
+                        asset_keys=[f"url:{base}"],
+                        verified=True,
+                        verification={"method": "browser_dom_execution",
+                                      "url": url},
+                    )
+                    return True
         return False
+
+
+def injection_templates(page_url: str, extra_routes: list | None = None) -> tuple:
+    """(base, templates) for query, fragment and SPA-router injection.
+
+    A hash router keeps the page identity in the fragment (`#/search`), so
+    `#q=` alone is the wrong surface: the router reads the route, not a bare
+    fragment key. The route segment is injected as both a query value
+    (`#/search?q=`) and a path value (`#/search/`), and operators can add
+    application-specific shapes through `routes` with a `{P}` placeholder.
+    """
+    from urllib.parse import parse_qsl, quote, urlparse
+    from core.validators import inject_param
+
+    try:
+        parsed = urlparse(page_url)
+    except ValueError:
+        return "", []
+    route = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+    fragment_route = (parsed.fragment or "").split("?")[0]
+    if fragment_route:
+        route += "#" + fragment_route
+    base = route
+
+    candidates = [f"{base}?q={{P}}", f"{base}#q={{P}}",
+                  f"{base}?search={{P}}", f"{base}#__q={{P}}",
+                  f"{base}?query={{P}}", f"{base}#/{{P}}"]
+    if fragment_route.startswith("/"):
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        candidates += [f"{origin}/#{fragment_route}?q={{P}}",
+                       f"{origin}/#{fragment_route}/{{P}}"]
+
+    existing = []
+    try:
+        existing.extend(name for name, _ in parse_qsl(
+            parsed.query or "", keep_blank_values=True))
+        if parsed.fragment and "?" in parsed.fragment:
+            existing.extend(name for name, _ in parse_qsl(
+                parsed.fragment.split("?", 1)[1], keep_blank_values=True))
+    except ValueError:
+        pass
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    for name in existing[:5]:
+        # Build the template with a literal {P}. `inject_param` percent-
+        # encodes its value, and "{P}" became "%7BP%7D", so the payload
+        # substitution in `_test_page` never matched and every parameter
+        # the page already named was skipped.
+        if parsed.fragment:
+            candidates.append(
+                f"{origin}/#{fragment_route}?{quote(name, safe='')}={{P}}")
+        else:
+            filled = inject_param(base, name, "OSINT_PLACEHOLDER")
+            candidates.append(filled.replace("OSINT_PLACEHOLDER", "{P}"))
+
+    for template in extra_routes or []:
+        if isinstance(template, str) and "{P}" in template:
+            candidates.append(template)
+    seen = set()
+    return base, [t for t in candidates if not (t in seen or seen.add(t))]
 
 
 async def _browser_executes(url: str, expected: str, config: dict) -> bool:
