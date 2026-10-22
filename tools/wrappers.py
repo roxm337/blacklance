@@ -61,8 +61,30 @@ def reset_cookie_jar():
         _engine.forget_identities()
 
 
+_SCOPE_GUARD = None
+
+
+def configure_scope(config: Optional[dict] = None):
+    global _SCOPE_GUARD
+    try:
+        from core.scope_guard import from_config
+        _SCOPE_GUARD = from_config(config or {})
+    except Exception:
+        _SCOPE_GUARD = None
+
+
+def set_scope_guard(guard):
+    global _SCOPE_GUARD
+    _SCOPE_GUARD = guard
+
+
+def get_scope_guard():
+    return _SCOPE_GUARD
+
+
 def configure_http_session(config: Optional[dict] = None):
     """Configure headers/cookies applied to all wrapper HTTP requests."""
+    configure_scope(config)
     global _HTTP_SESSION_HEADERS
     auth = (config or {}).get("auth", {}) or {}
     headers = {
@@ -444,6 +466,12 @@ async def curl(url: str, method: str = "GET",
     if deadline_reached():
         return {"status": 0, "body": "", "error": "deadline_exceeded",
                 "time_ms": 0, "url": url, "history": []}
+    guard = _SCOPE_GUARD
+    if guard is not None:
+        allowed, reason = guard.check(url)
+        if not allowed:
+            return {"status": 0, "body": "", "error": reason,
+                    "time_ms": 0, "url": url, "history": []}
     timeout = clamp_timeout(timeout)
 
     # Reserve before either the aiohttp or subprocess transport is selected;

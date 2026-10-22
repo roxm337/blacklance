@@ -115,6 +115,15 @@ llm:
 # 0 or absent falls back to 300.
 module_timeout: 300
 
+scope:
+  # A machine-readable allow/deny list, enforced before every request.
+  # The file is optional: without it nothing changes. Once it exists, deny
+  # wins and unknown hosts are governed by allow_external.
+  enabled: true
+  file: scope.json
+  # true  = only the deny list is binding (APIs and OOB callbacks keep working)
+  # false = only listed hosts may be contacted (add your enrichment APIs)
+  allow_external: true
 rate_limits:
   default:
     concurrent: 5
