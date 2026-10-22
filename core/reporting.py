@@ -2,6 +2,7 @@
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -99,12 +100,113 @@ def write_report_bundle(state: Any, target: str) -> dict:
         "executive_summary": output_dir / f"{target}_executive_summary.md",
         "summary": output_dir / f"{target}_summary.json",
         "findings": output_dir / f"{target}_findings.json",
+        "sarif": output_dir / f"{target}.sarif",
     }
     paths["report"].write_text(render_markdown(bundle))
     paths["executive_summary"].write_text(render_executive_summary(bundle))
     paths["summary"].write_text(json.dumps(bundle, indent=2, default=str))
     paths["findings"].write_text(json.dumps(state.findings, indent=2, default=str))
+    paths["sarif"].write_text(json.dumps(render_sarif(bundle), indent=2,
+                                         default=str))
     return {key: str(path) for key, path in paths.items()}
+
+
+SARIF_LEVELS = {
+    "CRITICAL": "error",
+    "HIGH": "error",
+    "MEDIUM": "warning",
+    "LOW": "note",
+    "INFO": "note",
+}
+
+
+def _rule_id(category: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in
+                   (category or "finding"))
+    return "-".join(part for part in slug.split("-") if part) or "finding"
+
+
+def _finding_url(finding: dict) -> str:
+    for key in finding.get("asset_keys") or []:
+        text = str(key)
+        if text.startswith("url:http"):
+            return text[4:]
+    verification = finding.get("verification") or {}
+    for key in ("url", "bypass_url"):
+        value = str(verification.get(key) or "")
+        if value.startswith("http"):
+            return value
+    return ""
+
+
+def _fingerprint(finding: dict, url: str) -> str:
+    material = "|".join([
+        str(finding.get("category", "")),
+        str(finding.get("title", "")),
+        url,
+    ])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def render_sarif(bundle: dict) -> dict:
+    """SARIF 2.1.0 for pipeline ingestion.
+
+    One rule per finding category, one result per finding. The fingerprint
+    is content-derived (category, title, URL) so a re-scan updates the same
+    alert instead of opening a duplicate when finding IDs are renumbered.
+    """
+    findings = list(bundle.get("findings") or [])
+    rules = {}
+    results = []
+    for finding in findings:
+        category = str(finding.get("category") or "Uncategorised")
+        rule_id = _rule_id(category)
+        level = SARIF_LEVELS.get(str(finding.get("severity") or "").upper(),
+                                 "note")
+        rules.setdefault(rule_id, {
+            "id": rule_id,
+            "name": category,
+            "shortDescription": {"text": category},
+            "defaultConfiguration": {"level": level},
+        })
+        url = _finding_url(finding)
+        message = str(finding.get("description") or finding.get("title") or "")
+        result = {
+            "ruleId": rule_id,
+            "level": level,
+            "message": {"text": message},
+            "partialFingerprints": {
+                "osintAgent/v1": _fingerprint(finding, url)},
+            "properties": {
+                "severity": finding.get("severity"),
+                "confidence": finding.get("confidence"),
+                "verified": bool(finding.get("verified")),
+                "risk_score": finding.get("risk_score"),
+                "category": category,
+            },
+        }
+        if url:
+            result["locations"] = [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": url},
+                    "region": {"startLine": 1},
+                }
+            }]
+        results.append(result)
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "OSINT Agent",
+                    "version": "2.0",
+                    "rules": list(rules.values()),
+                }
+            },
+            "results": results,
+        }],
+    }
 
 
 def render_markdown(bundle: dict) -> str:
