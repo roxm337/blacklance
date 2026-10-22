@@ -188,3 +188,50 @@ def test_output_reflection_is_evidence_only(monkeypatch):
     assert module.state.findings["findings"] == []
     kinds = [e.get("type") for e in module.state.evidence["items"]]
     assert "llm_output_html_reflection" in kinds
+
+
+PAGE = "https://operator.test/inject.html"
+CANARY = "CANARY-4f8a2b1c9d"
+
+
+def _indirect_fakes(answer_for_page):
+    async def fake_curl(url, **kwargs):
+        payload = json.loads(kwargs["data"])
+        prompt = payload["messages"][0]["content"]
+        if PAGE in prompt:
+            text = answer_for_page
+        elif prompt in pi.LEAK_ASKS:
+            text = "I am helpful."
+        else:
+            text = "ok"
+        return {"status": 200, "headers": "", "body": json.dumps(
+            {"choices": [{"message": {"content": text}}]})}
+    return fake_curl
+
+
+def test_indirect_injection_requires_the_canary_alone(monkeypatch):
+    module = _module({"ingestion_url": PAGE, "ingestion_canary": CANARY})
+    monkeypatch.setattr(pi, "curl", _indirect_fakes(f"{CANARY}."))
+    asyncio.run(module.run())
+
+    findings = module.state.findings["findings"]
+    assert len(findings) == 1
+    assert findings[0]["verified"] is True
+    assert findings[0]["verification"]["method"] == "indirect_injection_canary"
+    assert findings[0]["verification"]["ingestion_url"] == PAGE
+
+
+def test_quoting_the_canary_in_a_summary_is_not_proof(monkeypatch):
+    module = _module({"ingestion_url": PAGE, "ingestion_canary": CANARY})
+    monkeypatch.setattr(
+        pi, "curl",
+        _indirect_fakes(f"The page says to reply {CANARY}, so here is a summary."))
+    asyncio.run(module.run())
+    assert module.state.findings["findings"] == []
+
+
+def test_indirect_injection_is_skipped_without_an_operator_page(monkeypatch):
+    module = _module({"ingestion_canary": CANARY})
+    monkeypatch.setattr(pi, "curl", _indirect_fakes(CANARY))
+    asyncio.run(module.run())
+    assert module.state.findings["findings"] == []
