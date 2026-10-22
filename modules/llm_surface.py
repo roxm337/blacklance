@@ -165,6 +165,12 @@ class LLMSurface(BaseModule):
                      f"{url}")
             if not model and "models" in url:
                 model = first_model(result["body"])
+                if model:
+                    self.state.add_asset(
+                        "ai_endpoint", f"ai:{url}", url,
+                        confidence="FIRM", sources=["llm_surface"],
+                        attrs={"model": model},
+                    )
             if (cfg.get("probe_completion", False)
                     and kind["kind"] == "openai_compatible"
                     and "chat/completions" in url):

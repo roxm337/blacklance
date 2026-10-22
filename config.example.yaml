@@ -303,6 +303,13 @@ modules:
     probe_completion: false         # one benign prompt to test anonymous access
     model: ''                       # fallback model id when /v1/models is closed
 
+  prompt_injection:
+    # Off by default: these are adversarial prompts and they spend the
+    # target's inference budget. Some programs forbid automated prompting.
+    enabled: false
+    max_endpoints: 5
+    model: ''                       # overrides the id discovered by llm_surface
+
   open_redirect:
     enabled: true
 

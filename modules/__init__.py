@@ -75,6 +75,7 @@ from .cve_validation import CVEValidation
 from .cache_deception import CacheDeception
 from .client_proto_pollution import ClientProtoPollution
 from .llm_surface import LLMSurface
+from .prompt_injection import PromptInjection
 from .bounty_submission import BountySubmission
 from .attack_planner import LLMAttackPlanner
 from .report import Reporting
@@ -485,6 +486,13 @@ MODULE_REGISTRY = {
         "stage": 5,
         "detectability": "low",
         "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "prompt_injection": {
+        "class": PromptInjection,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["llm_surface"],
         "active": True,
     },
     "xss_scan": {
