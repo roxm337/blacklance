@@ -254,9 +254,9 @@ class CMSDeepScan(BaseModule):
             self.state.skip_module(self.id, "CMS scanners not installed")
             return "skipped"
 
-        limit = int(cfg.get("max_targets", 5) or 5)
+        limit = int(cfg.get("max_targets", 0) or 0)
         signals = []
-        for target, cms in targets[:limit]:
+        for target, cms in (targets if limit <= 0 else targets[:limit]):
             signals.extend(await self._scan(target, cms))
 
         if not signals:

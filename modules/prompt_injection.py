@@ -91,13 +91,13 @@ class PromptInjection(BaseModule):
 
         endpoints = [a for a in self.state.get_assets_by_type("ai_endpoint")
                      if a.get("attrs", {}).get("kind") == "openai_compatible"]
-        limit = int(cfg.get("max_endpoints", 5) or 5)
+        limit = int(cfg.get("max_endpoints", 0) or 0)
         model = cfg.get("model") or self._discovered_model()
         if endpoints and not model:
             self.state.skip_module(self.id, "no model id to address")
             return "skipped"
         leaks = 0
-        for asset in endpoints[:limit]:
+        for asset in (endpoints if limit <= 0 else endpoints[:limit]):
             url = str(asset.get("value", ""))
             if "chat/completions" not in url:
                 continue

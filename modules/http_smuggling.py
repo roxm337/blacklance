@@ -58,10 +58,10 @@ class HTTPSmuggling(BaseModule):
             self.state.skip_module(self.id, "smuggler not installed")
             return "skipped"
 
-        limit = int(cfg.get("max_targets", 10) or 10)
+        limit = int(cfg.get("max_targets", 0) or 0)
         confirmed = 0
         reported = 0
-        for target in targets[:limit]:
+        for target in (targets if limit <= 0 else targets[:limit]):
             ambiguous, ambiguity_note = await self._ambiguous(target)
             if not ambiguous:
                 self.log(f"  {target}: strict header handling "

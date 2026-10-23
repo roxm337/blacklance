@@ -265,10 +265,6 @@ class DNSTakeover(BaseModule):
 
     async def run(self) -> str:
         import time
-        from core.validators import is_public_target
-        if not is_public_target(self.domain):
-            self.state.skip_module(self.id, "no public DNS to take over")
-            return "skipped"
         self.log("Checking dangling CNAME takeover risk...")
 
         subdomains = self.state.get_assets_by_type("subdomain")

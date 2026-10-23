@@ -152,9 +152,9 @@ class BusinessLogic(BaseModule):
     async def _tamper_pass(self, harness: AuthHarness, attacker: Identity,
                            cfg: dict) -> list:
         try:
-            max_probes = max(1, min(40, int(cfg.get("max_probes", 12))))
+            max_probes = int(cfg.get("max_probes", 0) or 0)
         except (TypeError, ValueError):
-            max_probes = 12
+            max_probes = 0
         endpoints = self._cart_endpoints(cfg)
         if not endpoints:
             self.log("  no cart endpoints discovered or configured")
@@ -168,7 +168,7 @@ class BusinessLogic(BaseModule):
                 continue
             for label, field, values in TAMPER_PROBES:
                 for hostile in values:
-                    if sent >= max_probes:
+                    if max_probes and sent >= max_probes:
                         break
                     sent += 1
                     outcome = await self._tamper_once(
@@ -176,9 +176,9 @@ class BusinessLogic(BaseModule):
                         label, field, hostile)
                     if outcome:
                         findings.append(outcome)
-                if sent >= max_probes:
+                if max_probes and sent >= max_probes:
                     break
-            if sent >= max_probes:
+            if max_probes and sent >= max_probes:
                 break
         self.log(f"  cart probes sent: {sent}")
         return findings

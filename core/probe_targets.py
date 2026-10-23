@@ -13,8 +13,6 @@ modules that only speak query strings ignore it.
 
 from urllib.parse import parse_qsl, urlparse
 
-from core.validators import is_public_target
-
 
 # Marker fragments our own probes leave in URLs. Crawlers record every
 # URL they visit — including the ones earlier modules injected payloads
@@ -35,42 +33,90 @@ def is_probe_garbage(url: str) -> bool:
     return any(marker in lowered for marker in PROBE_MARKERS)
 
 
-def _scope_hosts(base_url: str, domain: str) -> tuple:
-    """(hosts, port_or_None): what counts as the same app."""
-    try:
-        parsed = urlparse(base_url)
-        base_host = (parsed.hostname or "").lower()
-        base_port = parsed.port
-    except ValueError:
-        return set(), None
-    hosts = {h for h in (base_host, domain.lower()) if h}
-    return hosts, base_port
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _host_key(value: str) -> str:
+    """Return a bare lowercase host from a URL, host, or host:port."""
+    text = str(value or "").strip().lower().rstrip(".")
+    if not text:
+        return ""
+    if "://" in text:
+        parsed = urlparse(text)
+        return str(parsed.hostname or "").lower().rstrip(".")
+    text = text.split("/", 1)[0]
+    if text.startswith("["):
+        return text.split("]", 1)[0].lstrip("[")
+    if text.count(":") == 1:
+        text = text.split(":", 1)[0]
+    return text
+
+
+def _same_host(candidate: str, *allowed: str) -> bool:
+    """True when `candidate` is the target host or one of its subdomains.
+
+    Apex/sibling handling is deliberately explicit: the engagement domain
+    from config is the anchor, so `api.example.com` is allowed when the
+    target is `www.example.com` and the configured domain is `example.com`.
+    An unrelated host that merely shares a suffix (`example.com.evil.tld`)
+    is not.
+    """
+    if not candidate:
+        return False
+    anchors = {_host_key(item) for item in allowed if _host_key(item)}
+    if not anchors:
+        return False
+    if candidate in anchors:
+        return True
+
+    cand_loop = candidate in LOOPBACK_HOSTS
+    if cand_loop and any(item in LOOPBACK_HOSTS for item in anchors):
+        return True
+
+    for anchor in anchors:
+        if anchor in LOOPBACK_HOSTS:
+            # `foo.localhost` is still local, but never `notlocalhost`.
+            if candidate.endswith(".localhost"):
+                return True
+            continue
+        # IPv6 literals do not have a useful parent/child relationship.
+        if ":" in anchor or ":" in candidate:
+            continue
+        if candidate.endswith("." + anchor):
+            return True
+        # The configured base may itself be a subdomain.
+        if anchor.endswith("." + candidate) and candidate.count(".") >= 1:
+            return True
+    return False
 
 
 def in_scope_url(url: str, base_url: str, domain: str) -> bool:
-    """Same app, parseable, no third-party embeds or misbuilds."""
+    """Is this URL on the engagement's host, allowing siblings and ports?
+
+    Recon legitimately finds alternate ports and subdomains of the target.
+    Third-party CDNs, embeds, and archive noise are not the target and must
+    never become active probe points: the old "any absolute URL" rule sent
+    SQLMap to youtube.com and turned GitHub assets into findings.
+    """
     try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        port = parsed.port
+        parsed = urlparse(str(url))
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        # `localhost:` and `host:abc` parse a hostname but cannot be dialled.
+        if parsed.netloc.endswith(":"):
+            return False
+        parsed.port  # raises ValueError for a non-numeric port
     except ValueError:
         return False
-    if not host:
-        return False
-    hosts, base_port = _scope_hosts(base_url, domain)
-    if host not in hosts and not any(
-            host == h or host.endswith("." + h) for h in hosts if h):
-        return False
-    if not is_public_target(domain) and base_port is not None:
-        scheme_default = 443 if parsed.scheme == "https" else 80
-        if (port or scheme_default) != base_port:
-            return False
-    return True
+    return _same_host(str(parsed.hostname), base_url, domain)
 
 
 def iter_probe_points(state, base_url: str, domain: str,
-                      max_points: int = 200) -> list:
-    """Yield deduplicated (url, param, method, source, json_body) points."""
+                      max_points: int = 0) -> list:
+    """Yield deduplicated (url, param, method, source, json_body) points.
+
+    `max_points=0` means every point; a positive value keeps the old cap.
+    """
     points = []
     seen = set()
 
@@ -156,4 +202,4 @@ def iter_probe_points(state, base_url: str, domain: str,
         for name, _ in parse_qsl(query, keep_blank_values=True):
             emit(raw, name, "GET", "raw_target")
 
-    return points[:max_points]
+    return points[:max_points] if max_points > 0 else points

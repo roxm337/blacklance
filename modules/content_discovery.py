@@ -320,13 +320,15 @@ class ContentDiscovery(BaseModule):
         wordlist = str(kr_cfg.get("wordlist", "apiroutes-260227") or
                        "apiroutes-260227")
         try:
-            max_routes = max(1, min(20000, int(kr_cfg.get("max_routes", 1500))))
+            max_routes = int(kr_cfg.get("max_routes", 0) or 0)
+            if max_routes <= 0:
+                max_routes = 20_000
         except (TypeError, ValueError):
-            max_routes = 1500
+            max_routes = 20_000
         try:
-            max_targets = max(1, min(10, int(kr_cfg.get("max_targets", 2))))
+            max_targets = int(kr_cfg.get("max_targets", 0) or 0)
         except (TypeError, ValueError):
-            max_targets = 2
+            max_targets = 0
         # Polite defaults for live scopes: --delay spaces requests to one
         # host, -x caps parallel connections. delay 1000ms + 1 connection
         # is ~1 req/s; the 100ms/3-conn default is a lab setting.
@@ -335,7 +337,7 @@ class ContentDiscovery(BaseModule):
         except (TypeError, ValueError):
             delay_ms = 100
         try:
-            connections = max(1, min(10, int(kr_cfg.get("connections", 3))))
+            connections = max(1, int(kr_cfg.get("connections", 3)))
         except (TypeError, ValueError):
             connections = 3
 
@@ -351,9 +353,10 @@ class ContentDiscovery(BaseModule):
                 continue
             if origin not in targets:
                 targets.append(origin)
-            if len(targets) >= max_targets:
+            if max_targets > 0 and len(targets) >= max_targets:
                 break
-        targets = targets[:max_targets]
+        if max_targets > 0:
+            targets = targets[:max_targets]
 
         self.log(f"  kiterunner: {len(targets)} target(s), "
                  f"{max_routes} routes each ({wordlist}, "

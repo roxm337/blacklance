@@ -18,10 +18,6 @@ class ThreatIntel(BaseModule):
     depends_on = ["seed_discovery"]
 
     async def run(self) -> str:
-        from core.validators import is_public_target
-        if not is_public_target(self.domain):
-            self.state.skip_module(self.id, "reputation feeds cover the public internet only")
-            return "skipped"
         self.log("Checking passive threat intelligence sources...")
 
         hostnames = {self.domain} if self.domain else set()

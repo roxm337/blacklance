@@ -83,11 +83,13 @@ class SSRFScan(BaseModule):
         names = tuple(
             str(n).lower() for n in (cfg.get("params") or SSRF_PARAMS))
         try:
-            max_points = max(1, min(30, int(cfg.get("max_points", 6))))
+            max_points = int(cfg.get("max_points", 0) or 0)
         except (TypeError, ValueError):
-            max_points = 6
+            max_points = 0
 
-        points = [p for p in self._candidate_points(names)][:max_points]
+        points = [p for p in self._candidate_points(names)]
+        if max_points > 0:
+            points = points[:max_points]
         if not points:
             self.state.skip_module(self.id, "no URL-bearing parameters")
             return "skipped"

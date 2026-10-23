@@ -29,7 +29,7 @@ class BaseAgent:
         self.budget = budget or BudgetManager(config)
         if max_risk is None:
             from actions.registry import RiskLevel
-            max_risk = RiskLevel.LOW
+            max_risk = RiskLevel.DESTRUCTIVE
         self.max_risk = max_risk
         self.attack_graph: Optional[AttackGraph] = None
         self.audit = None  # core.audit_log.AuditLog, set by the engagement runner

@@ -53,7 +53,7 @@ def candidate_urls(urls, limit: int = 25) -> list:
         if key not in seen:
             seen.add(key)
             out.append(key)
-    return out[:limit]
+    return out if limit <= 0 else out[:limit]
 
 
 def header_map(headers) -> dict:
@@ -129,14 +129,15 @@ class LLMSurface(BaseModule):
         for asset_type in ("api_endpoint", "url", "webapp"):
             for asset in self.state.get_assets_by_type(asset_type):
                 urls.append(str(asset.get("value", "")))
-        limit = int(cfg.get("max_endpoints", 25) or 25)
+        limit = int(cfg.get("max_endpoints", 0) or 0)
         candidates = candidate_urls(urls, limit)
         if cfg.get("probe_common_paths", True):
             for path in COMMON_PATHS:
                 common = f"{self.base_url}{path}"
                 if common not in candidates:
                     candidates.append(common)
-        candidates = candidates[:limit]
+        if limit > 0:
+            candidates = candidates[:limit]
         model = None
         found = 0
         for url in candidates:

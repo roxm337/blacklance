@@ -312,11 +312,12 @@ class NucleiScan(BaseModule):
         if not candidates:
             return []
         try:
-            limit = int(cfg.get("per_cve_max", 6) or 6)
+            limit = int(cfg.get("per_cve_max", 0) or 0)
             per_seconds = int(cfg.get("per_cve_seconds", 90) or 90)
         except (TypeError, ValueError):
-            limit, per_seconds = 6, 90
-        candidates = candidates[:limit]
+            limit, per_seconds = 0, 90
+        if limit > 0:
+            candidates = candidates[:limit]
         self.log(f"  Per-CVE pass: {', '.join(candidates)}")
 
         intel_by_cve = {}

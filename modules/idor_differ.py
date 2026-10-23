@@ -760,7 +760,8 @@ class IdorDiffer(BaseModule):
 
         object_urls = {t.url for t in templates}
         candidates = [u for u in _dedupe(candidates) if u and u not in object_urls]
-        return candidates[: self._collection_cap()]
+        cap = self._collection_cap()
+        return candidates if cap <= 0 else candidates[:cap]
 
     def _templates_from_collections(self, collections: list) -> list:
         """Object templates implied by collections that listed real records.
@@ -892,8 +893,8 @@ class IdorDiffer(BaseModule):
         pool = {str(ref) for refs in owned.values() for ref in refs}
         numeric = [r for r in pool if r.isdigit()]
         numeric.sort(key=_numeric_or_zero)
-        limit = int(self._object_probe().get("max_refs", 12))
-        return numeric[: max(0, limit)]
+        limit = int(self._object_probe().get("max_refs", 0) or 0)
+        return numeric if limit <= 0 else numeric[:limit]
 
     def _object_probe(self) -> dict:
         block = self._cfg().get("object_probe")
@@ -926,9 +927,9 @@ class IdorDiffer(BaseModule):
         if not pool:
             return ownership
 
-        budget = max(0, int(probe.get("max_fetches", 24)))
-        total_budget = max(0, int(probe.get("max_total_fetches", 240)))
-        miss_limit = max(1, int(probe.get("stop_after_misses", 6)))
+        budget = max(0, int(probe.get("max_fetches", 0) or 0))
+        total_budget = max(0, int(probe.get("max_total_fetches", 0) or 0))
+        miss_limit = max(0, int(probe.get("stop_after_misses", 0) or 0))
         total_tried = 0
         attributed_any = 0
 
@@ -951,7 +952,8 @@ class IdorDiffer(BaseModule):
             mine = 0
             misses = 0
             for ref in pool:
-                if tried >= budget or total_tried >= total_budget:
+                if (budget and tried >= budget) or \
+                        (total_budget and total_tried >= total_budget):
                     break
                 url = template.url_for(ref)
                 if not url:
@@ -964,7 +966,8 @@ class IdorDiffer(BaseModule):
                 # the owner and no further account needs to ask.
                 answered = False
                 for identity in identities:
-                    if tried >= budget or total_tried >= total_budget:
+                    if (budget and tried >= budget) or \
+                            (total_budget and total_tried >= total_budget):
                         break
                     result = await self._fetch(harness, identity, url)
                     tried += 1
@@ -1002,14 +1005,15 @@ class IdorDiffer(BaseModule):
                     # on — without it the empty shapes ahead of the real one
                     # walk the whole pool and exhaust the budget first.
                     misses += 1
-                    if misses >= miss_limit:
+                    if miss_limit and misses >= miss_limit:
                         break
 
             if tried:
-                note = "" if misses < miss_limit else " — id space not found"
+                note = "" if (not miss_limit or misses < miss_limit) \
+                    else " — id space not found"
                 self.log(f"    {key}: {mine} attributed / {tried} fetch(es){note}")
 
-            if total_tried >= total_budget:
+            if total_budget and total_tried >= total_budget:
                 break
 
         if total_tried:
@@ -1061,7 +1065,8 @@ class IdorDiffer(BaseModule):
                 # Only test references that are demonstrably the victim's.
                 candidates = sorted(victim_own - attacker_own,
                                     key=_numeric_or_zero)
-                for ref in candidates[: self._cap()]:
+                cap = self._cap()
+                for ref in (candidates if cap <= 0 else candidates[:cap]):
                     target = template.url_for(ref)
                     if not target:
                         continue
@@ -1142,7 +1147,9 @@ class IdorDiffer(BaseModule):
         results: list[CrossResult] = []
         for template in templates:
             for identity in harness.usable:
-                for ref in sorted(owned.get(identity.name, set()))[: self._cap()]:
+                cap = self._cap()
+                owned_refs = sorted(owned.get(identity.name, set()))
+                for ref in (owned_refs if cap <= 0 else owned_refs[:cap]):
                     target = template.url_for(ref)
                     if not target:
                         continue
@@ -1211,7 +1218,7 @@ class IdorDiffer(BaseModule):
             sent = 0
             for victim in others:
                 for ref in sorted(owned.get(victim.name, set()) - attacker_own):
-                    if sent >= write_cap:
+                    if write_cap and sent >= write_cap:
                         self.log(f"  write cap hit ({write_cap}/template): "
                                  f"stopping mutating probes for {template.url}")
                         break
@@ -1472,7 +1479,7 @@ class IdorDiffer(BaseModule):
         return f"https://{host}"
 
     def _cap(self) -> int:
-        return int(self._cfg().get("max_probes_per_template", 15))
+        return int(self._cfg().get("max_probes_per_template", 0) or 0)
 
     def _cfg(self) -> dict:
         cfg = self.config.get("modules", {}).get(self.id, {})
@@ -1488,7 +1495,7 @@ class IdorDiffer(BaseModule):
         return self._cfg().get("probe_collections", True) is not False
 
     def _collection_cap(self) -> int:
-        return int(self._cfg().get("max_collections", 60))
+        return int(self._cfg().get("max_collections", 0) or 0)
 
     def _prefixes(self) -> list:
         configured = self._cfg().get("api_prefixes")

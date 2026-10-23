@@ -60,7 +60,7 @@ class ClientProtoPollution(BaseModule):
             self.state.skip_module(self.id, "playwright not installed")
             return "skipped"
 
-        pages = self._pages(int(cfg.get("max_pages", 3) or 3))
+        pages = self._pages(int(cfg.get("max_pages", 0) or 0))
         if not pages:
             self.state.skip_module(self.id, "no pages to test")
             return "skipped"
@@ -150,7 +150,7 @@ class ClientProtoPollution(BaseModule):
                     continue
                 seen.add(url.rstrip("/"))
                 pages.append(url)
-        return pages[:limit]
+        return pages if limit <= 0 else pages[:limit]
 
     def _file(self, page_url: str, label: str, candidate: str,
               key: str, value: str) -> None:

@@ -54,9 +54,11 @@ class NoSQLScan(BaseModule):
             _guard_deadline = 300.0
         _stop_at = _time_guard.monotonic() + max(60.0, _guard_deadline - 30.0)
         cfg = self._cfg()
-        max_points = int(cfg.get("max_points", 40) or 40)
+        max_points = int(cfg.get("max_points", 0) or 0)
+        if max_points > 0:
+            points = points[:max_points]
         reported = 0
-        for point in points[:max_points]:
+        for point in points:
             if _time_guard.monotonic() >= _stop_at:
                 break
             if point.get("method", "GET") != "GET":

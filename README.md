@@ -155,8 +155,8 @@ python orchestrator.py --tools
 **Key flags:** `-t/--target` (required), `-o/--output` (default `reports`),
 `-c/--config` (default `config.yaml`), `--mode {auto,llm}`, `--module <id>`,
 `--active`, `--pentest`, `--agent`, `--execute`,
-`--max-risk {SAFE,LOW,MEDIUM,HIGH,DESTRUCTIVE}`, `--max-actions`, `--max-chains`,
-`--resume-budget`,
+`--max-risk {SAFE,LOW,MEDIUM,HIGH,DESTRUCTIVE}` (default `DESTRUCTIVE`),
+`--max-actions` / `--max-chains` (default `0` = unlimited), `--resume-budget`,
 `--phase {plan,recon,vuln,exploit,verify,report}`,
 `--list-modules`, `--list-actions`, `--tools`, `--install-tools`.
 

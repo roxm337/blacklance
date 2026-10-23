@@ -34,8 +34,8 @@ class AgentSupervisor:
     def __init__(self, state: StateManager, config: dict,
                  audit: AuditLog | None = None, *, budget=None,
                  execute: bool = False,
-                 max_risk: RiskLevel = RiskLevel.LOW,
-                 max_actions: int = 25):
+                 max_risk: RiskLevel = RiskLevel.DESTRUCTIVE,
+                 max_actions: int = 0):
         self.state = state
         self.config = config
 
@@ -142,7 +142,7 @@ class AgentSupervisor:
         if not self.execute:
             print("  Plan-only mode — pass --execute to run proposed actions.")
         else:
-            for hyp in hypotheses[:self.max_actions]:
+            for hyp in (hypotheses if not self.max_actions else hypotheses[:self.max_actions]):
                 self._check_budget(exploitation)
                 print(f"  Testing: {hyp.title[:60]}...", end=" ")
                 result = await exploitation.test_hypothesis(hyp)
@@ -166,7 +166,7 @@ class AgentSupervisor:
             if h.status in ("testing", "confirmed")
         ]
         verification = self.agents["verification"]
-        for hyp in to_verify[:self.max_actions] if self.execute else []:
+        for hyp in (to_verify if not self.max_actions else to_verify[:self.max_actions]) if self.execute else []:
             self._check_budget(verification)
             print(f"  Verifying: {hyp.title[:60]}...", end=" ")
             result = await verification.verify_finding(hyp)
@@ -239,14 +239,14 @@ class AgentSupervisor:
 
     async def _run_exploitation_phase(self) -> list:
         results = []
-        for hyp in self.bb.get_hypotheses(status="proposed")[:self.max_actions]:
+        for hyp in self.bb.get_hypotheses(status="proposed")[:self.max_actions or None]:
             result = await self.agents["exploitation"].test_hypothesis(hyp)
             results.append({"hypothesis": hyp.id, "result": result})
         return results
 
     async def _run_verification_phase(self) -> list:
         results = []
-        for hyp in self.bb.get_hypotheses(status="testing")[:self.max_actions]:
+        for hyp in self.bb.get_hypotheses(status="testing")[:self.max_actions or None]:
             result = await self.agents["verification"].verify_finding(hyp)
             results.append({"hypothesis": hyp.id, "result": result})
         return results

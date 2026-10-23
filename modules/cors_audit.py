@@ -100,6 +100,7 @@ class CORSAudit(BaseModule):
             return "skipped"
 
         probed = []
+        findings = 0
         for url in urls:
             outcome = await self._check(harness, identity, url)
             if outcome is None:
@@ -107,12 +108,14 @@ class CORSAudit(BaseModule):
             probed.append(outcome)
             finding = outcome.get("finding")
             if finding:
+                findings += 1
                 self.state.add_finding(**finding)
 
         await self._corsy_corroboration(urls)
 
         self.state.complete_module(self.id)
-        self.log(f"cors: {len(probed)} permissive endpoint(s) of {len(urls)}")
+        self.log(f"cors: {len(probed)} endpoint(s) observed, "
+                 f"{findings} permissive of {len(urls)}")
         return "done"
 
     async def _check(self, harness: AuthHarness, identity, url: str):
@@ -290,13 +293,13 @@ class CORSAudit(BaseModule):
 
     def _urls(self, cfg: dict, base: str) -> list:
         candidates = cfg.get("endpoints") or self._discovered() or DEFAULT_ENDPOINTS
-        limit = int(cfg.get("max_endpoints", 20) or 20)
+        limit = int(cfg.get("max_endpoints", 0) or 0)
         urls = []
         for candidate in candidates:
             url = self._absolute(str(candidate))
             if url and url not in urls:
                 urls.append(url)
-            if len(urls) >= limit:
+            if limit > 0 and len(urls) >= limit:
                 break
         return urls
 

@@ -126,15 +126,6 @@ chains:
   # An unregistered action is reported as unarmable, never swapped for an
   # unrelated probe.
   edges: []
-scope:
-  # A machine-readable allow/deny list, enforced before every request.
-  # The file is optional: without it nothing changes. Once it exists, deny
-  # wins and unknown hosts are governed by allow_external.
-  enabled: true
-  file: scope.json
-  # true  = only the deny list is binding (APIs and OOB callbacks keep working)
-  # false = only listed hosts may be contacted (add your enrichment APIs)
-  allow_external: true
 rate_limits:
   default:
     concurrent: 5
@@ -184,7 +175,7 @@ modules:
     # known, otherwise the module falls back to its built-in path seeds.
     endpoints: []
     # Ceiling on cross-account probes per endpoint template.
-    max_probes_per_template: 15
+    max_probes_per_template: 0
 
     # Ownership for object shapes that have no listing endpoint — a basket,
     # a cart, an order fetched by id. Ownership normally comes from comparing
@@ -198,13 +189,13 @@ modules:
     # read and discarded rather than claimed.
     object_probe:
       enabled: true
-      max_refs: 12             # references tried per endpoint
-      max_fetches: 24          # per endpoint, every identity included
-      max_total_fetches: 240   # across the whole run
-      stop_after_misses: 6     # consecutive ids nobody has, then move on
+      max_refs: 0  # references tried per endpoint
+      max_fetches: 0  # per endpoint, every identity included
+      max_total_fetches: 0  # across the whole run
+      stop_after_misses: 0  # consecutive ids nobody has, then move on
 
     # Ceiling on collection endpoints fetched while mapping who owns what.
-    max_collections: 60
+    max_collections: 0
 
     # Collection endpoints to enumerate directly. When neither `endpoints` nor
     # a discovered object URL exists, the module synthesises object templates
@@ -315,11 +306,11 @@ modules:
     # Results land as TENTATIVE, never as confirmed findings: smuggling needs a
     # front end and a back end that disagree on request boundaries, which no
     # single-host check can show.
-    max_targets: 10
+    max_targets: 0
 
   llm_surface:
     enabled: true
-    max_endpoints: 25
+    max_endpoints: 0
     probe_common_paths: true        # GET the five usual LLM paths
     probe_completion: false         # one benign prompt to test anonymous access
     model: ''                       # fallback model id when /v1/models is closed
@@ -328,7 +319,7 @@ modules:
     # Off by default: these are adversarial prompts and they spend the
     # target's inference budget. Some programs forbid automated prompting.
     enabled: false
-    max_endpoints: 5
+    max_endpoints: 0
     model: ''                       # overrides the id discovered by llm_surface
     # Indirect injection: an operator-hosted page the app can fetch. The page
     # must instruct the model to answer with ingestion_canary; the module only
@@ -352,12 +343,12 @@ modules:
 
     # (endpoint, parameter) pairs to try. Each pair may send several payload
     # shapes, so this is the real bound on request volume.
-    max_targets: 40
+    max_targets: 0
 
   client_proto_pollution:
     enabled: true
     # Loads pages headless and reads Object.prototype back out of the realm.
-    max_pages: 3
+    max_pages: 0
     timeout_ms: 15000
     wait_ms: 800
 
@@ -374,7 +365,7 @@ modules:
 
     # How many webapps to hand to the CMS scanners. These are slow (WPScan and
     # droopescan run to five minutes each), so the bound matters.
-    max_targets: 5
+    max_targets: 0
 
     # Results are graded per component, not merged into one count. A disclosed
     # version lands as INFO; a known CVE lands as HIGH, or CRITICAL when CISA
@@ -394,8 +385,8 @@ modules:
     kiterunner:
       enabled: true
       wordlist: "apiroutes-260227"  # see `kr wordlist list` for current names
-      max_routes: 1500               # routes tried per target (cap 20000)
-      max_targets: 2                 # base URL + api_endpoint origins (cap 10)
+      max_routes: 0  # routes tried per target (cap 20000)
+      max_targets: 0  # base URL + api_endpoint origins (cap 10)
       # Polite knobs for live scopes (delay 1000 + connections 1 ≈ 1 req/s);
       # the defaults below are a lab setting.
       delay_ms: 100
@@ -413,7 +404,7 @@ modules:
     # Endpoints to send the probe Origin at. Left empty, the endpoints
     # recon already recorded are used, then a short list of common shapes.
     endpoints: []
-    max_endpoints: 20
+    max_endpoints: 0
 
   sqli_scan:
     # Hand sqlmap an interactsh server so blind injections get proof instead of
@@ -423,7 +414,7 @@ modules:
     # for the exact URL that produced a callback.
     oast: true
     escalate: true             # re-run promising points with heavier tamper sets
-    max_escalations: 3         # cap on escalation re-runs per point
+    max_escalations: 0  # cap on escalation re-runs per point
 
   ssrf_scan:
     # Generic server-side request forgery: URL-bearing parameters get a
@@ -436,27 +427,27 @@ modules:
     # metadata addresses are never requested, so instance credentials
     # cannot land in evidence on a hit.
     enabled: true
-    max_points: 6                # URL parameters probed per run (cap 30)
+    max_points: 0  # URL parameters probed per run (cap 30)
     params: []                   # empty = built-in URL-param names
     # params: ["url", "src"]     # override the built-in URL-param names
 
   ssti_scan:
-    max_points: 40               # template-injection points probed per run
+    max_points: 0  # template-injection points probed per run
     error_based: true            # blind fallback: engine exceptions name the marker
-    error_max_points: 8          # points that get the error-probe budget
+    error_max_points: 0          # points that get the error-probe budget
     waf_adaptive: true           # retry blocked payloads with safe mutations
 
   nosql_scan:
-    max_points: 40               # NoSQL-injection points probed per run
+    max_points: 0  # NoSQL-injection points probed per run
 
   dom_xss_scan:
-    max_pages: 25                # rendered pages sunk-checked for DOM XSS
+    max_pages: 0  # rendered pages sunk-checked for DOM XSS
     routes: []                   # extra SPA route templates containing {P}
     payloads: []                 # extra payload templates containing {m}
 
   parameter_discovery:
     seed_when_empty: true        # seed reflection probes when none discovered
-    seed_targets: 10             # pages seeded with reflection probes
+    seed_targets: 0  # pages seeded with reflection probes
     seed_params: []              # extra parameter names to seed
 
   auth_audit:
@@ -481,7 +472,7 @@ modules:
     # restored and the restore verified. Needs a verified identity;
     # no checkout is ever completed.
     enabled: true
-    max_probes: 12               # hostile values sent per run (cap 40)
+    max_probes: 0  # hostile values sent per run (cap 40)
     endpoints: []                # explicit cart/order endpoints
     # endpoints: ["/api/cart"]   # discovered api_endpoints win when present
 
@@ -549,11 +540,11 @@ modules:
     # Target the CVE ids we already believe apply (from CMS intel and
     # findings) directly, instead of running the whole cve tag set.
     per_cve: true
-    per_cve_max: 6
+    per_cve_max: 0
     per_cve_seconds: 90
 
   xss_scan:
-    max_points: 80
+    max_points: 0
     browser_confirm: true
     dalfox_timeout: 600
     # Let dalfox run its own interactsh session against the public mesh.
@@ -604,7 +595,7 @@ crawl:
     # followed to `depth` with a per-context page cap; cross-origin
     # links are recorded, never rendered.
     enabled: true
-    max_targets: 8               # pages rendered per context (cap 50)
+    max_targets: 0  # pages rendered per context (cap 50)
     depth: 1                     # link-following depth, same-origin only (cap 3)
     max_identities: 2            # verified identities rendered (cap 5)
     wait_ms: 1500

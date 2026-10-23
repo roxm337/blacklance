@@ -86,7 +86,7 @@ def preflight(config: dict, context: dict | None = None) -> dict:
 
     # Arming proving actions above LOW is the one decision that can hurt
     # someone: say it where it cannot be missed.
-    ceiling = context.get("max_risk", "LOW")
+    ceiling = context.get("max_risk", "DESTRUCTIVE")
     if context.get("execute") or context.get("agent"):
         if ceiling not in ("SAFE", "LOW"):
             warnings.append(

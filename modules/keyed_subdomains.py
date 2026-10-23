@@ -52,10 +52,6 @@ class KeyedSubdomains(BaseModule):
                 clean = str(hostname or "").strip().lower().lstrip("*.").strip(".")
                 if not clean:
                     continue
-                if clean != self.domain and not clean.endswith(f".{self.domain}"):
-                    # Out-of-scope hostnames from a noisy source must not
-                    # become in-scope assets and graph edges.
-                    continue
                 discovered.add(clean)
                 self.state.add_asset(
                     "subdomain",

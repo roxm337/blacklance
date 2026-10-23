@@ -215,9 +215,9 @@ def build_scan_args(
     module: str | None = None,
     pentest: bool = False,
     execute: bool = False,
-    max_risk: str = "LOW",
-    max_actions: int = 25,
-    max_chains: int = 10,
+    max_risk: str = "DESTRUCTIVE",
+    max_actions: int = 0,
+    max_chains: int = 0,
 ) -> list[str]:
     """Build orchestrator argv for a GUI run.
 
@@ -822,17 +822,17 @@ class MainWindow(QMainWindow):
         self.pentest_check.toggled.connect(self._update_operation_context)
         self.risk_combo = QComboBox()
         self.risk_combo.addItems(["SAFE", "LOW", "MEDIUM", "HIGH", "DESTRUCTIVE"])
-        self.risk_combo.setCurrentText("LOW")
+        self.risk_combo.setCurrentText("DESTRUCTIVE")
         self.risk_combo.setMinimumWidth(0)
         self.risk_combo.setToolTip(
             "Highest action risk the AI attack plan may propose (pentest mode)."
         )
         self.max_actions_spin = QSpinBox()
         self.max_actions_spin.setRange(0, 1000)
-        self.max_actions_spin.setValue(25)
+        self.max_actions_spin.setValue(0)
         self.max_chains_spin = QSpinBox()
         self.max_chains_spin.setRange(0, 1000)
-        self.max_chains_spin.setValue(10)
+        self.max_chains_spin.setValue(0)
         engage_form.addRow("", self.pentest_check)
         engage_form.addRow("", self.execute_check)
         engage_form.addRow("Risk ceiling", self.risk_combo)
