@@ -29,6 +29,7 @@ from tools.wrappers import curl, curl_with_status
 
 _RESET_PATHS = (
     "/forgot-password", "/forgot", "/password/reset", "/reset-password",
+    "/rest/user/reset-password",
     "/account/recover", "/users/password/new", "/api/auth/forgot-password",
     "/api/password/forgot", "/api/forgot-password", "/wp-login.php?action=lostpassword",
 )

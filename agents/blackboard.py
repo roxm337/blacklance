@@ -36,6 +36,7 @@ class Hypothesis:
     evidence_refs: list = field(default_factory=list)
     created_by: str = ""
     result: Optional[dict] = None
+    finding_id: str = ""
 
 
 @dataclass

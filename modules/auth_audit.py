@@ -22,7 +22,7 @@ from tools.wrappers import curl
 LOGIN_PATH_SEEDS = (
     "/login", "/signin", "/sign-in", "/api/login", "/api/auth/login",
     "/api/users/login", "/api/session", "/session",
-    "/rest/login", "/auth/login", "/oauth/token",
+    "/rest/login", "/rest/user/login", "/auth/login", "/oauth/token",
 )
 
 SQLI_IDENTITY_PAYLOADS = (

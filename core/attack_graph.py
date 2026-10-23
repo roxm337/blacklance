@@ -72,35 +72,11 @@ class AttackGraph:
 
     probe_plan: dict = {}
 
-    def __init__(self, state: StateManager, scope_hosts: set | None = None,
-                 config: dict | None = None):
+    def __init__(self, state: StateManager, config: dict | None = None):
         self.state = state
         self.config = config or {}
         self.nodes: dict[str, AttackNode] = {}
         self.edges: list[AttackEdge] = []
-        # Hosts that count as the target app. Nodes outside the scope
-        # (youtube embeds, third-party trackers) become graph nodes for
-        # nothing and probe targets for less than nothing.
-        self.scope_hosts = {str(h).lower() for h in (scope_hosts or set()) if h}
-
-    def _in_scope_node(self, node_id: str, label: str = "") -> bool:
-        """Scope gate for graph membership and probe planning."""
-        if not self.scope_hosts:
-            return True
-        from urllib.parse import urlparse
-        for text in (node_id, label):
-            try:
-                host = (urlparse(str(text)).hostname or "").lower()
-            except ValueError:
-                continue
-            if not host:
-                continue
-            if host in self.scope_hosts or any(
-                    host == h or host.endswith("." + h)
-                    for h in self.scope_hosts):
-                return True
-            return False
-        return True
 
     @staticmethod
     def _sanitize_attrs(attrs: dict) -> dict:
@@ -133,8 +109,6 @@ class AttackGraph:
                              "js_file"):
                 from core.probe_targets import is_probe_garbage
                 if is_probe_garbage(value) or is_probe_garbage(key):
-                    continue
-                if not self._in_scope_node(key, value):
                     continue
             self.nodes[key] = AttackNode(
                 id=key,
@@ -189,6 +163,87 @@ class AttackGraph:
          "web.ssrf.cloud_metadata"),
     )
 
+    def _finding_surface(self, finding: dict) -> tuple[str, str, str]:
+        """The `(node_id, url, param)` a finding can actually be actioned at.
+
+        A finding's `asset_keys` are not guaranteed to point at a live,
+        testable node. Detectors write `url:<url>` even when recon recorded
+        only a `parameter` asset, some findings name a `webapp:` node, and a
+        URL asset often has no query string while the detector's
+        `verification` block still names the parameter it injected. Linking
+        the finding to the node that exists is what connects detection to
+        exploitation; treating a missing asset key as "no surface" is how
+        confirmed SSRF findings produced zero chains.
+        """
+        from core.probe_targets import is_probe_garbage
+
+        candidates: list[str] = []
+        for raw in finding.get("asset_keys") or []:
+            key = str(raw or "")
+            node = self.nodes.get(key)
+            if node is not None:
+                if node.node_type not in TESTABLE_NODE_TYPES:
+                    continue
+                url, param = self._surface(node)
+                if url and not is_probe_garbage(url):
+                    if param:
+                        return key, url, param
+                    if url not in candidates:
+                        candidates.append(url)
+                continue
+            # The asset may have been pruned or never recorded, but a
+            # `url:` key is still the URL the detector tested.
+            if key.startswith("url:"):
+                url = key[len("url:"):].strip()
+                if (url.startswith(("http://", "https://"))
+                        and not is_probe_garbage(url)
+                        and url not in candidates):
+                    candidates.append(url)
+
+        verification = finding.get("verification") or {}
+        vurl = str(verification.get("url") or "").strip()
+        if (vurl.startswith(("http://", "https://"))
+                and not is_probe_garbage(vurl)
+                and vurl not in candidates):
+            candidates.append(vurl)
+
+        # The parameter asset names the input that was actually tested, even
+        # when no asset was recorded for its page.
+        for url in candidates:
+            for nid, node in self.nodes.items():
+                if node.node_type != "parameter":
+                    continue
+                if str((node.attrs or {}).get("url") or "").strip() != url:
+                    continue
+                param = str(node.label or "").strip()
+                if param:
+                    return nid, url, param
+
+        if not candidates:
+            return "", "", ""
+        url = candidates[0]
+        param = str(verification.get("param") or "").strip()
+        node_id = f"url:{url}"
+        node = self.nodes.get(node_id)
+        if node is not None and node.node_type not in TESTABLE_NODE_TYPES:
+            return "", "", ""
+        if node is None:
+            node = AttackNode(
+                id=node_id, label=url, node_type="url",
+                confidence=finding.get("confidence", "TENTATIVE"),
+                attrs={"url": url},
+            )
+            self.nodes[node_id] = node
+        if param and not (node.attrs or {}).get("param"):
+            # AttackNode is frozen; replace the node rather than mutate it.
+            node = AttackNode(
+                id=node.id, label=node.label, node_type=node.node_type,
+                confidence=node.confidence,
+                attrs={**(node.attrs or {}), "param": param},
+            )
+            self.nodes[node_id] = node
+        return node_id, url, param
+
     def _infer_exploitation_goals(self):
         """Turn a finding into an exploit chain to the impact that follows."""
         seen: set[tuple[str, str]] = set()
@@ -205,24 +260,20 @@ class AttackGraph:
                     id=goal_id, label=label, node_type="goal",
                     confidence="TENTATIVE",
                 )
-            for key in finding.get("asset_keys", []):
-                node = self.nodes.get(key)
-                if node is None or node.node_type not in TESTABLE_NODE_TYPES:
-                    continue
-                url, param = self._surface(node)
-                if not url or not param:
-                    continue
-                pair = (key, goal_id)
-                if pair in seen:
-                    continue
-                seen.add(pair)
-                self.edges.append(AttackEdge(
-                    source_id=key, target_id=goal_id,
-                    edge_type="pivot", action_id=action_id,
-                    likelihood=0.6, impact=0.9,
-                    attrs={"via": str(finding.get("id", "")),
-                           "category": category},
-                ))
+            key, url, param = self._finding_surface(finding)
+            if not url or not param:
+                continue
+            pair = (key, goal_id)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            self.edges.append(AttackEdge(
+                source_id=key, target_id=goal_id,
+                edge_type="pivot", action_id=action_id,
+                likelihood=0.6, impact=0.9,
+                attrs={"via": str(finding.get("id", "")),
+                       "category": category},
+            ))
 
     EDGE_TYPES = {"exploit", "pivot", "extract", "authenticate", "escalate"}
 
@@ -260,24 +311,20 @@ class AttackGraph:
             for finding in self.state.findings.get("findings", []):
                 if category not in str(finding.get("category", "")).lower():
                     continue
-                for key in finding.get("asset_keys", []):
-                    node = self.nodes.get(key)
-                    if node is None or node.node_type not in TESTABLE_NODE_TYPES:
-                        continue
-                    url, _ = self._surface(node)
-                    if not url or (hint and hint not in url):
-                        continue
-                    pair = (key, goal_id, action)
-                    if pair in seen:
-                        continue
-                    seen.add(pair)
-                    self.edges.append(AttackEdge(
-                        source_id=key, target_id=goal_id,
-                        edge_type=edge_type, action_id=action,
-                        likelihood=0.5, impact=0.9,
-                        attrs={"via": str(finding.get("id", "")),
-                               "configured": True},
-                    ))
+                key, url, _ = self._finding_surface(finding)
+                if not url or (hint and hint not in url):
+                    continue
+                pair = (key, goal_id, action)
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                self.edges.append(AttackEdge(
+                    source_id=key, target_id=goal_id,
+                    edge_type=edge_type, action_id=action,
+                    likelihood=0.5, impact=0.9,
+                    attrs={"via": str(finding.get("id", "")),
+                           "configured": True},
+                ))
 
     def _infer_transitions(self):
         """Detect common attack transitions from node types and attributes."""
@@ -394,28 +441,19 @@ class AttackGraph:
 
     PROBE_ACTIONS: list[str] = [
         "web.sqli.detect",
+        "web.sqli.blind_detect",
         "web.xss.reflected",
-        # LOW risk, so this is the probe that runs at the default LOW
-        # ceiling: every parameterized surface gets an open-redirect
-        # check even when injection testing stays parked.
         "web.redirect.probe",
+        "web.ssrf.oob_detect",
     ]
 
-    def propose_test_edges(self, max_edges: int = 100,
-                           risk_ceiling: str = "LOW") -> list[AttackEdge]:
+    def propose_test_edges(self, max_edges: int = 0,
+                           risk_ceiling: str = "DESTRUCTIVE") -> list[AttackEdge]:
         """Propose an exploit edge for every testable surface on the graph.
 
-        Bounded on purpose. An unbounded planner multiplies a noisy recon into
-        a noisy attack, and the cost of a wasted probe is not the same as the
-        cost of a wasted report.
-
-        The risk ceiling is honoured rather than worked around. Injection
-        actions are MEDIUM or above, so at the default LOW ceiling only
-        the LOW redirect probe is proposed; anything hotter is parked and
-        the reason is recorded in `self.probe_plan` so the caller can say
-        so out loud. The previous behaviour was to return an empty list
-        indistinguishable from "there was nothing to test", which is how
-        a scan of a real application reported zero chains and no explanation.
+        `max_edges=0` proposes every testable surface. `risk_ceiling`
+        defaults to DESTRUCTIVE so injection actions are not parked; any
+        ceiling the caller passes is still enforced and recorded.
 
         Returns only the edges it created.
         """
@@ -441,9 +479,8 @@ class AttackGraph:
             if not url:
                 continue
             from core.probe_targets import is_probe_garbage
-            if is_probe_garbage(url) or not self._in_scope_node(nid, url):
-                blocked["out of scope or probe residue"] = \
-                    blocked.get("out of scope or probe residue", 0) + 1
+            if is_probe_garbage(url):
+                blocked["probe residue"] = blocked.get("probe residue", 0) + 1
                 continue
             considered += 1
             armed = False
@@ -469,12 +506,16 @@ class AttackGraph:
                     continue
                 candidates.append((action_id, nid))
                 armed = True
-                break  # one probe per surface keeps the budget honest
-            if not armed and not candidates:
+            # Every armable probe family runs against the surface. The old
+            # `break` meant one action per parameter: a SQLi detector that
+            # found nothing also suppressed the XSS and redirect probes on
+            # the same parameter, so multiple bug classes were never tested.
+            if not armed:
                 continue
 
         created: list[AttackEdge] = []
-        for action_id, nid in candidates[:max_edges]:
+        for action_id, nid in (candidates if max_edges <= 0
+                               else candidates[:max_edges]):
             node = self.nodes[nid]
             goal_id = f"goal:probe_{nid}"
             if goal_id not in self.nodes:
@@ -503,7 +544,7 @@ class AttackGraph:
             "risk_ceiling": str(risk_ceiling).upper(),
             "surfaces_considered": considered,
             "probes_proposed": len(created),
-            "capped_at": max_edges,
+            "capped_at": max_edges or "unlimited",
             "not_proposed": blocked,
         }
         return created
@@ -553,7 +594,7 @@ class AttackGraph:
         return url, param
 
 
-    def find_chains(self, max_depth: int = 4,
+    def find_chains(self, max_depth: int = 12,
                     min_score: float = 0.1) -> list[AttackPath]:
         """BFS for exploit chains from assets to high-value goals."""
         goals = {k: v for k, v in self.nodes.items() if v.node_type == "goal"}

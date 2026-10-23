@@ -497,16 +497,13 @@ def looks_unsanitized(body: str, payload: str, marker: str) -> bool:
     """
     if not body:
         return False
-    if payload in body:
-        return True
-    dangerous_fragments = [
-        "<svg",
-        "onload=",
-        "document.body.append",
-        f"`{marker}`.repeat(2)",
-    ]
-    raw = body.lower()
-    return all(fragment.lower() in raw for fragment in dangerous_fragments)
+    # Verbatim only. The old fallback ("all dangerous fragments appear
+    # somewhere") fired on GitHub's commits page because `<svg`, `onload=`
+    # and `document.body.append` each exist independently in the page and
+    # its bundles; they were never the injected payload. A scanner that
+    # concatenates unrelated fragments proves nothing. If a server rewrites
+    # the payload but still executes it, the browser witness is the oracle.
+    return payload in body
 
 
 async def probe_reflected_xss(url: str, param: str, payloads: list,

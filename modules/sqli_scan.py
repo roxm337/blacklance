@@ -1,5 +1,6 @@
 """Stage 5: Authorized SQL injection scanning with sqlmap."""
 
+from core.deadline import deadline_reached
 from modules.base import BaseModule
 from tools.external import sqlmap_scan, tool_available
 
@@ -29,27 +30,37 @@ class SQLiScan(BaseModule):
         cookie, extra_headers = self._auth_args()
         cfg = self._cfg()
         escalate = cfg.get("escalate", True) is not False
-        max_escalations = int(cfg.get("max_escalations", 3) or 3)
+        max_escalations = int(cfg.get("max_escalations", 0) or 0)
 
         evidence_refs = []
         total = []
         oast_urls = set()
         escalated = 0
-        for url in urls[:10]:
+        attempted = 0
+        stopped = 0
+        for index, url in enumerate(urls):
+            if deadline_reached():
+                stopped = len(urls) - index
+                break
             result = await sqlmap_scan(url, timeout=600,
                                        interactsh_url=interactsh_url,
                                        risk=1, level=1,
                                        cookie=cookie, headers=extra_headers)
+            if result.get("error") == "deadline_exceeded":
+                stopped = len(urls) - index
+                break
+            attempted += 1
             batch = result.get("results", []) or []
             # Escalation ladder, second rung only: risk/level 3 on points
             # where level 1 already found candidate evidence. Level 5 and
             # risk 4+ stay parked — their payload volume is a DoS-shaped
             # hammer for a marginal coverage gain.
             if batch and not result.get("oast") and escalate \
-                    and escalated < max_escalations:
+                    and not deadline_reached() \
+                    and (max_escalations <= 0 or escalated < max_escalations):
                 escalated += 1
                 self.log(f"  Escalating {url} to risk/level 3 "
-                         f"({escalated}/{max_escalations})...")
+                         f"({escalated}/{max_escalations or '∞'})...")
                 result = await sqlmap_scan(url, timeout=600,
                                            interactsh_url=interactsh_url,
                                            risk=3, level=3,
@@ -72,6 +83,22 @@ class SQLiScan(BaseModule):
                         "stderr": result.get("stderr", ""),
                     },
                 )
+            )
+
+        if stopped:
+            self.log(f"  Deadline reached after {attempted}/{len(urls)} "
+                     f"target(s); {stopped} not tested")
+            self.state.add_evidence(
+                self.id,
+                "coverage",
+                self.domain,
+                {
+                    "targets": len(urls),
+                    "tested": attempted,
+                    "not_tested": stopped,
+                    "partial": True,
+                    "reason": "deadline_exceeded",
+                },
             )
 
         for item in total:
@@ -107,7 +134,8 @@ class SQLiScan(BaseModule):
         self.state.complete_module(self.id)
         self.log(
             f"SQL injection candidates: {len(total)}"
-            f" ({len(oast_urls)} out-of-band confirmed)"
+            f" ({len(oast_urls)} out-of-band confirmed, "
+            f"{attempted}/{len(urls)} targets tested)"
         )
         return "done"
 

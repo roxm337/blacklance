@@ -23,6 +23,7 @@ from urllib.parse import urljoin, urlparse
 
 from core.auth_harness import AuthHarness
 from core.noise_filters import is_vendor_js
+from core.probe_targets import in_scope_url
 from modules.base import BaseModule
 from modules.js_analysis import extract_dom_sinks
 
@@ -44,15 +45,17 @@ class BrowserCrawl(BaseModule):
             self.state.skip_module(self.id, "disabled in config")
             return "skipped"
         try:
-            max_pages = max(1, min(50, int(crawl_cfg.get("max_targets", 8))))
+            max_pages = int(crawl_cfg.get("max_targets", 0) or 0)
+            if max_pages <= 0:
+                max_pages = 10**9
         except (TypeError, ValueError):
-            max_pages = 8
+            max_pages = 10**9
         try:
-            depth = max(0, min(3, int(crawl_cfg.get("depth", 1) or 0)))
+            depth = max(0, int(crawl_cfg.get("depth", 1) or 0))
         except (TypeError, ValueError):
             depth = 1
         try:
-            max_identities = max(0, min(5, int(crawl_cfg.get("max_identities", 2))))
+            max_identities = int(crawl_cfg.get("max_identities", 2) or 0)
         except (TypeError, ValueError):
             max_identities = 2
         try:
@@ -134,7 +137,9 @@ class BrowserCrawl(BaseModule):
                 )
             )
 
-        http_urls = [url for url in sorted(discovered) if _is_http(url)]
+        http_urls = [url for url in sorted(discovered)
+                     if _is_http(url)
+                     and in_scope_url(url, self.base_url, self.domain)]
         for url in http_urls[:1000]:
             asset_type = "api_endpoint" if _looks_api(url) else "url"
             self.state.add_asset(
@@ -147,6 +152,8 @@ class BrowserCrawl(BaseModule):
             )
             self.state.add_edge(f"domain:{self.domain}", f"{asset_type}:{url}", "DISCOVERED_VIA")
 
+        js_urls = {url for url in js_urls
+                   if in_scope_url(url, self.base_url, self.domain)}
         for js_url in sorted(js_urls)[:200]:
             self.state.add_asset(
                 "js_file",
@@ -157,6 +164,8 @@ class BrowserCrawl(BaseModule):
                 attrs={"rendered": True, "vendor": is_vendor_js(js_url)},
             )
 
+        source_maps = {url for url in source_maps
+                       if in_scope_url(url, self.base_url, self.domain)}
         for map_url in sorted(source_maps)[:100]:
             self.state.add_asset(
                 "source_map",
@@ -308,7 +317,8 @@ class BrowserCrawl(BaseModule):
         for asset_type in ("webapp", "url"):
             for asset in self.state.get_assets_by_type(asset_type):
                 value = str(asset.get("value", "")).strip()
-                if _is_http(value) and value not in targets:
+                if (_is_http(value) and value not in targets
+                        and in_scope_url(value, self.base_url, self.domain)):
                     targets.append(value)
         return targets
 

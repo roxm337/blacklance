@@ -87,15 +87,17 @@ class SSTIScan(BaseModule):
             _guard_deadline = 300.0
         _stop_at = _time_guard.monotonic() + max(60.0, _guard_deadline - 30.0)
         cfg = self._cfg()
-        max_points = int(cfg.get("max_points", 40) or 40)
+        max_points = int(cfg.get("max_points", 0) or 0)
         error_based = cfg.get("error_based", True) is not False
-        error_points = int(cfg.get("error_max_points", 8) or 8)
+        error_points = int(cfg.get("error_max_points", 0) or 0)
+        if max_points > 0:
+            points = points[:max_points]
         reported = 0
-        for index, point in enumerate(points[:max_points]):
+        for index, point in enumerate(points):
             if _time_guard.monotonic() >= _stop_at:
                 break
             if await self._test_point(
-                    point, error_based=error_based and index < error_points):
+                    point, error_based=error_based and (error_points <= 0 or index < error_points)):
                 reported += 1
 
         self.state.complete_module(self.id)
@@ -134,7 +136,17 @@ class SSTIScan(BaseModule):
         control_body = control["body"]
 
         if CONTROL_STRING in control_body:
-            control_count = control_body.count("49")
+            # Dynamic pages move their own numbers between requests. One
+            # sample is not a baseline: take two and use the maximum, then
+            # require both payload samples to beat it. GitHub's commits page
+            # passed the old single-sample test because its price/date noise
+            # happened to carry one extra "49".
+            control_counts = [control_body.count("49")]
+            repeat = await self._fetch(
+                inject_param(url, param, CONTROL_STRING))
+            if repeat["status"] in (200, 201):
+                control_counts.append(repeat["body"].count("49"))
+            control_count = max(control_counts)
             for label, payload in SSTI_PAYLOADS:
                 response = await self._fetch(inject_param(url, param, payload))
                 if (self._waf_adaptive()
@@ -143,15 +155,23 @@ class SSTIScan(BaseModule):
                         url, param, payload, control_count,
                         response.get("status"))
                     if bypass:
-                        self._file_evaluation(label, payload, url, param,
-                                              bypass["body"], bypass)
-                        return True
+                        confirmation = await self._fetch(bypass["test_url"])
+                        if self._evaluated(confirmation, control_count,
+                                           payload):
+                            self._file_evaluation(label, payload, url, param,
+                                                  confirmation["body"], bypass)
+                            return True
                     continue
                 if response["status"] not in (200, 201):
                     continue
-                body = response["body"]
-                if body.count("49") > control_count and payload not in body:
-                    self._file_evaluation(label, payload, url, param, body)
+                # Two identical payload requests, both above the loudest
+                # control: a single dynamic fluctuation cannot manufacture
+                # the finding.
+                second = await self._fetch(inject_param(url, param, payload))
+                if self._evaluated(response, control_count, payload) \
+                        and self._evaluated(second, control_count, payload):
+                    self._file_evaluation(label, payload, url, param,
+                                          second["body"])
                     return True
 
         if not error_based:

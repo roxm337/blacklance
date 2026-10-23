@@ -115,6 +115,27 @@ class AuthBypass(BaseModule):
                            headers={"Content-Type": "application/x-www-form-urlencoded"})
         return r
 
+    def _store_identity(self, endpoint: str, token: str, role: str,
+                        email: str) -> None:
+        """Persist the bypassed session for IDOR/replay later in the run."""
+        key = f"identity:{email or endpoint}"
+        self.state.add_asset(
+            "identity_credential",
+            key,
+            email or f"sqli-bypass:{endpoint}",
+            confidence="CONFIRMED",
+            sources=[self.id],
+            attrs={
+                "endpoint": endpoint,
+                "technique": "sqli_auth_bypass",
+                "role": role,
+                "email": email,
+                "token": token,
+                "token_preview": f"{token[:16]}…{token[-8:]}",
+                "discovered_by": self.id,
+            },
+        )
+
     async def _probe(self, base: str, endpoint: str) -> bool:
         for field in _ID_FIELDS[:2]:
             if self.should_stop(reserve=6):
@@ -137,9 +158,14 @@ class AuthBypass(BaseModule):
                     continue
                 if auth_success(str(r.get("headers", "")), r.get("body", "")):
                     role = ""
+                    token = ""
+                    email = ""
                     m = _JWT.search(r.get("body", "") or "")
                     if m:
-                        role = _role_from_jwt(m.group(0))
+                        token = m.group(0)
+                        role, email = _claims_from_jwt(token)
+                    if token:
+                        self._store_identity(endpoint, token, role, email)
                     self.state.add_finding(
                         title="Authentication bypass via SQL injection on login",
                         severity="CRITICAL", confidence="CONFIRMED",
@@ -157,8 +183,10 @@ class AuthBypass(BaseModule):
                                     "login lookup; never concatenate the "
                                     "identifier into SQL.",
                         asset_keys=[f"webapp:{base}"],
+                        verified=True,
                         verification={"method": "sqli_auth_bypass_differential",
-                                      "url": endpoint})
+                                      "url": endpoint,
+                                      "token_captured": bool(token)})
                     return True
         return False
 
@@ -168,7 +196,8 @@ def _json_str(value: str) -> str:
     return json.dumps(value)
 
 
-def _role_from_jwt(token: str) -> str:
+def _claims_from_jwt(token: str) -> tuple[str, str]:
+    """Return (role, email) from the token claims, tolerating nesting."""
     import base64
     import json
     try:
@@ -176,6 +205,7 @@ def _role_from_jwt(token: str) -> str:
         payload += "=" * (-len(payload) % 4)
         data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore"))
         d = data.get("data", data)
-        return str(d.get("role") or d.get("email") or "")[:40]
+        return (str(d.get("role") or "")[:40],
+                str(d.get("email") or d.get("username") or "")[:120])
     except Exception:  # noqa: BLE001
-        return ""
+        return "", ""

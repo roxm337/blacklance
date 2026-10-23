@@ -94,6 +94,7 @@ EDGE_ACTIONS: dict[str, list[str]] = {
         "web.sqli.detect",
         "web.sqli.blind_detect",
         "web.xss.reflected",
+        "web.redirect.probe",
     ],
     "pivot": [
         "web.ssrf.oob_detect",
@@ -113,9 +114,13 @@ CATEGORY_ACTIONS: list[tuple[str, str]] = [
     ("sql", "web.sqli.detect"),
     ("injection", "web.sqli.detect"),
     ("xss", "web.xss.reflected"),
+    ("cross-site", "web.xss.reflected"),
+    ("script", "web.xss.reflected"),
     ("redirect", "web.redirect.probe"),
     ("ssrf", "web.ssrf.oob_detect"),
+    ("server-side request", "web.ssrf.oob_detect"),
     ("cloud", "web.ssrf.cloud_metadata"),
+    ("metadata", "web.ssrf.cloud_metadata"),
     ("jwt", "auth.jwt.detect"),
     ("token", "auth.jwt.detect"),
     ("auth", "auth.jwt.detect"),
@@ -170,8 +175,8 @@ class ChainExecutor:
 
     def __init__(self, state, config: Optional[dict] = None,
                  budget=None, audit=None,
-                 max_risk: RiskLevel = RiskLevel.LOW,
-                 max_actions: int = 25,
+                 max_risk: RiskLevel = RiskLevel.DESTRUCTIVE,
+                 max_actions: int = 0,
                  module_id: str = "chain_executor"):
         self.state = state
         self.config = config or {}
@@ -363,12 +368,11 @@ class ChainExecutor:
         """
         candidates = []
         if edge.action_id:
-            if not ActionRegistry.get(edge.action_id):
-                # A configured chain named an action this build does not
-                # have. Guessing another probe would test something the
-                # operator never asked for, so report it as unarmable.
-                return []
-            candidates.append((edge.action_id, "declared on edge"))
+            if ActionRegistry.get(edge.action_id):
+                candidates.append((edge.action_id, "declared on edge"))
+            # An unregistered declared action no longer kills the edge: fall
+            # through to the category/edge candidates so the surface is still
+            # tested instead of reported as unarmable.
 
         target = self._node(edge.target_id, chain)
         category = ""
@@ -396,9 +400,9 @@ class ChainExecutor:
 
     # ── execution ─────────────────────────────────────────────────
 
-    async def execute(self, chains, max_chains: int = 10) -> ExecutionReport:
+    async def execute(self, chains, max_chains: int = 0) -> ExecutionReport:
         report = ExecutionReport()
-        pending = list(chains)[:max_chains]
+        pending = list(chains) if max_chains <= 0 else list(chains)[:max_chains]
         if self.budget is not None and not self.budget.check():
             # Budget already exhausted: report every chain as skipped WITHOUT
             # pruning. The old code pruned first and then raised out of here,
@@ -429,7 +433,7 @@ class ChainExecutor:
                     self.plan(chain),
                     key=lambda item: _reason_rank(item.reason))
                 for planned in planned_edges:
-                    if self._used >= self.max_actions:
+                    if self.max_actions and self._used >= self.max_actions:
                         report.skipped.append(EdgeOutcome(
                             edge=planned.edge, action_id=planned.action_id,
                             status="skipped", detail="action budget exhausted"))

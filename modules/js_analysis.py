@@ -104,15 +104,10 @@ PUBLIC_BY_DESIGN = {
 }
 
 
-def _in_scope_url(url: str, domain: str) -> bool:
-    """Hostname-boundary scope check: evil-example.com is not example.com."""
-    from urllib.parse import urlparse
-    try:
-        host = (urlparse(str(url)).hostname or "").lower().strip(".")
-    except ValueError:
-        return False
-    root = str(domain or "").lower().strip(".")
-    return bool(host) and (host == root or host.endswith(f".{root}"))
+def _in_scope_url(url: str, base_url: str, domain: str) -> bool:
+    """Keep discovered scripts on the engagement host, not vendor CDNs."""
+    from core.probe_targets import in_scope_url
+    return in_scope_url(url, base_url, domain)
 
 
 def _looks_javascript(url: str) -> bool:
@@ -498,7 +493,7 @@ class JSAnalysis(BaseModule):
 
         target_js = [
             url for url in js_urls
-            if _in_scope_url(url, self.domain)
+            if _in_scope_url(url, self.base_url, self.domain)
             and _looks_javascript(url)
         ][:50]  # Limit to 50 files
 

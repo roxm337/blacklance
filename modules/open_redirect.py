@@ -26,6 +26,7 @@ import time
 from urllib.parse import urlparse, urlunparse
 
 from core.auth_harness import AuthHarness
+from core.deadline import deadline_reached
 from modules.base import BaseModule
 from tools.external import openredirex_scan, tool_available
 
@@ -107,18 +108,33 @@ class OpenRedirectScan(BaseModule):
         stop_at = time.monotonic() + max(60.0, deadline - 60.0)
         findings = []
         tested = 0
-        for url, param in targets:
-            if time.monotonic() >= stop_at:
+        stopped = 0
+        for index, (url, param) in enumerate(targets):
+            if time.monotonic() >= stop_at or deadline_reached():
+                stopped = len(targets) - index
                 self.log(f"  Time-box hit after {tested}/{len(targets)} "
                          "targets — keeping the confirms found so far")
                 break
             finding = await self._probe(harness, identity, url, param, payloads)
+            if deadline_reached() and not finding:
+                stopped = len(targets) - index
+                self.log(f"  Deadline hit while probing {url}; "
+                         f"{stopped} target(s) left untested")
+                break
             tested += 1
             if finding:
                 findings.append(finding)
                 self.state.add_finding(**finding)
 
-        if time.monotonic() < stop_at - 30:
+        if stopped:
+            self.state.add_evidence(
+                self.id, "coverage", self.domain,
+                {"targets": len(targets), "tested": tested,
+                 "not_tested": stopped, "partial": True,
+                 "reason": "deadline_or_timebox"},
+            )
+
+        if time.monotonic() < stop_at - 30 and not stopped:
             await self._openredirex_corroboration([u for u, _ in targets])
         else:
             self.log("  Skipping openredirex corroboration: inside the time-box")
@@ -136,8 +152,12 @@ class OpenRedirectScan(BaseModule):
         """
         attempted = []
         for payload in payloads:
+            if deadline_reached():
+                return None
             probe = self._with_param(url, param, payload)
             result = await self._get(harness, identity, probe)
+            if result.get("error") == "deadline_exceeded":
+                return None
             status = result.get("status", 0)
             if status in self._waf_codes():
                 self.state.record_waf_block(url, status)
@@ -271,22 +291,29 @@ class OpenRedirectScan(BaseModule):
 
     def _targets(self, cfg: dict, base: str, params: list) -> list:
         """(url, param) pairs, capped so a large scope cannot run away."""
-        limit = int(cfg.get("max_targets", 40) or 40)
+        # 40 was the old hard ceiling; a large crawl can turn ten payloads
+        # into half a million probes and still stop at the time-box with a
+        # handful of endpoints covered. 200 covers the redirect-shaped
+        # surface without pretending the rest was tested; 0 means unbounded.
+        limit = int(cfg.get("max_targets", 200) or 200)
         candidates = cfg.get("endpoints") or self._discovered() or DEFAULT_PATHS
         targets = []
         for candidate in candidates:
             url = self._absolute(str(candidate))
             if not url:
                 continue
+            from core.probe_targets import in_scope_url
+            if not in_scope_url(url, self._base_url(), self.domain):
+                continue
             for param in params:
                 if (url, param) not in targets:
                     targets.append((url, param))
-                if len(targets) >= limit:
+                if limit > 0 and len(targets) >= limit:
                     return targets
         # Shared probe points (swagger params, crawled query URLs) merge
         # in under the same cap: a redirect-shaped parameter the crawler
         # saw is worth more than the fortieth DEFAULT_PATHS guess.
-        if len(targets) < limit:
+        if limit <= 0 or len(targets) < limit:
             from core.probe_targets import iter_probe_points
             for point in iter_probe_points(self.state, base, self.domain):
                 if point.get("method", "GET") != "GET":
@@ -294,15 +321,17 @@ class OpenRedirectScan(BaseModule):
                 pair = (point["url"], point["param"])
                 if pair not in targets:
                     targets.append(pair)
-                if len(targets) >= limit:
+                if limit > 0 and len(targets) >= limit:
                     break
         return targets
 
     def _discovered(self) -> list:
         found = []
+        from core.probe_targets import in_scope_url
         for asset in self.state.get_assets_by_type("url"):
             value = str(asset.get("value", "")).strip()
-            if value.startswith(("http://", "https://")):
+            if (value.startswith(("http://", "https://"))
+                    and in_scope_url(value, self._base_url(), self.domain)):
                 found.append(value.split("?")[0])
         return found
 

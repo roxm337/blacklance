@@ -36,11 +36,27 @@ class ParameterDiscovery(BaseModule):
     async def run(self) -> str:
         urls = self._known_urls()
         parameters = extract_parameters_from_urls(urls)
+        # Provenance matters: parameters mined from the live crawl/JS/API
+        # surface are testable now. ParamSpider returns archive URLs, many
+        # of which no longer exist; they are leads, not injection points.
+        for item in parameters:
+            item["source"] = "crawl"
+            item["provenance"] = "live"
+        live_keys = {_url_key(item.get("url", "")) for item in parameters}
+        live_keys.update(_url_key(url) for url in urls)
+        live_keys.update(_url_key(self.base_url))
+        live_keys.update(_url_key(url) for url in self._scan_targets())
         evidence_refs = []
 
         if tool_available("paramspider"):
             result = await paramspider_scan(self.domain, timeout=180)
-            parameters.extend(result.get("parameters", []))
+            archived = []
+            for item in result.get("parameters", []):
+                item = dict(item)
+                item["source"] = "paramspider"
+                item["provenance"] = "archive"
+                archived.append(item)
+            parameters.extend(archived)
             self.log(f"  ParamSpider: {len(result.get('urls', []))} urls, "
                      f"{len(result.get('parameters', []))} parameters")
             evidence_refs.append(
@@ -63,7 +79,11 @@ class ParameterDiscovery(BaseModule):
             for target in self._scan_targets()[:5]:
                 output_file = run_dir / f"arjun-{len(evidence_refs) + 1}.json"
                 result = await arjun_scan(target, str(output_file), timeout=240)
-                parameters.extend(result.get("results", []))
+                for item in result.get("results", []):
+                    item = dict(item)
+                    item["source"] = "arjun"
+                    item["provenance"] = "live"
+                    parameters.append(item)
                 self.log(f"  arjun {target}: "
                          f"{len(result.get('results', []))} parameters")
                 evidence_refs.append(
@@ -101,10 +121,41 @@ class ParameterDiscovery(BaseModule):
         if dropped:
             self.log(f"  Dropped {dropped} non-testable parameter(s) "
                      f"(cache-busters / static-asset versioning / analytics)")
-        unique = _dedupe_parameters(parameters)
-        if not unique:
-            seeded = await self._seed_reflection_params()
-            unique = _dedupe_parameters(seeded)
+
+        # Archive URLs are not evidence that a path exists. Promote only
+        # those whose path is also on the live crawl/API/JS surface; keep
+        # the rest as TENTATIVE archive leads so they are still visible to
+        # an operator without sending SQLMap/XSS at a decade-old URL.
+        live_parameters = []
+        archive_leads = []
+        for item in parameters:
+            if item.get("provenance") == "archive" \
+                    and _url_key(item.get("url", "")) not in live_keys:
+                archive_leads.append(item)
+            else:
+                live_parameters.append(item)
+        if archive_leads:
+            self.log(f"  Kept {len(live_parameters)} live parameter(s); "
+                     f"{len(archive_leads)} archive-only lead(s) parked")
+        archive_unique = _dedupe_parameters(archive_leads)
+        for item in archive_unique:
+            self.state.add_asset(
+                "archive_parameter",
+                f"archive_param:{item['url']}:{item['parameter']}",
+                item["parameter"],
+                confidence="TENTATIVE",
+                sources=[self.id],
+                attrs={**item, "live": False},
+            )
+
+        unique = _dedupe_parameters(live_parameters)
+        # Seed even when the crawl found parameters. A crawl usually finds
+        # archive-shaped query names, not the pages that actually reflect
+        # input; skipping seeding whenever one parameter existed left XSS and
+        # SQLi without a reflection surface. Merge rather than replace.
+        seeded = await self._seed_reflection_params()
+        if seeded:
+            unique = _dedupe_parameters(list(unique) + list(seeded))
         if not unique:
             self.state.skip_module(self.id, "no parameters discovered")
             return "skipped"
@@ -156,6 +207,7 @@ class ParameterDiscovery(BaseModule):
             sources=[self.id],
             attrs={
                 "parameters": len(unique),
+                "archive_leads": len(archive_unique),
                 "sensitive": len(sensitive),
                 "top": unique[:50],
             },
@@ -187,38 +239,9 @@ class ParameterDiscovery(BaseModule):
         return targets
 
     def _in_scope(self, url: str) -> bool:
-        """Same app, same port, parseable. Archive junk (youtube embeds,
-        third-party trackers, `localhost:/8080` malformed builds) never
-        becomes an injection point: sqlmap and dalfox cost minutes per
-        URL, and every out-of-scope point is minutes burned plus
-        findings attributed to someone else's server."""
-        from urllib.parse import urlparse
-        try:
-            parsed = urlparse(url)
-            host = (parsed.hostname or "").lower()
-            port = parsed.port
-        except ValueError:
-            return False
-        if not host:
-            return False
-        try:
-            base = urlparse(self.base_url)
-            base_host = (base.hostname or "").lower()
-            base_port = base.port or (443 if base.scheme == "https" else 80)
-        except ValueError:
-            return False
-        if host != base_host and host != self.domain.lower() \
-                and not host.endswith("." + self.domain.lower()):
-            return False
-        # On localhost-style targets the port distinguishes apps (:3000
-        # is Juice Shop, :8094 is something else entirely). On the public
-        # internet the host is the scope boundary; alt ports on the same
-        # host stay in scope.
-        from core.validators import is_public_target
-        if is_public_target(self.domain):
-            return True
-        scheme_default = 443 if parsed.scheme == "https" else 80
-        return (port or scheme_default) == base_port
+        """Engagement-host containment, not "any absolute URL"."""
+        from core.probe_targets import in_scope_url
+        return in_scope_url(url, self.base_url, self.domain)
 
     async def _seed_reflection_params(self) -> list[dict]:
         """Probe live pages for reflection under common parameter names.
@@ -239,8 +262,15 @@ class ParameterDiscovery(BaseModule):
             clean = str(page or "").split("?")[0].rstrip("/") or str(page or "")
             if clean.startswith(("http://", "https://")) and clean not in pages:
                 pages.append(clean)
-        max_pages = int(cfg.get("seed_targets", 10)) if isinstance(cfg, dict) else 10
-        pages = pages[:max(1, max_pages)]
+        # Bounded by default: seeding is a supplement, not a crawl. A
+        # configured 0 means "no extra bound" for an explicit full sweep.
+        raw_pages = cfg.get("seed_targets", 12) if isinstance(cfg, dict) else 12
+        try:
+            max_pages = int(raw_pages)
+        except (TypeError, ValueError):
+            max_pages = 12
+        if max_pages > 0:
+            pages = pages[:max_pages]
         self.log(f"  No parameters from crawl — seeding reflection on "
                  f"{len(pages)} page(s) x {len(names)} names...")
 
@@ -301,6 +331,16 @@ class ParameterDiscovery(BaseModule):
         return seeded
 
 
+def _url_key(url: str) -> str:
+    """Compare discovery surfaces without query strings or fragments."""
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+
+
 def _dedupe_parameters(items: list[dict]) -> list[dict]:
     seen = set()
     unique = []
@@ -309,7 +349,9 @@ def _dedupe_parameters(items: list[dict]) -> list[dict]:
         parameter = str(item.get("parameter", "")).strip()
         if not url or not parameter:
             continue
-        key = (url, parameter)
+        # One parameter per host+path shape. `?q=1` and `?q=2` are the same
+        # test point; keeping both doubled every downstream probe.
+        key = (_url_key(url), parameter)
         if key in seen:
             continue
         seen.add(key)
@@ -319,6 +361,7 @@ def _dedupe_parameters(items: list[dict]) -> list[dict]:
             "example_value": item.get("example_value", ""),
             "sources": item.get("sources", []),
             "source": item.get("source", ""),
+            "provenance": item.get("provenance", "live"),
             "seeded": bool(item.get("seeded")),
         })
     return unique

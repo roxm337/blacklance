@@ -91,15 +91,29 @@ class VerificationAgent(BaseAgent):
             return {"status": "BLOCKED", **result}
 
         if result.get("success"):
-            hypothesis.status = "confirmed"
+            # A FIRM differential is a strong lead, not proof: only a
+            # CONFIRMED result earns the status, and only then does the
+            # finding on record become verified. The old code promoted any
+            # success — including verify.composite_oracle's FIRM — to
+            # "confirmed" and left the finding itself unverified.
+            confidence = str(result.get("confidence") or "").upper()
+            if confidence == "CONFIRMED":
+                hypothesis.status = "confirmed"
+                self._persist_confirmation(hypothesis, action_id, url, param,
+                                           result)
+                status = "CONFIRMED"
+            else:
+                hypothesis.status = "testing"
+                status = confidence or "FIRM"
             self.bb.send(self.role, AgentRole.SUPERVISOR,
                          "verification_result", payload={
                              "hypothesis_id": hypothesis.id,
-                             "status": "CONFIRMED",
+                             "status": status,
+                             "confidence": confidence,
                              "action_id": action_id,
                              "evidence": result.get("evidence", {}),
                          })
-            return {"status": "CONFIRMED", **result}
+            return {"status": status, **result}
 
         error = str(result.get("error", ""))
         transient = any(term in error.lower()
@@ -107,6 +121,40 @@ class VerificationAgent(BaseAgent):
         hypothesis.status = "testing" if transient else "rejected"
         return {"status": "INCONCLUSIVE" if transient else "REJECTED",
                 **result}
+
+    def _persist_confirmation(self, hypothesis: Hypothesis, action_id: str,
+                              url: str, param: str, result: dict) -> bool:
+        """Write successful verification back to the finding it confirms.
+
+        Exploitation files the finding; verification is the second, stronger
+        observation. Without this, the console and blackboard said
+        "CONFIRMED" while the report, SARIF, and every export still carried
+        the unverified pre-confirmation claim.
+        """
+        finding_id = hypothesis.finding_id
+        if not finding_id:
+            wanted = f"exploitable: {hypothesis.title}".strip().lower()
+            for finding in self.state.findings.get("findings", []):
+                if str(finding.get("title", "")).strip().lower() == wanted:
+                    finding_id = str(finding.get("id", ""))
+                    break
+        if not finding_id:
+            return False
+        verification = {
+            "method": action_id,
+            "action_id": action_id,
+            "url": url,
+            "param": param,
+            "raw_evidence": result.get("evidence", {}),
+        }
+        ok = self.state.confirm_finding(
+            finding_id, confidence="CONFIRMED",
+            verification=verification,
+            evidence=[f"Confirmed by re-running {action_id} against {url}"],
+        )
+        if ok:
+            hypothesis.finding_id = finding_id
+        return ok
 
     async def _verify_sqli(self, url: str, param: str,
                            hypothesis: Hypothesis) -> dict:
