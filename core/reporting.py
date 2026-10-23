@@ -18,10 +18,37 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
 
+def _finding_on_target(finding: dict, target: str) -> bool:
+    """True unless every URL the finding names is off the engagement host."""
+    from core.probe_targets import in_scope_url
+    target_text = str(target or "").strip()
+    if not target_text:
+        return True
+    base = target_text if "://" in target_text else f"https://{target_text}"
+    urls = []
+    for key in finding.get("asset_keys", []) or []:
+        value = str(key)
+        candidate = value.split(":", 1)[1] if ":" in value else value
+        if candidate.startswith(("http://", "https://")):
+            urls.append(candidate)
+    verification = finding.get("verification") or {}
+    if verification.get("url"):
+        urls.append(str(verification["url"]))
+    if not urls:
+        return True
+    return any(in_scope_url(url, base, target_text) for url in urls)
+
+
 def build_report_bundle(state: Any, target: str) -> dict:
     """Build a structured report bundle from persisted investigation state."""
     summary = state.summary()
-    findings = list(state.findings.get("findings", []))
+    findings_all = list(state.findings.get("findings", []))
+    # A finding whose only URLs are on somebody else's host is contamination,
+    # not a target result. Keep findings without URL assets (posture/TLS/email)
+    # because their scope is the engagement itself.
+    findings = [item for item in findings_all
+                if _finding_on_target(item, target)]
+    filtered = len(findings_all) - len(findings)
     assets = list(state.assets.get("nodes", []))
     edges = list(state.assets.get("edges", []))
     evidence = list(state.evidence.get("items", []))
@@ -38,7 +65,8 @@ def build_report_bundle(state: Any, target: str) -> dict:
     )
 
     severity_counts = {
-        severity: summary["findings_by_severity"].get(severity, 0)
+        severity: sum(1 for item in findings
+                      if str(item.get("severity", "")).upper() == severity)
         for severity in SEVERITIES
     }
     risk_scores = [int(item.get("risk_score") or 0) for item in findings]
@@ -56,6 +84,7 @@ def build_report_bundle(state: Any, target: str) -> dict:
             "assets": len(assets),
             "relations": len(edges),
             "findings": len(findings),
+            "out_of_target_filtered": filtered,
             "evidence": len(evidence),
             "requests": summary["total_requests"],
             "waf_detected": summary["waf_detected"],
@@ -111,7 +140,10 @@ def write_report_bundle(state: Any, target: str) -> dict:
     paths["report"].write_text(render_markdown(bundle))
     paths["executive_summary"].write_text(render_executive_summary(bundle))
     paths["summary"].write_text(json.dumps(bundle, indent=2, default=str))
-    paths["findings"].write_text(json.dumps(state.findings, indent=2, default=str))
+    findings_payload = dict(state.findings)
+    findings_payload["findings"] = list(bundle.get("findings") or [])
+    paths["findings"].write_text(
+        json.dumps(findings_payload, indent=2, default=str))
     paths["sarif"].write_text(json.dumps(render_sarif(bundle), indent=2,
                                          default=str))
     paths["defectdojo"].write_text(

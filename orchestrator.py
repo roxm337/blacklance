@@ -14,7 +14,8 @@ from state.manager import StateManager
 from modules import MODULE_REGISTRY, get_all_module_ids
 from tools.wrappers import (
     close_engine, configure_http_budget, configure_http_limiter,
-    configure_http_session, curl_with_status, engine_stats,
+    configure_http_session, configure_request_observer,
+    curl_with_status, engine_stats,
 )
 from tools.external import configure_tool_backend, configure_tool_budget
 from core.attack_graph import AttackGraph, AttackPath
@@ -186,6 +187,10 @@ class Orchestrator:
         )
         configure_http_budget(self.budget)
         configure_tool_budget(self.budget)
+        # Count wire requests from modules, pentest actions and agents alike.
+        # BaseModule installs this too, but chain execution runs outside a
+        # module and used to leave `stats.total_requests` frozen.
+        configure_request_observer(self.state.record_request)
 
         configure_oob(self.config)
 
@@ -193,9 +198,9 @@ class Orchestrator:
         # to LOW so that only SAFE/LOW actions can fire without an explicit
         # opt-in to something more aggressive.
         self.execute_chains = False
-        self.max_risk = "LOW"
-        self.max_actions = 25
-        self.max_chains = 10
+        self.max_risk = "DESTRUCTIVE"
+        self.max_actions = 0
+        self.max_chains = 0
 
     def _load_config(self, path: str) -> dict:
         """Load YAML config, laying the given file over `config.yaml`.
@@ -512,17 +517,7 @@ class Orchestrator:
         await self._seed_surface()
 
         # Build attack graph from current state
-        from urllib.parse import urlparse as _urlparse
-        _scope = {self.domain}
-        try:
-            _base_host = (_urlparse(self.base_url).hostname or "").lower()
-            if _base_host:
-                _scope.add(_base_host)
-        except ValueError:
-            pass
-        graph = AttackGraph(self.state,
-                            scope_hosts={h for h in _scope if h},
-                            config=self.config)
+        graph = AttackGraph(self.state, config=self.config)
         graph.build()
         graph.save(str(self.output_dir / self.target / "attack_graph.json"))
         action_count = ActionRegistry.size()
@@ -566,7 +561,7 @@ class Orchestrator:
             print()
 
         # Find exploit chains
-        chains = graph.find_chains(max_depth=4, min_score=0.3)
+        chains = graph.find_chains(max_depth=12, min_score=0.3)
         graph_chains = len(chains)
         chains, probe_chains = probe_chains_first(graph, chains, proposed)
         if probe_chains:
@@ -623,7 +618,7 @@ class Orchestrator:
             max_risk=ceiling, max_actions=self.max_actions,
         )
         print(f"  Executing chains (risk ceiling: {ceiling.value}, "
-              f"max {self.max_actions} actions)")
+              f"{self.max_actions or 'unlimited'} actions)")
         # The window covers the planner's probes in full plus `--max-chains`
         # graph chains. The executor takes the first N chains it is handed, so
         # with `--max-chains 10` a plan of 25 probes would lose 15 of them to
@@ -631,7 +626,8 @@ class Orchestrator:
         # target, archived JavaScript and an S3 bucket. The action budget is
         # what limits cost; this only decides whose request gets spent first.
         report = await executor.execute(
-            chains, max_chains=self.max_chains + probe_count)
+            chains,
+            max_chains=(self.max_chains + probe_count) if self.max_chains else 0)
 
         # Persist what the executor just proved. `ChainExecutor` writes into
         # `state.findings` in memory, but the only `save()` on this path ran
@@ -656,6 +652,20 @@ class Orchestrator:
         if report.unarmable:
             print(f"    ({len(report.unarmable)} edge(s) had an action but not "
                   "enough data to run it — coverage was incomplete, not clean.)")
+
+        # Refresh the deliverable, not just the state. On `--active --pentest`
+        # the reporting module ran before the graph did, so a proven finding
+        # existed in `findings.json` while every report artifact still ended
+        # at "no confirmed exploitation". Rewriting the bundle here keeps the
+        # report, SARIF, DefectDojo export and PoCs aligned with the run that
+        # just proved something.
+        if report.ran:
+            try:
+                from core.reporting import write_report_bundle
+                paths = write_report_bundle(self.state, self.target)
+                print(f"  Report refreshed: {paths['report']}")
+            except Exception as exc:  # noqa: BLE001 - reporting must not void results
+                print(f"  Report refresh failed: {exc}")
         print()
         return report
 
@@ -831,14 +841,16 @@ Examples:
     parser.add_argument("--execute", action="store_true",
                         help="Allow pentest proving actions and autonomous agent "
                              "exploit/verify actions. Without this they are plan-only.")
-    parser.add_argument("--max-risk", default="LOW",
+    parser.add_argument("--max-risk", default="DESTRUCTIVE",
                         choices=["SAFE", "LOW", "MEDIUM", "HIGH", "DESTRUCTIVE"],
-                        help="Risk ceiling for executed actions (default: LOW). "
-                             "MEDIUM+ allows sqlmap and cloud metadata probes.")
-    parser.add_argument("--max-actions", type=int, default=25,
-                        help="Cap on actions executed per engagement (default: 25)")
-    parser.add_argument("--max-chains", type=int, default=10,
-                        help="Cap on chains executed per engagement (default: 10)")
+                        help="Risk ceiling for executed actions (default: "
+                             "DESTRUCTIVE).")
+    parser.add_argument("--max-actions", type=int, default=0,
+                        help="Cap on actions executed per engagement "
+                             "(default: 0 = unlimited)")
+    parser.add_argument("--max-chains", type=int, default=0,
+                        help="Cap on chains executed per engagement "
+                             "(default: 0 = unlimited)")
     parser.add_argument("--resume-budget", action="store_true",
                         help="Resume counters from this target's last budget checkpoint")
     parser.add_argument("--agent", action="store_true",

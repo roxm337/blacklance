@@ -415,6 +415,43 @@ class StateManager:
             existing["intelligence"] = _merge_intelligence(
                 existing.get("intelligence") or {}, intelligence)
 
+    def confirm_finding(self, finding_id: str, *,
+                        confidence: str = "CONFIRMED",
+                        verification: Optional[dict] = None,
+                        evidence: Optional[list] = None) -> bool:
+        """Promote an existing finding with the proof a re-run produced.
+
+        The agent path filed a finding from the exploitation result and then
+        verified it in the blackboard only, so the report still showed an
+        unverified claim after a successful confirmation. This writes the
+        proof back to the finding the report and every export read.
+        """
+        from core.scoring import score_finding
+        for finding in self.findings["findings"]:
+            if finding.get("id") != finding_id:
+                continue
+            finding["confidence"] = confidence
+            finding["verified"] = True
+            merged = dict(finding.get("verification") or {})
+            merged.update(verification or {})
+            finding["verification"] = merged
+            if evidence:
+                current = list(finding.get("evidence") or [])
+                for item in evidence:
+                    text = str(item)
+                    if text and text not in current:
+                        current.append(text)
+                finding["evidence"] = _clean_evidence(current)[:50]
+            finding["risk_score"] = score_finding(
+                finding.get("severity", "INFO"), confidence,
+                finding.get("asset_keys"), finding.get("category", ""),
+                verified=True,
+            )
+            finding["last_seen"] = self._now()
+            self._dirty = True
+            return True
+        return False
+
     def get_findings_by_severity(self, severity: str) -> list:
         return [f for f in self.findings["findings"] if f["severity"] == severity]
 
@@ -498,9 +535,21 @@ class StateManager:
         self.module["current"] = None
         self._dirty = True
 
-    def add_check(self, check_name: str):
+    def add_check(self, check_name: str, count_request: bool = True):
         if check_name not in self.module["completed_checks"]:
             self.module["completed_checks"].append(check_name)
+        self.module["stats"]["last_action"] = self._now()
+        if count_request:
+            self.module["stats"]["total_requests"] += 1
+        self._dirty = True
+
+    def record_request(self) -> None:
+        """Count one wire request without inventing a completed check.
+
+        Raw `curl` calls used to be invisible to run telemetry: a module
+        could send 1,000 requests and report zero because only `http_get`
+        incremented the counter. The wrapper calls this observer instead.
+        """
         self.module["stats"]["last_action"] = self._now()
         self.module["stats"]["total_requests"] += 1
         self._dirty = True

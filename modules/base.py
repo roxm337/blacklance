@@ -8,7 +8,8 @@ from typing import Optional
 from core.keyvault import KeyVault
 from core.verification_oracle import configure_oob
 from state.manager import StateManager
-from tools.wrappers import bash, configure_http_session, curl, dig, whois_lookup
+from tools.wrappers import (bash, configure_http_session,
+                           configure_request_observer, curl, dig, whois_lookup)
 from tools.external import configure_tool_backend
 
 logger = logging.getLogger("osint-agent")
@@ -38,6 +39,7 @@ class BaseModule:
         self.output_dir = Path(config.get("paths", {}).get("output_dir", "reports"))
         self.keys = KeyVault(config)
         configure_http_session(config)
+        configure_request_observer(self.state.record_request)
         configure_tool_backend(config)
         configure_oob(config)
 
@@ -88,7 +90,7 @@ class BaseModule:
         elif status == 200:
             self.state.record_waf_allow(url, status)
 
-        self.state.add_check(f"http:{url}")
+        self.state.add_check(f"http:{url}", count_request=False)
         if self.module_config.get("record_http_evidence", True):
             evidence_id = self.state.add_evidence(
                 self.id,
