@@ -129,9 +129,11 @@ def test_depth_follows_same_origin_only(monkeypatch):
     urls = {r["url"] for r in RENDERED}
     assert urls == {"https://example.com/", "https://example.com/dashboard",
                     "https://example.com/settings"}
-    # Cross-origin link recorded as an asset, never rendered.
+    # Cross-origin link is neither rendered nor promoted into the
+    # engagement's URL surface. Recording it as a target is how a previous
+    # crawl fed GitHub/YouTube URLs into the injection modules.
     values = {a["value"] for a in state.get_assets_by_type("url")}
-    assert "https://other.test/x" in values
+    assert "https://other.test/x" not in values
 
 
 def test_depth_zero_renders_seeds_only(monkeypatch):

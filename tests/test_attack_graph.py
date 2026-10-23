@@ -234,3 +234,100 @@ def test_configured_chain_respects_asset_hint_and_category():
     assert sources == [f"url:{wanted}"]
 
     shutil.rmtree(tmpdir)
+
+
+def _ssrf_finding(url, param="url"):
+    return {
+        "title": "Blind SSRF Confirmed via OOB Callback",
+        "severity": "HIGH",
+        "confidence": "CONFIRMED",
+        "category": "SSRF",
+        "verified": True,
+        "description": "server fetched our callback",
+        "asset_keys": [f"url:{url}"],
+        "verification": {"method": "oob_callback", "url": url, "param": param},
+    }
+
+
+def test_ssrf_finding_uses_parameter_asset_when_page_asset_is_missing():
+    """parameter_discovery writes `param:` assets, not `url:` ones.
+
+    ssrf_scan then files its finding against `url:<page>`, which may not
+    exist. The chain must be built from the parameter asset that was
+    actually tested, or confirmed SSRF never reaches an exploitation goal.
+    """
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://t.test/fetch"
+    state.add_asset("parameter", f"param:{url}:url", "url",
+                    confidence="FIRM", attrs={"url": url, "parameter": "url"})
+    state.add_finding(**_ssrf_finding(url))
+    graph = AttackGraph(state)
+    graph.build()
+
+    edges = [e for e in graph.edges if e.target_id == "goal:cloud_metadata"]
+    assert len(edges) == 1
+    assert edges[0].source_id == f"param:{url}:url"
+    assert edges[0].action_id == "web.ssrf.cloud_metadata"
+
+    from core.chain_executor import ChainExecutor
+    chains = graph.find_chains()
+    planned = [p for c in chains for p in ChainExecutor(state, {}).plan(c)]
+    assert any(p.action_id == "web.ssrf.cloud_metadata"
+               and p.params.get("param") == "url" for p in planned)
+
+    shutil.rmtree(tmpdir)
+
+
+def test_ssrf_finding_uses_verification_param_on_a_bare_url():
+    """A URL asset without a query string still has a known parameter."""
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://t.test/fetch"
+    state.add_asset("url", f"url:{url}", url, confidence="FIRM")
+    state.add_finding(**_ssrf_finding(url))
+    graph = AttackGraph(state)
+    graph.build()
+
+    edges = [e for e in graph.edges if e.target_id == "goal:cloud_metadata"]
+    assert len(edges) == 1
+    assert graph.nodes[edges[0].source_id].attrs["param"] == "url"
+
+    shutil.rmtree(tmpdir)
+
+
+def test_ssrf_finding_without_any_asset_uses_verification_surface():
+    """A pruned asset must not erase a confirmed finding's exploit surface."""
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://t.test/fetch"
+    state.add_finding(**_ssrf_finding(url))
+    graph = AttackGraph(state)
+    graph.build()
+
+    edges = [e for e in graph.edges if e.target_id == "goal:cloud_metadata"]
+    assert len(edges) == 1
+    assert edges[0].source_id == f"url:{url}"
+
+    shutil.rmtree(tmpdir)
+
+
+def test_configured_chain_uses_verification_url_when_asset_missing():
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    state = StateManager(tmpdir)
+    url = "https://api.test/orders/17"
+    state.add_finding("IDOR", "HIGH", "FIRM", "IDOR", "x",
+                      asset_keys=[f"url:{url}"],
+                      verification={"url": url})
+    graph = AttackGraph(state, config={"chains": {"edges": [
+        {"category": "idor", "goal": "ATO", "action": "test.replay"}]}})
+    graph.build()
+
+    sources = [e.source_id for e in graph.edges if e.target_id == "goal:ato"]
+    assert sources == [f"url:{url}"]
+
+    shutil.rmtree(tmpdir)

@@ -199,9 +199,8 @@ def test_keyed_source_failure_spares_the_other_source(monkeypatch):
         {"api.example.com"}
 
 
-def test_keyed_out_of_scope_hosts_are_dropped(monkeypatch):
-    """A noisy source returning foreign hostnames must not plant
-    out-of-scope assets and edges in the graph."""
+def test_keyed_source_hosts_are_all_kept(monkeypatch):
+    """Every hostname a source returns is recorded, whatever its suffix."""
 
     async def noisy(domain, api_key):
         return ["api.example.com", "evil.other.net", "*.wild.example.com"]
@@ -219,4 +218,4 @@ def test_keyed_out_of_scope_hosts_are_dropped(monkeypatch):
 
     assert asyncio.run(KeyedSubdomains(state, config).run()) == "done"
     assert {a["value"] for a in state.get_assets_by_type("subdomain")} == \
-        {"api.example.com", "wild.example.com"}
+        {"api.example.com", "evil.other.net", "wild.example.com"}

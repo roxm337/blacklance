@@ -10,9 +10,9 @@ from core.budget_manager import BudgetManager
 from state.manager import StateManager
 
 
-def test_agent_action_respects_default_low_risk_ceiling(tmp_path, monkeypatch):
+def test_agent_action_respects_explicit_low_risk_ceiling(tmp_path, monkeypatch):
     state = StateManager(str(tmp_path / "run"))
-    agent = BaseAgent(state, {}, object())
+    agent = BaseAgent(state, {}, object(), max_risk=RiskLevel.LOW)
     called = False
 
     async def should_not_run(*args, **kwargs):
@@ -44,7 +44,7 @@ def test_agent_exploit_phase_requires_execute(tmp_path):
     }
 
 
-def test_unregistered_agent_probe_stays_manual_review(tmp_path, monkeypatch):
+def test_unregistered_agent_probe_uses_generic_probes(tmp_path, monkeypatch):
     state = StateManager(str(tmp_path / "run"))
     supervisor = AgentSupervisor(
         state, {}, budget=BudgetManager({}), execute=True,
@@ -53,20 +53,20 @@ def test_unregistered_agent_probe_stays_manual_review(tmp_path, monkeypatch):
     agent = supervisor.agents["exploitation"]
     called = False
 
-    async def must_not_fallback(*args, **kwargs):
+    async def generic(hypothesis):
         nonlocal called
         called = True
+        return {"success": False, "error": "nothing proved"}
 
-    monkeypatch.setattr(agent, "_fallback_test", must_not_fallback)
+    monkeypatch.setattr(agent, "_generic_probe", generic)
     hypothesis = Hypothesis(
         id="hyp-1", title="Unclassified probe", description="",
-        likelihood=0.5, impact=0.5, target="https://example.com",
+        likelihood=0.5, impact=0.5, target="https://example.com/?q=1",
         technique="custom_unknown", action_id="manual_review",
     )
     result = asyncio.run(agent.test_hypothesis(hypothesis))
-    assert result["blocked"] is True
-    assert "manual_review" in result["error"]
-    assert called is False
+    assert called is True
+    assert result["success"] is False
 
 
 def test_verification_reuses_registry_and_enforces_risk_ceiling(tmp_path,

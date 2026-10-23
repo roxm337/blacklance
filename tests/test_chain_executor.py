@@ -287,11 +287,13 @@ def test_action_cap_is_enforced():
     _register("test.probe", "LOW")
     state = _state()
     budget = _Budget()
-    ex = ChainExecutor(state, {}, budget=budget, max_actions=0)
-    report = asyncio_run(ex.execute([_chain(action_id="test.probe")]))
-    assert report.proven == 0
-    assert "budget exhausted" in report.skipped[0].detail
-    assert budget.actions == 0
+    ex = ChainExecutor(state, {}, budget=budget, max_actions=1)
+    report = asyncio_run(ex.execute([
+        _chain(action_id="test.probe"), _chain(action_id="test.probe")]))
+    assert report.proven == 1
+    assert any("action budget exhausted" in item.detail
+               for item in report.skipped)
+    assert budget.actions == 1
 
 
 def test_record_action_is_called():
@@ -515,8 +517,8 @@ def test_orchestrator_defaults_to_not_executing(tmp_path):
     o = Orchestrator(target="example.test", output_dir=str(tmp_path),
                      config_path="config.example.yaml", mode="auto")
     assert o.execute_chains is False, "chain execution must be opt-in"
-    assert o.max_risk == "LOW", "default ceiling must be the conservative one"
-    assert o.max_actions == 25
+    assert o.max_risk == "DESTRUCTIVE", "default ceiling is unrestricted"
+    assert o.max_actions == 0, "zero means no action cap"
 
 
 def test_pentest_without_execute_executes_nothing(tmp_path):
@@ -607,13 +609,13 @@ def test_execution_window_covers_every_planned_probe(tmp_path):
     with patch("core.chain_executor.ChainExecutor.execute",
                return_value=ExecutionReport()) as mock_exec:
         asyncio_run(o._execute_chains([], probe_count=25))
-    assert mock_exec.call_args.kwargs["max_chains"] == o.max_chains + 25
+    assert mock_exec.call_args.kwargs["max_chains"] == 0
 
     # No plan: the operator's ceiling alone still applies.
     with patch("core.chain_executor.ChainExecutor.execute",
                return_value=ExecutionReport()) as mock_exec:
         asyncio_run(o._execute_chains([]))
-    assert mock_exec.call_args.kwargs["max_chains"] == o.max_chains
+    assert mock_exec.call_args.kwargs["max_chains"] == 0
 
 
 def asyncio_run(coro):
@@ -689,7 +691,7 @@ def test_ssrf_chain_is_armed_at_the_parameter_that_carries_it():
     assert planned[0].params["param"] == "url"
 
 
-def test_unregistered_declared_action_is_not_replaced_by_a_guess():
+def test_unregistered_declared_action_falls_back_to_edge_actions():
     ex = ChainExecutor(_state(), {})
     chain = FakeChain(
         nodes={"n1": _node("n1", "url", url="https://example.test/a?q=1"),
@@ -698,5 +700,42 @@ def test_unregistered_declared_action_is_not_replaced_by_a_guess():
                           likelihood=0.5, impact=0.9,
                           action_id="test.not_installed")],
     )
-    assert ex.plan(chain) == []
-    assert ex.unarmable and "not_installed" in ex.unarmable[0].action_id
+    planned = ex.plan(chain)
+    assert planned, "the surface should still be tested"
+    assert planned[0].action_id != "test.not_installed"
+    assert planned[0].params["url"] == "https://example.test/a?q=1"
+
+
+def test_pentest_refreshes_the_report_after_a_proven_action(tmp_path):
+    """Findings that exist only in state are not findings anyone can read.
+
+    `--active --pentest` runs the reporting module before the graph, so the
+    report ended before the exploitation it was supposed to describe. Any
+    run that actually fired an action must rewrite the bundle.
+    """
+    from core.chain_executor import EdgeOutcome, ExecutionReport
+    from orchestrator import Orchestrator
+
+    o = Orchestrator(target="example.test", output_dir=str(tmp_path),
+                     config_path="config.example.yaml", mode="auto")
+    o.execute_chains = True
+    o.budget = None
+
+    edge = AttackEdge(source_id="n1", target_id="n2", edge_type="exploit",
+                      likelihood=0.5, impact=0.8, action_id="web.xss.reflected")
+    report = ExecutionReport(ran=[EdgeOutcome(
+        edge=edge, action_id="web.xss.reflected", status="ran",
+        finding_id="FINDING-0001", confidence="CONFIRMED")])
+
+    with patch("core.chain_executor.ChainExecutor.execute",
+               return_value=report), \
+         patch("core.reporting.write_report_bundle",
+               return_value={"report": "/tmp/report.md"}) as write:
+        asyncio_run(o._execute_chains([]))
+    write.assert_called_once()
+
+    with patch("core.chain_executor.ChainExecutor.execute",
+               return_value=ExecutionReport()), \
+         patch("core.reporting.write_report_bundle") as write:
+        asyncio_run(o._execute_chains([]))
+    write.assert_not_called()

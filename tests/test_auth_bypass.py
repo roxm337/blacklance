@@ -11,7 +11,9 @@ import modules.auth_bypass as ab
 from modules.auth_bypass import AuthBypass, auth_success
 from state.manager import StateManager
 
-_JWT = "eyJhbGciOi.eyJkYXRhIjp7InJvbGUiOiJhZG1pbiJ9fQ.sig123456"
+_JWT = ("eyJhbGciOiAiSFMyNTYifQ."
+        "eyJkYXRhIjogeyJyb2xlIjogImFkbWluIiwgImVtYWlsIjogImFkbWluQGFjbWUuY29tIn19."
+        "sig123456")
 
 
 def test_auth_success_signals():
@@ -52,6 +54,11 @@ def test_sqli_login_bypass_confirmed(monkeypatch):
     assert asyncio.run(m.run()) == "done"
     f = [x for x in st.findings["findings"] if x["title"].startswith("Authentication bypass")]
     assert f and f[0]["severity"] == "CRITICAL"
+    assert f[0]["verified"] is True
+    assert f[0]["verification"]["token_captured"] is True
+    identities = st.get_assets_by_type("identity_credential")
+    assert identities and identities[0]["attrs"]["technique"] == "sqli_auth_bypass"
+    assert identities[0]["attrs"]["role"] == "admin"
 
 
 def test_no_bypass_when_payload_also_fails(monkeypatch):

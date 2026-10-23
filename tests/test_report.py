@@ -81,3 +81,36 @@ def test_report_writes_advanced_artifacts():
     assert summary["risk"]["critical_high"] == 1
     assert summary["risk"]["top_findings"][0]["title"] == "Administrative Path Exposed"
     assert summary["modules"]["runs"][0]["module_id"] == "content_discovery"
+
+
+def test_report_filters_out_of_target_findings_everywhere():
+    from core.reporting import build_report_bundle, write_report_bundle
+
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    state.add_finding(
+        title="Real Finding", severity="HIGH", confidence="FIRM",
+        category="Exposure", description="On the target.",
+        asset_keys=["url:https://example.com/admin"],
+    )
+    state.add_finding(
+        title="Contaminated Finding", severity="CRITICAL",
+        confidence="CONFIRMED", category="Injection",
+        description="From a third-party page.",
+        asset_keys=["url:https://github.com/example/repo/commit/1"],
+        verified=True,
+        verification={"method": "reflection",
+                      "url": "https://github.com/example/repo/commit/1"},
+    )
+
+    bundle = build_report_bundle(state, "example.com")
+    assert [f["title"] for f in bundle["findings"]] == ["Real Finding"]
+    assert bundle["summary"]["out_of_target_filtered"] == 1
+    assert bundle["risk"]["critical_high"] == 1
+
+    paths = write_report_bundle(state, "example.com")
+    on_disk = json.loads(Path(paths["findings"]).read_text())
+    assert [f["title"] for f in on_disk["findings"]] == ["Real Finding"]
+    sarif = json.loads(Path(paths["sarif"]).read_text())
+    messages = [r["message"]["text"] for r in sarif["runs"][0]["results"]]
+    assert all("third-party" not in m for m in messages)

@@ -33,7 +33,10 @@ def test_parameter_discovery_uses_existing_urls_without_tools():
     )
 
     result = asyncio.run(
-        ParameterDiscovery(state, {"target": {"domain": "example.com"}}).run()
+        ParameterDiscovery(state, {
+            "target": {"domain": "example.com"},
+            "modules": {"parameter_discovery": {"seed_when_empty": False}},
+        }).run()
     )
 
     assert result == "done"
@@ -54,7 +57,10 @@ def test_parameter_discovery_flags_high_signal_names():
     )
 
     result = asyncio.run(
-        ParameterDiscovery(state, {"target": {"domain": "example.com"}}).run()
+        ParameterDiscovery(state, {
+            "target": {"domain": "example.com"},
+            "modules": {"parameter_discovery": {"seed_when_empty": False}},
+        }).run()
     )
 
     assert result == "done"
@@ -377,3 +383,55 @@ def test_fast_scan_skips_cors_when_audit_covers_it(monkeypatch):
     assert result == "done"
     assert "Permissive CORS Behavior" not in \
         {finding["title"] for finding in state.findings["findings"]}
+
+
+def test_parameter_discovery_parks_archive_only_leads(monkeypatch):
+    import modules.parameter_discovery as param_module
+
+    monkeypatch.setattr(param_module, "tool_available",
+                        lambda name: name == "paramspider")
+
+    async def fake_paramspider(domain, timeout=180):
+        return {"available": True, "urls": ["https://example.com/old?legacy=1"],
+                "parameters": [{"url": "https://example.com/old",
+                                "parameter": "legacy", "source": "paramspider"}]}
+
+    async def fake_seed(self):
+        return []
+
+    monkeypatch.setattr(param_module, "paramspider_scan", fake_paramspider)
+    monkeypatch.setattr(ParameterDiscovery, "_seed_reflection_params", fake_seed)
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    state.add_asset("url", "url:https://example.com/",
+                    "https://example.com/")
+
+    asyncio.run(ParameterDiscovery(
+        state, {"target": {"domain": "example.com"}}).run())
+
+    assert state.get_assets_by_type("parameter") == []
+    parked = state.get_assets_by_type("archive_parameter")
+    assert [n["value"] for n in parked] == ["legacy"]
+    assert parked[0]["confidence"] == "TENTATIVE"
+
+
+def test_parameter_discovery_merges_seeded_reflections(monkeypatch):
+    async def fake_seed(self):
+        return [
+            {"url": "https://example.com/search", "parameter": "q",
+             "seeded": True, "provenance": "live"},
+            {"url": "https://example.com/search", "parameter": "s",
+             "seeded": True, "provenance": "live"},
+        ]
+
+    monkeypatch.setattr(ParameterDiscovery, "_seed_reflection_params", fake_seed)
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    state.add_asset("url", "url:https://example.com/search?q=live",
+                    "https://example.com/search?q=live")
+
+    asyncio.run(ParameterDiscovery(
+        state, {"target": {"domain": "example.com"}}).run())
+
+    values = {n["value"] for n in state.get_assets_by_type("parameter")}
+    assert values == {"q", "s"}

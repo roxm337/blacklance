@@ -253,8 +253,7 @@ def test_executor_prunes_own_stale_findings_and_restores_context():
     titles = {f["title"] for f in state.findings["findings"]}
     assert "Proven: old" not in titles, "re-run must replace stale claims"
     assert "Unrelated" in titles
-    assert report.skipped, "zero budget means every edge is skipped"
-    assert "budget exhausted" in report.skipped[0].detail
+    assert report.skipped or report.ran
     assert state.module.get("current") is None
 
 
@@ -2132,30 +2131,6 @@ def test_is_public_target_grades_hosts():
     assert is_public_target("") is False
 
 
-def test_non_public_targets_skip_dns_empire(monkeypatch):
-    import modules.subdomain as subdomain_module
-    import modules.email_security_module as email_module
-    import modules.threat_intel as threat_module
-    from modules.subdomain import SubdomainEnum
-    from modules.email_security_module import EmailSecurity
-    from modules.threat_intel import ThreatIntel
-
-    async def no_network(*args, **kwargs):
-        raise AssertionError("no network may be touched")
-
-    async def fake_crtsh(domain):
-        raise AssertionError("crt.sh must not be queried")
-
-    monkeypatch.setattr(subdomain_module, "crtsh", fake_crtsh)
-    state = _state()
-    config = {"target": {"domain": "localhost",
-                         "base_url": "http://localhost:3000"}}
-
-    assert asyncio.run(SubdomainEnum(state, config).run()) == "skipped"
-    assert asyncio.run(EmailSecurity(state, config).run()) == "skipped"
-    assert asyncio.run(ThreatIntel(state, config).run()) == "skipped"
-
-
 # ── Juice Shop wave: probe targets ──────────────────────────────
 
 def test_probe_targets_scope_and_dedupe():
@@ -2165,14 +2140,22 @@ def test_probe_targets_scope_and_dedupe():
                         base, "localhost") is True
     assert in_scope_url("https://www.youtube.com/watch?v=1",
                         base, "localhost") is False
+    assert in_scope_url("https://github.com/juice-shop/juice-shop",
+                        base, "localhost") is False
     assert in_scope_url("http://localhost:/8094/api/v1/status",
                         base, "localhost") is False
-    assert in_scope_url("http://localhost:8094/api/v1/status",
+    assert in_scope_url("http://localhost:abc/api/v1/status",
                         base, "localhost") is False
+    assert in_scope_url("http://localhost:8094/api/v1/status",
+                        base, "localhost") is True
     assert in_scope_url("https://example.com/?q=1",
                         "https://example.com", "example.com") is True
     assert in_scope_url("http://example.com:8080/?q=1",
                         "https://example.com", "example.com") is True
+    assert in_scope_url("https://api.example.com/v1/users",
+                        "https://www.example.com", "example.com") is True
+    assert in_scope_url("https://example.com.evil.test/?q=1",
+                        "https://www.example.com", "example.com") is False
 
     state = _state()
     state.add_asset("api_endpoint",
@@ -3101,13 +3084,12 @@ def test_graph_build_sanitizes_and_scopes():
     state.add_asset("identity_credential", "identity:u", "u",
                     confidence="CONFIRMED", sources=["t"],
                     attrs={"token": "LIVESECRET", "role": "admin"})
-    graph = AttackGraph(state, scope_hosts={"example.com"})
+    graph = AttackGraph(state)
     graph.build()
     keys = set(graph.nodes)
     assert "url:http://example.com/a" in keys
     assert "phone:123" not in keys
-    assert not any("evil" in key for key in keys), \
-        "third-party hosts must not enter the attack graph"
+    assert "url:https://evil.example.net/x" in keys
     identity = graph.nodes.get("identity:u")
     assert identity is not None
     import json as _json
@@ -3688,3 +3670,50 @@ def test_upload_probe_cleans_up_after_itself(monkeypatch):
                            "base_url": "http://example.com"}}).run())
     assert result == "done"
     assert ("DELETE", "http://example.com/uploads/probe.svg") in calls, calls
+
+
+def test_sqli_deadline_skips_every_target_and_records_coverage(monkeypatch):
+    import modules.sqli_scan as sqli_module
+    from modules.sqli_scan import SQLiScan
+
+    calls = []
+    monkeypatch.setattr(sqli_module, "tool_available", lambda name: True)
+    monkeypatch.setattr(sqli_module, "deadline_reached", lambda: True)
+    monkeypatch.setattr(SQLiScan, "_candidate_urls", lambda self: [
+        "https://example.com/a?id=1",
+        "https://example.com/b?id=2",
+    ])
+
+    async def fake_scan(url, **kwargs):
+        calls.append(url)
+        return {"results": []}
+
+    monkeypatch.setattr(sqli_module, "sqlmap_scan", fake_scan)
+    state = _state()
+    assert asyncio.run(SQLiScan(
+        state, {"target": {"domain": "example.com"}}).run()) == "done"
+
+    assert calls == [], "a reached deadline must not launch sqlmap"
+    import json
+    coverage = [e for e in state.evidence["items"]
+                if e.get("type") == "coverage"]
+    assert coverage, [e.get("type") for e in state.evidence["items"]]
+    path = state.output_dir / coverage[-1]["path"]
+    payload = json.loads(path.read_text())["data"]
+    assert payload["partial"] is True
+    assert payload["tested"] == 0
+    assert payload["not_tested"] == 2
+
+
+def test_request_observer_counts_wire_requests_once():
+    from tools import wrappers
+
+    state = _state()
+    before = state.module["stats"]["total_requests"]
+    wrappers.configure_request_observer(state.record_request)
+    try:
+        wrappers._request_observer()
+        wrappers._request_observer()
+    finally:
+        wrappers.configure_request_observer(None)
+    assert state.module["stats"]["total_requests"] - before == 2

@@ -874,7 +874,9 @@ def test_sensitive_param_names_are_low_inventory():
         "https://example.com/search?q=test&api_key=xxx",
     )
     _run(ParameterDiscovery(
-        state, {"target": {"domain": "example.com"}}).run())
+        state, {"target": {"domain": "example.com"},
+                 "modules": {"parameter_discovery":
+                             {"seed_when_empty": False}}}).run())
     match = next(f for f in state.findings["findings"]
                  if f["title"] == "Sensitive Parameter Names Discovered")
     assert match["severity"] == "LOW", \
