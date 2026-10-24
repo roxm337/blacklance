@@ -1,4 +1,6 @@
-# Review fixes — first implementation batch
+# Review fixes — implementation progress
+
+Current delivery order and new integrations: [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md).
 
 This tracks changes made after `Vulnscan_results.md`. Engagement scope enforcement is excluded at the operator's request. No target allowlist or new target-selection restriction was added. Existing operator changes to `modules/misconfig.py` and `tests/test_catch_all_server.py` were preserved.
 
@@ -17,7 +19,7 @@ This tracks changes made after `Vulnscan_results.md`. Engagement scope enforceme
 
 Additional regression tests live in `tests/test_review_regressions.py`. `scripts/check_wheel.py` installs a supplied wheel into temporary storage and checks imports/resources from a working directory outside the repository.
 
-## Verification
+## Verification — first batch
 
 - Non-GUI suite: **1,195 passed, 33 skipped** in 138.57 seconds.
 - GUI suite: **70 passed** in 45.91 seconds.
@@ -31,13 +33,67 @@ The project graph was refreshed using AST extraction. `.graphifyignore` now excl
 
 This batch does not close every architectural recommendation in the review:
 
-- D5: origin/run isolation, explicit fresh/resume/retest behavior, transactional state, and concurrent-writer protection.
+- D5: origin/run isolation and explicit fresh/resume/retest behavior. Transactional
+  snapshots and stale-writer protection are implemented in the second batch below.
 - D6: causal chain preconditions, output/artifact bindings, and dependency-aware execution; the path-search defect is fixed separately.
 - A common execution boundary for every module, complete accounting across transports, audit events for every refusal/failure path, and externally anchored evidence manifests.
-- History/export idempotence and coverage-aware resolved/untested states.
+- Endpoint-specific negative-retest collection and durable assessment IDs. Conservative
+  resolved/untested semantics and repeat-export idempotence are implemented below.
 - Secret-store references, credential expiry/revocation, and a durable mutation/cleanup ledger.
 - Pinned scanner images/tool versions, SBOMs, real Docker/scanner compatibility gates, and multi-stack precision/recall benchmarks.
 - Mission/scenario definitions, ATT&CK mappings, defensive telemetry correlation, and remediation retest workflows.
 - Configuration schemas, broader code decomposition, release/version alignment, and operator-selected licensing.
 
 Local process cancellation and HTTP redirect behavior have dedicated regression tests. Docker cleanup wiring does not substitute for a live Docker integration test. The advertised Python CI matrix and full live lab assessments have not been run locally.
+
+## Second batch — persistence, history and plan consolidation
+
+- `core/persistence.py` provides private unique temporary files, flushed atomic JSON
+  replacement and cooperating-process locks. State commits all four stores in one
+  versioned `snapshot.json`; revision checks reject stale writers. Legacy JSON exports
+  remain available. Invalid snapshot/legacy state is not silently replaced with empty data.
+- Evidence display IDs remain monotonic; unique filenames prevent a rejected stale
+  writer from overwriting the winning writer's proof bytes. Rejected writers may leave
+  unindexed evidence files; automated orphan cleanup is not implemented.
+- GUI loads one committed generation and retains prior rows on snapshot corruption.
+- Starting a module retest clears previous success/skip/block state. An unsuccessful
+  run cannot retain an old success badge.
+- History schema v2 deduplicates repeated observations, treats missing items as untested,
+  and only resolves explicit negative-retest fingerprints/asset keys. Existing v1 histories
+  load without resetting their baseline. Previously recorded resolutions are not reinterpreted.
+- Report-only exports use a stable observation digest and per-item observation tokens
+  (unrelated module activity does not increment an old finding), serialize history read-modify-write,
+  reject stale state and persist the same finding annotations in summary/findings JSON.
+  Corrupt history aborts export instead of discarding the baseline. Report artifacts as
+  a whole are not yet an atomic multi-file transaction.
+- Audit appends synchronize independent writers, refresh changed tails and verify
+  contiguous sequences. This does not add signing or external anchoring.
+- Wheel staging rejects unexpected leftover files without deleting them. The installed
+  wheel smoke check exercises transactional state, evidence verification and reporting;
+  clean builds must use a fresh staging directory when the old one is contaminated.
+- `INTEGRATION_PLAN.md` is the versioned source of truth. Local historical roadmaps
+  have redirects/status corrections; those files remain intentionally gitignored.
+
+### Verification — second batch
+
+- Final non-GUI suite: **1,221 passed, 33 skipped** in 141.68 seconds.
+- GUI suite: **70 passed** in 55.14 seconds.
+- Combined: **1,291 passed, 33 skipped**, including 26 additional regression cases.
+- Process tests cover conflicting state saves and independent audit writers;
+  failure-injection tests cover snapshot replacement and compatibility exports.
+- A fresh-staging wheel built successfully and passed the installed smoke test
+  outside the checkout, including state/evidence/report operations. The local
+  `build` frontend was unavailable, so this build used setuptools' wheel command;
+  CI still uses its installed build frontend. No build files were deleted.
+- Four packaging tests cover clean staging and rejection of stale tests, local
+  environment files, and OS metadata without deleting those fixture files.
+- All 14 changed/new Python files parse with Python 3.10 grammar; local documentation
+  links and `git diff --check` pass. Actual runtime verification was on local Python
+  3.14, not the full advertised Python/OS matrix. Windows locking and network
+  filesystem behavior have not been exercised here.
+- The AST graph was refreshed without LLM calls. Graph JSON/report were updated;
+  HTML regeneration was skipped by graphify's size limit.
+
+This is a partial closure of D5/history gaps, not completion of every item in the
+original review. Origin/run isolation, causal chains, full transport accounting,
+cleanup lifecycle and real multi-stack assessment benchmarks remain explicitly open.

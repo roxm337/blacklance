@@ -25,7 +25,7 @@ the law and the rules of engagement for the target.
 
 ## Features
 
-- **45+ modules** across a 6-stage pipeline: seed → asset expansion → enrichment →
+- **79 registered modules** across a 6-stage pipeline: seed → asset expansion → enrichment →
   exposure analysis → active vulnerability testing → prioritization & reporting.
 - **Passive by default.** Active/high-detectability modules (port scan, nuclei, XSS/SQLi
   validation, content discovery) run with `--active`.
@@ -295,9 +295,18 @@ is the operator's responsibility.
 
 ## Roadmap
 
-Phase 1 — module pipeline: **complete & tested.**
-Phase 2 — autonomous multi-agent layer (supervisor, blackboard, verification oracle,
-budget-managed action execution): **in progress.**
+See [INTEGRATION_PLAN.md](INTEGRATION_PLAN.md) for the authoritative reliability
+backlog, integration dependencies, and acceptance tests, and
+[FIX_PROGRESS.md](FIX_PROGRESS.md) for completed verification.
+
+The module pipeline is implemented; assessment-quality benchmarks and parts of
+the autonomous layer remain in progress. New integrations start with replayable
+browser traffic, stateful API testing, and deeper multi-identity authorization.
+
+Investigation data commits to `state/snapshot.json`; the four legacy JSON files
+are compatibility exports. Concurrent stale saves raise a conflict instead of
+overwriting newer state. History counts observation snapshots, not report exports;
+missing findings/assets are **untested** without an explicit negative retest.
 
 ---
 
