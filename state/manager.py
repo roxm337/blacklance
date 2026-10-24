@@ -1,6 +1,7 @@
 """State Manager — typed asset graph with confidence ladders."""
 
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -594,6 +595,7 @@ class StateManager:
             "created_at": self._now(),
         }
         self._write_json(path, {
+            "schema_version": 1,
             "id": eid,
             "module_id": module_id,
             "type": evidence_type,
@@ -601,9 +603,32 @@ class StateManager:
             "created_at": item["created_at"],
             "data": data,
         })
+        item.update({"schema_version": 1,
+                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                     "size_bytes": path.stat().st_size})
         self.evidence["items"].append(item)
+        audit = getattr(self, "audit", None)
+        if audit is not None:
+            audit.record("evidence.created", item)
         self._dirty = True
         return eid
+
+    def verify_evidence(self, evidence_id: str) -> dict:
+        """Check the stored bytes against the indexed digest, without rewriting them."""
+        item = next((entry for entry in self.evidence["items"]
+                     if entry.get("id") == evidence_id), None)
+        if not item:
+            return {"ok": False, "reason": "unknown evidence"}
+        if not item.get("sha256"):
+            return {"ok": False, "reason": "legacy evidence has no digest"}
+        try:
+            path = (self.output_dir / item["path"]).resolve()
+            if not path.is_relative_to(self.evidence_dir.resolve()):
+                return {"ok": False, "reason": "invalid evidence path"}
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return {"ok": False, "reason": "missing or unreadable evidence"}
+        return {"ok": actual == item["sha256"], "sha256": actual}
 
     # ── Persistence ───────────────────────────────────────────────
 

@@ -721,6 +721,7 @@ def test_a_module_that_overruns_is_recorded_as_a_timeout(monkeypatch):
             return "done"
 
     orch = Orchestrator.__new__(Orchestrator)
+    orch.audit = SimpleNamespace(record=lambda *args, **kwargs: None)
     # The module timeout is the subject of this test, not the surface seeder,
     # so stub it out rather than teaching the fake state about assets.
     orch._seed_surface = _noop

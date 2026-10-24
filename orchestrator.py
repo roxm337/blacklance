@@ -132,6 +132,18 @@ def _no_probe_hint(risk_ceiling: str) -> str:
 class Orchestrator:
     """Main orchestrator. Runs all modules in stage order."""
 
+    @property
+    def audit(self):
+        if getattr(self, "_audit", None) is None:
+            from core.audit_log import AuditLog
+            self._audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
+            self.state.audit = self._audit
+        return self._audit
+
+    @audit.setter
+    def audit(self, value):
+        self._audit = value
+
     @staticmethod
     def _read_config_file(path: str) -> dict:
         """Read one YAML file as a dict, or {} if it is absent or unreadable."""
@@ -175,6 +187,9 @@ class Orchestrator:
 
         report_dir = self.output_dir / self.domain
         self.state = StateManager(str(report_dir))
+        from core.audit_log import AuditLog
+        self.audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
+        self.state.audit = self.audit
         if resume_budget:
             self.config.setdefault("budget_limits", {})["resume"] = True
 
@@ -194,9 +209,8 @@ class Orchestrator:
 
         configure_oob(self.config)
 
-        # Chain execution. Off unless asked for, and the risk ceiling defaults
-        # to LOW so that only SAFE/LOW actions can fire without an explicit
-        # opt-in to something more aggressive.
+        # Chain execution is opt-in. The caller selects a risk ceiling;
+        # the unrestricted DESTRUCTIVE default is shared with the CLI.
         self.execute_chains = False
         self.max_risk = "DESTRUCTIVE"
         self.max_actions = 0
@@ -222,13 +236,14 @@ class Orchestrator:
         except OSError:
             is_default = False
         base = {} if is_default else self._read_config_file("config.yaml")
-        if not base and not is_default:
+        if not base and (not is_default or not override):
             # config.yaml is gitignored, so fresh clones do not have one.
             # Without this the merge base is empty and a scoped -c run
             # silently loses every wordlist — the exact defect this
             # layering exists to prevent. The example is the product
             # defaults; it lives next to this file, not in CWD.
-            example = Path(__file__).resolve().parent / "config.example.yaml"
+            from osint_agent_resources import resource_path
+            example = resource_path("config.example.yaml")
             base = self._read_config_file(str(example))
         if not override:
             if base:
@@ -383,6 +398,9 @@ class Orchestrator:
                 module_id = decision.split(":", 1)[1].strip()
                 if module_id not in MODULE_REGISTRY:
                     logger.info(f"  LLM requested unknown module: {module_id}")
+                    continue
+                if MODULE_REGISTRY[module_id].get("active") and not self.config.get("target", {}).get("active", False):
+                    self.state.skip_module(module_id, "active module requires --active")
                     continue
                 if self.state.is_module_complete(module_id):
                     logger.info(f"  {module_id} already complete, skipping.")
@@ -562,6 +580,9 @@ class Orchestrator:
 
         # Find exploit chains
         chains = graph.find_chains(max_depth=12, min_score=0.3)
+        if graph.chain_search.get("truncated"):
+            print("  Graph search reached its expansion limit; chain coverage is partial.")
+        graph.save(str(self.output_dir / self.target / "attack_graph.json"))
         graph_chains = len(chains)
         chains, probe_chains = probe_chains_first(graph, chains, proposed)
         if probe_chains:
@@ -615,6 +636,7 @@ class Orchestrator:
         ceiling = RiskLevel(str(self.max_risk).upper())
         executor = ChainExecutor(
             self.state, self.config, budget=self.budget,
+            audit=self.audit,
             max_risk=ceiling, max_actions=self.max_actions,
         )
         print(f"  Executing chains (risk ceiling: {ceiling.value}, "
@@ -693,6 +715,10 @@ class Orchestrator:
 
     async def _run_module(self, module_id: str):
         """Internal: instantiate and run a module."""
+        if getattr(self, "audit", None) is None:
+            from core.audit_log import AuditLog
+            self.audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
+            self.state.audit = self.audit
         # Seed once per process, whichever entry point got us here. `--module`
         # skips `run_all`, so without this a single-module invocation never
         # sees the object references the seeder derives from the bundle.
@@ -709,6 +735,7 @@ class Orchestrator:
             detectability=entry.get("detectability", ""),
             stage=entry.get("stage", 0),
         )
+        self.audit.record("module.start", {"module_id": module_id, "run_id": run_id})
 
         print(f"\n[{module.stage}] {module.name} ({module_id})")
         print(f"  Detectability: {entry['detectability']}")
@@ -764,6 +791,9 @@ class Orchestrator:
             # of every remaining module raising the same error in turn.
             print(f"  ⏹ Budget reached — stopping with partial coverage: {e}")
             self.state.finish_module_run(run_id, "stopped", str(e))
+        except asyncio.CancelledError:
+            self.state.finish_module_run(run_id, "cancelled", "execution cancelled")
+            raise
         except Exception as e:
             print(f"  ✗ Error: {e}")
             import traceback
@@ -772,8 +802,12 @@ class Orchestrator:
             self.state.finish_module_run(run_id, "error", str(e))
         finally:
             clear_deadline()
-
-        self.state.save()
+            self.audit.record("module.end", {
+                "module_id": module_id, "run_id": run_id,
+                "run": next((run for run in self.state.module.get("runs", [])
+                             if run.get("id") == run_id), {}),
+            })
+            self.state.save()
 
 
 async def main():
@@ -797,8 +831,8 @@ Examples:
   # Pentest mode: build attack graph + run action library
   python orchestrator.py -t euro2c.com --pentest
 
-  # Pentest and actually prove the chains (risk ceiling LOW by default)
-  python orchestrator.py -t euro2c.com --pentest --execute
+  # Pentest and prove the chains (choose the desired risk ceiling explicitly)
+  python orchestrator.py -t euro2c.com --pentest --execute --max-risk LOW
 
   # Raise the ceiling. This is what unlocks sqlmap, cloud metadata and the
   # rest, so it should be a deliberate choice rather than a default.
@@ -1011,6 +1045,7 @@ Examples:
             supervisor = AgentSupervisor(
                 orchestrator.state,
                 orchestrator.config,
+                audit=orchestrator.audit,
                 budget=orchestrator.budget,
                 execute=bool(args.execute),
                 max_risk=RiskLevel(args.max_risk),
@@ -1039,7 +1074,11 @@ Examples:
         else:
             await orchestrator.run_all()
     finally:
-        await _close_http()
+        try:
+            await _close_http()
+        finally:
+            orchestrator.state.save()
+            orchestrator.audit.close()
 
 
 async def _close_http() -> None:
@@ -1058,7 +1097,26 @@ async def _close_http() -> None:
 
 def cli():
     """Synchronous entry point for console_scripts."""
-    asyncio.run(main())
+    async def run():
+        import signal
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        try:
+            loop.add_signal_handler(signal.SIGTERM, task.cancel)
+        except (NotImplementedError, RuntimeError):
+            pass
+        try:
+            await main()
+        finally:
+            try:
+                loop.remove_signal_handler(signal.SIGTERM)
+            except (NotImplementedError, RuntimeError):
+                pass
+
+    try:
+        asyncio.run(run())
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

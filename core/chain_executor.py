@@ -20,9 +20,8 @@ different report from a heuristic that guessed.
 
 Safety is by construction, not by convention:
 
-  * Nothing above the risk ceiling runs. The default is LOW, so
-    `web.sqli.sqlmap` and anything DESTRUCTIVE stays parked unless the operator
-    asks for it by name. Raising the ceiling is always explicit.
+  * Nothing above the selected risk ceiling runs. The current default is
+    DESTRUCTIVE; callers can choose a lower ceiling for their engagement.
   * The budget is checked before each action, not after.
   * A chain is a proposal, not a mandate: a failed edge does not silently
     promote its neighbours, and a chain with no runnable edge is reported as
@@ -160,7 +159,7 @@ class ExecutionReport:
 
     @property
     def proven(self) -> int:
-        return sum(1 for o in self.ran if o.finding_id)
+        return sum(1 for o in self.ran if o.finding_id and o.confidence == "CONFIRMED")
 
     def summary(self) -> str:
         parts = [f"{self.proven} proven", f"{len(self.blocked)} blocked by risk",
@@ -510,6 +509,14 @@ class ChainExecutor:
                 confidence=getattr(result, "confidence", ""),
             )
 
+        if ctx.meta is not None and ctx.meta.result_kind == "observation":
+            self.state.add_asset(
+                "observation", f"observation:{planned.action_id}:{planned.url}",
+                planned.action_id, confidence=result.confidence,
+                sources=[planned.action_id], attrs={"url": planned.url})
+            return EdgeOutcome(edge=planned.edge, action_id=planned.action_id,
+                               status="ran", confidence=result.confidence,
+                               detail="observation recorded; no vulnerability proven")
         return self._promote(planned, result)
 
     def _promote(self, planned: PlannedEdge, result) -> EdgeOutcome:
@@ -526,7 +533,7 @@ class ChainExecutor:
         # Success without data is a lead, not proof: a buggy action
         # returning success + empty evidence must not mint verified
         # findings. Downgrade, don't drop — the action did run.
-        has_proof = bool(evidence) or data is not None
+        has_proof = bool(evidence) or bool(data)
         if not has_proof:
             confidence = "TENTATIVE"
 
@@ -540,7 +547,7 @@ class ChainExecutor:
             evidence_lines.append(f"data: {_stringify(data)}")
 
         finding_id = self.state.add_finding(
-            title=f"Proven: {planned.action_id} on {planned.url}",
+            title=f"{'Proven' if has_proof and confidence == 'CONFIRMED' else 'Candidate'}: {planned.action_id} on {planned.url}",
             severity=_severity_for(planned.edge, evidence, confidence),
             confidence=confidence,
             category=_category_for(planned.action_id),
@@ -554,7 +561,7 @@ class ChainExecutor:
             evidence=evidence_lines[:20],
             remediation=_remediation_for(planned.action_id),
             asset_keys=[],
-            verified=has_proof,
+            verified=has_proof and confidence == "CONFIRMED",
             # The proof, not just the claim. A verified finding that does not
             # record which url, which parameter and what the action actually
             # returned is not reportable: the title is the only place the

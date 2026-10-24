@@ -31,6 +31,15 @@ class ActionMeta:
     description: str = ""
     category: str = ""  # web | api | auth | network | cloud | recon | verify
 
+    @property
+    def result_kind(self) -> str:
+        """Successful discovery is an observation, not vulnerability proof."""
+        if self.produces in {"Finding", "VulnCandidate"}:
+            return "candidate"
+        if self.produces == "VerificationResult":
+            return "verification"
+        return "observation"
+
 
 @dataclass
 class ActionContext:
@@ -102,6 +111,9 @@ class ActionRegistry:
 
         # Execute with timeout
         ctx._start_time = time.time()
+        if ctx.audit:
+            ctx.audit.record("action.start", {"action_id": action_id, "target": ctx.target,
+                                             "params": ctx.params, "risk": meta.risk.value})
         try:
             result = await asyncio.wait_for(
                 fn(ctx),
@@ -120,6 +132,11 @@ class ActionRegistry:
                 ctx.audit.action(action_id, ctx.target, ctx.params,
                                  risk=meta.risk.value, result=_result_brief(failed))
             return failed
+        except asyncio.CancelledError:
+            if ctx.audit:
+                ctx.audit.record("action.cancelled", {"action_id": action_id,
+                                                      "target": ctx.target})
+            raise
         except Exception as e:
             failed = ActionResult(False, error=str(e))
             if ctx.audit:

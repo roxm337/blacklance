@@ -9,6 +9,7 @@ import re
 import signal
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 from typing import List, Optional
@@ -81,6 +82,35 @@ async def terminate_process_tree(proc) -> None:
         await asyncio.wait_for(proc.wait(), 10)
     except Exception:
         pass
+
+
+def managed_container(command) -> str:
+    try:
+        parts = shlex.split(command) if isinstance(command, str) else list(command)
+    except ValueError:
+        return ""
+    for index, part in enumerate(parts[:-1]):
+        if part == "--name" and re.fullmatch(r"osint-tool-[a-f0-9]{32}", str(parts[index + 1])):
+            return parts[index + 1]
+    return ""
+
+
+async def terminate_tool(proc, command) -> None:
+    """Reap local children and remove only the uniquely named container we own."""
+    await terminate_process_tree(proc)
+    name = managed_container(command)
+    if not name:
+        return
+    cleanup = None
+    try:
+        cleanup = await asyncio.create_subprocess_exec(
+            "docker", "rm", "--force", name,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=os.name != "nt")
+        await asyncio.wait_for(cleanup.wait(), 5)
+    except (OSError, asyncio.TimeoutError):
+        if cleanup is not None:
+            await terminate_process_tree(cleanup)
 
 
 def configure_tool_backend(config: dict | None = None) -> str:
@@ -211,6 +241,7 @@ def docker_run_args(args: List[str], stdin: bool = False) -> List[str]:
     cmd = ["docker", "run", "--rm"]
     if stdin:
         cmd.append("-i")
+    cmd += ["--name", f"osint-tool-{uuid.uuid4().hex}"]
     cmd += _docker_policy_args(str(args[0]) if args else "")
     # argv form (no shell): the space in the path is safe as one element.
     cmd += ["-v", f"{cwd}:/work", "-w", "/work", _BACKEND["image"]]
@@ -265,7 +296,7 @@ def docker_wrap_shell(command: str) -> str:
     policy = " ".join(shlex.quote(part) for part in _docker_policy_args(tool))
     image = shlex.quote(str(_BACKEND["image"]))
     return (f"printf %s {encoded} | base64 -d | docker run --rm -i "
-            f"{policy} -v {volume} -w /work {image} sh")
+            f"--name osint-tool-{uuid.uuid4().hex} {policy} -v {volume} -w /work {image} sh")
 
 
 def tool_available(name: str) -> bool:
@@ -323,8 +354,12 @@ async def run_command(args: List[str], timeout: int = 120,
             "error": None,
         }
     except asyncio.TimeoutError:
-        await terminate_process_tree(proc)
+        await terminate_tool(proc, args)
         return {"stdout": "", "stderr": "timeout", "exit_code": -1, "error": "timeout"}
+    except asyncio.CancelledError:
+        if "proc" in locals():
+            await asyncio.shield(terminate_tool(proc, args))
+        raise
     except Exception as exc:
         return {"stdout": "", "stderr": str(exc), "exit_code": -1, "error": str(exc)}
 
@@ -1478,6 +1513,9 @@ async def semgrep_scan(sources: dict, rules: str = "rules/semgrep",
         return {"available": False, "results": [], "error": "missing"}
     if not sources:
         return {"available": True, "results": [], "error": None}
+    if rules == "rules/semgrep" and not Path(rules).exists():
+        from osint_agent_resources import resource_path
+        rules = str(resource_path(rules))
     import tempfile
     tmpdir = ""
     names: dict[str, str] = {}

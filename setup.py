@@ -1,6 +1,22 @@
 """Setup script for OSINT Agent."""
 
 from setuptools import setup, find_packages
+from setuptools.command.build_py import build_py
+from pathlib import Path
+
+
+class BuildWithResources(build_py):
+    """Keep one authoritative copy of shared data in the source checkout."""
+
+    def run(self):
+        super().run()
+        root = Path(__file__).resolve().parent
+        destination = Path(self.build_lib) / "osint_agent_resources"
+        for relative in [Path("config.example.yaml"), *sorted(root.glob("rules/semgrep/*.yaml"))]:
+            source = root / relative
+            target = destination / source.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self.copy_file(str(source), str(target))
 
 setup(
     name="osint-agent",
@@ -14,7 +30,9 @@ setup(
         "Intended Audience :: Information Technology",
         "Topic :: Security",
     ],
-    packages=find_packages(),
+    packages=find_packages(exclude=("tests", "tests.*")),
+    cmdclass={"build_py": BuildWithResources},
+    package_data={"gui": ["theme.qss"], "knowledge": ["*.yaml"]},
     py_modules=["orchestrator"],
     install_requires=[
         "pyyaml>=6.0",
@@ -32,6 +50,7 @@ setup(
             "beautifulsoup4>=4.11",
             "lxml>=4.9",
             "playwright>=1.45",
+            "h2>=4.1",
         ],
     },
     entry_points={

@@ -595,8 +595,10 @@ class AttackGraph:
 
 
     def find_chains(self, max_depth: int = 12,
-                    min_score: float = 0.1) -> list[AttackPath]:
+                    min_score: float = 0.1, max_expansions: int = 10000) -> list[AttackPath]:
         """BFS for exploit chains from assets to high-value goals."""
+        self.chain_search = {"expanded": 0, "truncated": False,
+                             "max_expansions": max_expansions}
         goals = {k: v for k, v in self.nodes.items() if v.node_type == "goal"}
         assets = {k: v for k, v in self.nodes.items()
                   if v.node_type not in ("goal", "vuln")}
@@ -609,19 +611,20 @@ class AttackGraph:
         for edge in self.edges:
             adj.setdefault(edge.source_id, []).append((edge.target_id, edge))
 
+        from collections import deque
         chains = []
+        queued = 0
         for start_id in assets:
-            visited = set()
-            queue: list[tuple[str, list[AttackNode], list[AttackEdge], float]] = [
-                (start_id, [assets[start_id]], [], 1.0)
-            ]
+            if queued >= max_expansions:
+                self.chain_search["truncated"] = True
+                break
+            queue = deque([(start_id, [assets[start_id]], [], 1.0)])
+            queued += 1
             while queue:
-                current, path_nodes, path_edges, path_score = queue.pop(0)
+                current, path_nodes, path_edges, path_score = queue.popleft()
+                self.chain_search["expanded"] += 1
                 if len(path_nodes) > max_depth:
                     continue
-                if current in visited:
-                    continue
-                visited.add(current)
 
                 if current in goals:
                     if len(path_edges) > 0 and path_score >= min_score:
@@ -635,7 +638,11 @@ class AttackGraph:
                     continue
 
                 for neighbor, edge in adj.get(current, []):
-                    if neighbor not in visited:
+                    if neighbor in self.nodes and neighbor not in {node.id for node in path_nodes}:
+                        if queued >= max_expansions:
+                            self.chain_search["truncated"] = True
+                            continue
+                        queued += 1
                         edge_score = edge.likelihood * edge.impact
                         queue.append((
                             neighbor,
@@ -679,6 +686,8 @@ class AttackGraph:
         }
         if self.probe_plan:
             out["probe_plan"] = self.probe_plan
+        if hasattr(self, "chain_search"):
+            out["chain_search"] = self.chain_search
         return out
 
     def save(self, path: str | Path):

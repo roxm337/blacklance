@@ -10,13 +10,15 @@ import base64
 import tempfile
 import os
 from typing import Any, Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urljoin
 
 from core.deadline import clamp_timeout, deadline_reached
+from core.http_credentials import (configured_origin, credential_header_names,
+                                   origin, without_credentials)
 from tools import http_engine as _http_engine_mod
 from tools.http_engine import HttpEngine
 from tools.external import (consume_tool_budget, docker_wrap_shell,
-                            terminate_process_tree)
+                            terminate_process_tree, terminate_tool)
 from tools.external import tool_available as _tool_available
 
 # Pooled aiohttp engine. Created lazily on first request and reused for the
@@ -27,7 +29,9 @@ _request_observer = None
 
 # Global cookie jar for stateful web sessions across requests
 _COOKIE_JAR: str | None = None
+_COOKIE_JARS: dict[tuple, str] = {}
 _HTTP_SESSION_HEADERS: dict[str, str] = {}
+_HTTP_AUTH_ORIGIN: tuple | None = None
 
 # Headers that carry a credential. Stripped whenever a request is bound to a
 # named identity or explicitly marked sessionless, so the single legacy
@@ -41,21 +45,27 @@ def _drop_auth_headers(headers: dict) -> dict:
         headers.pop(name, None)
     return headers
 
-def _get_cookie_jar() -> str:
+def _get_cookie_jar(identity=None, url: str = "") -> str:
     global _COOKIE_JAR
-    if _COOKIE_JAR is None or not os.path.exists(_COOKIE_JAR):
-        _COOKIE_JAR = os.path.join(tempfile.gettempdir(), "osint_agent_cookies.txt")
-    return _COOKIE_JAR
+    key = (identity or "default", origin(url))
+    path = _COOKIE_JARS.get(key)
+    if not path or not os.path.exists(path):
+        descriptor, path = tempfile.mkstemp(prefix="osint-cookies-", suffix=".txt")
+        os.close(descriptor)
+        _COOKIE_JARS[key] = path
+    _COOKIE_JAR = path
+    return path
 
 def reset_cookie_jar():
     """Drop all session cookies — both the engine's in-memory jars and the
     on-disk jar the curl fallback still uses."""
     global _COOKIE_JAR, _HTTP_SESSION_HEADERS
-    if _COOKIE_JAR and os.path.exists(_COOKIE_JAR):
+    for path in set(_COOKIE_JARS.values()) | ({_COOKIE_JAR} if _COOKIE_JAR else set()):
         try:
-            os.remove(_COOKIE_JAR)
+            os.remove(path)
         except OSError:
             pass
+    _COOKIE_JARS.clear()
     _COOKIE_JAR = None
     _HTTP_SESSION_HEADERS = {}
     if _engine is not None:
@@ -64,7 +74,8 @@ def reset_cookie_jar():
 
 def configure_http_session(config: Optional[dict] = None):
     """Configure headers/cookies applied to all wrapper HTTP requests."""
-    global _HTTP_SESSION_HEADERS
+    global _HTTP_SESSION_HEADERS, _HTTP_AUTH_ORIGIN
+    _HTTP_AUTH_ORIGIN = configured_origin(config or {})
     auth = (config or {}).get("auth", {}) or {}
     headers = {
         str(k): str(v)
@@ -90,7 +101,7 @@ def configure_http_session(config: Optional[dict] = None):
 
 
 def _merge_session_headers(headers: Optional[dict] = None,
-                           drop_auth: bool = False) -> dict:
+                           drop_auth: bool = False, url: Optional[str] = None) -> dict:
     """Combine the globally configured headers with the caller's.
 
     `drop_auth` removes the *global* credentials. The global `Cookie` and
@@ -108,6 +119,8 @@ def _merge_session_headers(headers: Optional[dict] = None,
     baskets were readable by anyone.
     """
     merged = dict(_HTTP_SESSION_HEADERS)
+    if url is not None and (not _HTTP_AUTH_ORIGIN or origin(url) != _HTTP_AUTH_ORIGIN):
+        merged = without_credentials(merged, credential_header_names(merged))
     if drop_auth:
         _drop_auth_headers(merged)
     if headers:
@@ -293,8 +306,12 @@ async def bash(command: str, timeout: int = 120) -> dict:
             "error": None,
         }
     except asyncio.TimeoutError:
-        await terminate_process_tree(proc)
+        await terminate_tool(proc, command)
         return {"stdout": "", "stderr": "timeout", "exit_code": -1, "error": "timeout"}
+    except asyncio.CancelledError:
+        if "proc" in locals():
+            await asyncio.shield(terminate_tool(proc, command))
+        raise
     except Exception as e:
         return {"stdout": "", "stderr": str(e), "exit_code": -1, "error": str(e)}
 
@@ -334,7 +351,10 @@ async def _curl_subprocess(url: str, method: str = "GET",
                            output: str = "status",
                            follow_redirects: bool = True,
                            timeout: int = 10,
-                           session_headers: Optional[dict] = None) -> dict:
+                           session_headers: Optional[dict] = None,
+                           identity: Optional[str] = None,
+                           use_cookies: bool = True,
+                           _redirects_remaining: int = 10) -> dict:
     """Original curl-subprocess path.
 
     Kept for the two cases the aiohttp engine cannot serve: forcing HTTP/1.0
@@ -343,12 +363,49 @@ async def _curl_subprocess(url: str, method: str = "GET",
     `session_headers` carries the already-merged global headers so this path
     applies exactly the same credential-stripping rules as the engine.
     """
-    cmd = ["curl", "-s", "--max-time", str(timeout), "--connect-timeout", "5"]
-
-    cmd.extend(["-b", _get_cookie_jar(), "-c", _get_cookie_jar()])
-
+    merged_headers = (session_headers if session_headers is not None
+                      else _merge_session_headers(headers, url=url))
     if follow_redirects:
-        cmd.append("-L")
+        # Follow explicitly so custom session headers never ride across origins.
+        result = await _curl_subprocess(
+            url, method, headers, data, http1_0, "full", False, timeout,
+            merged_headers, identity, use_cookies)
+        location = next((line.partition(":")[2].strip()
+                         for line in result.get("headers", "").splitlines()
+                         if line.lower().startswith("location:")), "")
+        if result.get("status") in (301, 302, 303, 307, 308) and location:
+            if not _redirects_remaining:
+                return {"status": 0, "body": "", "error": "too_many_redirects"}
+            destination = urljoin(url, location)
+            same_origin = origin(destination) == origin(url)
+            next_headers = dict(merged_headers) if same_origin else without_credentials(
+                merged_headers, credential_header_names(merged_headers))
+            next_method, next_data = method, data
+            if (result["status"] == 303 and method.upper() != "HEAD") or (
+                    result["status"] in (301, 302) and method.upper() == "POST"):
+                next_method, next_data = "GET", None
+                next_headers = {k: v for k, v in next_headers.items()
+                                if k.lower() not in {"content-type", "content-length"}}
+            _consume_http_budget()
+            if _request_observer:
+                _request_observer()
+            final = await _curl_subprocess(
+                destination, next_method, None, next_data, http1_0, output, True, timeout,
+                next_headers, identity, use_cookies and same_origin, _redirects_remaining - 1)
+            final["history"] = [{"status": result["status"], "url": url, "location": location},
+                                *final.get("history", [])]
+            return final
+        if output == "status":
+            result["body"] = ""
+        elif output == "headers":
+            result["body"] = result.get("headers", "")
+        return result
+
+    cmd = ["curl", "-s", "--proto", "=http,https", "--max-time", str(timeout), "--connect-timeout", "5"]
+
+    if use_cookies:
+        cookie_jar = _get_cookie_jar(identity, url)
+        cmd.extend(["-b", cookie_jar, "-c", cookie_jar])
 
     if output == "status":
         cmd.extend(["-o", "/dev/null", "-w", "%{http_code}"])
@@ -363,8 +420,6 @@ async def _curl_subprocess(url: str, method: str = "GET",
         cmd.append("--http1.0")
     if method != "GET":
         cmd.extend(["-X", method])
-    merged_headers = session_headers if session_headers is not None \
-        else _merge_session_headers(headers)
     if merged_headers:
         for k, v in merged_headers.items():
             cmd.extend(["-H", f"{k}: {v}"])
@@ -385,6 +440,10 @@ async def _curl_subprocess(url: str, method: str = "GET",
     except asyncio.TimeoutError:
         await terminate_process_tree(proc)
         return {"status": 0, "body": "", "error": "timeout"}
+    except asyncio.CancelledError:
+        if "proc" in locals():
+            await asyncio.shield(terminate_process_tree(proc))
+        raise
     except Exception as e:
         return {"status": 0, "body": "", "error": str(e)}
 
@@ -466,7 +525,8 @@ async def curl(url: str, method: str = "GET",
         merged_headers = {str(k): v for k, v in (headers or {}).items()
                           if v is not None}
     else:
-        merged_headers = _merge_session_headers(headers, drop_auth=no_session or bool(identity))
+        merged_headers = _merge_session_headers(
+            headers, drop_auth=no_session or bool(identity), url=url)
     if no_session:
         # Anonymous means anonymous, including a credential the caller passed
         # in explicitly: the caller's headers now survive `drop_auth`, so
@@ -481,6 +541,7 @@ async def curl(url: str, method: str = "GET",
                 url, method, headers, data, http1_0, output,
                 follow_redirects, timeout,
                 session_headers=merged_headers,
+                identity=identity, use_cookies=not (no_session or strip_global_auth),
             )
         _http_limiter.note_response(result.get("status", 0),
                                     result.get("retry_after"))

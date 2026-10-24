@@ -44,6 +44,9 @@ DEFAULT_MAX_BODY = 5 * 1024 * 1024
 DEFAULT_KEEPALIVE_TIMEOUT = 30.0
 
 
+from core.http_credentials import origin, credential_header_names, without_credentials
+
+
 class HttpEngineError(RuntimeError):
     """Raised for unrecoverable engine misconfiguration (missing aiohttp)."""
 
@@ -149,6 +152,7 @@ class HttpEngine:
         self._trace = aiohttp.TraceConfig()
         self._trace.on_connection_create_end.append(self._on_connection_create)
         self._trace.on_connection_reuseconn.append(self._on_connection_reuse)
+        self._trace.on_request_redirect.append(self._on_request_redirect)
 
         # Counters for the run summary — makes pooling observable in output.
         self.requests = 0
@@ -256,6 +260,16 @@ class HttpEngine:
                 self._sessions.pop(name, None)
         self._identities = [name for name in self._identities
                             if name in self._sessions]
+
+    async def _on_request_redirect(self, _session, ctx, params) -> None:
+        from urllib.parse import urljoin
+        metadata = getattr(ctx, "trace_request_ctx", None) or {}
+        destination = urljoin(str(params.url), params.response.headers.get("Location", ""))
+        if origin(destination) != metadata.get("credential_origin"):
+            safe = without_credentials(dict(params.headers), metadata.get("credential_headers", ()))
+            for name in list(params.headers):
+                if name not in safe:
+                    del params.headers[name]
 
     async def _on_connection_reuse(self, _session, _ctx, _params) -> None:
         """A pooled connection was reused instead of dialling a new one."""
@@ -377,6 +391,8 @@ class HttpEngine:
                 allow_redirects=follow_redirects,
                 timeout=client_timeout,
                 max_field_size=32768,
+                trace_request_ctx={"credential_origin": origin(url),
+                                   "credential_headers": credential_header_names(request_headers)},
             ) as resp:
                 if allow_redirects_to and resp.history:
                     hops = [str(h.url) for h in resp.history] + [str(resp.url)]

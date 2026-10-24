@@ -335,6 +335,7 @@ async def _render_page(url: str, config: dict, wait_ms: int = 1500,
                      cookies: dict | None = None,
                      headers: dict | None = None) -> dict:
     from playwright.async_api import async_playwright
+    from core.http_credentials import origin, credential_header_names, without_credentials
 
     links: set[str] = set()
     scripts: set[str] = set()
@@ -356,6 +357,18 @@ async def _render_page(url: str, config: dict, wait_ms: int = 1500,
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(extra_http_headers=auth_headers)
+        if auth_headers or auth_cookies:
+            private_headers = credential_header_names(auth_headers)
+
+            async def protect_credentials(route):
+                request = route.request
+                if origin(request.url) != origin(url):
+                    await route.continue_(headers=without_credentials(
+                        request.headers, private_headers))
+                else:
+                    await route.continue_()
+
+            await context.route("**/*", protect_credentials)
         if auth_cookies:
             await context.add_cookies(auth_cookies)
         page = await context.new_page()

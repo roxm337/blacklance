@@ -441,8 +441,8 @@ class VerificationOracle:
                     "reflected": {"payload": payload, "found_in_body": True},
                     **repro.evidence,
                 }
-                return Verdict(Confidence.CONFIRMED, 1.0, evidence=evidence,
-                               reason=f"payload reflected in response, reproducible")
+                return Verdict(Confidence.FIRM, 0.8, evidence=evidence,
+                               reason="reproducible HTML reflection; browser execution unproven")
 
             return Verdict(Confidence.FIRM, 0.8,
                            evidence={"reflected": {"payload": payload, "found_in_body": True}},

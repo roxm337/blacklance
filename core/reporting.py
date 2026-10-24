@@ -786,6 +786,9 @@ def _evidence_digest(item: dict) -> dict:
         "subject": item.get("subject", ""),
         "path": item.get("path", ""),
         "created_at": item.get("created_at", ""),
+        "schema_version": item.get("schema_version"),
+        "sha256": item.get("sha256", ""),
+        "size_bytes": item.get("size_bytes"),
     }
 
 

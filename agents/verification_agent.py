@@ -91,12 +91,21 @@ class VerificationAgent(BaseAgent):
             return {"status": "BLOCKED", **result}
 
         if result.get("success"):
+            entry = ActionRegistry.get(action_id)
+            if result.get("result_kind") == "observation" or (
+                    entry and entry[0].result_kind == "observation"):
+                hypothesis.status = "observed"
+                return {**result, "status": "OBSERVED"}
             # A FIRM differential is a strong lead, not proof: only a
             # CONFIRMED result earns the status, and only then does the
             # finding on record become verified. The old code promoted any
             # success — including verify.composite_oracle's FIRM — to
             # "confirmed" and left the finding itself unverified.
             confidence = str(result.get("confidence") or "").upper()
+            if confidence == "CONFIRMED" and not result.get("evidence"):
+                hypothesis.status = "testing"
+                return {**result, "success": False, "status": "INCONCLUSIVE",
+                        "confidence": "TENTATIVE", "error": "confirmation returned no proof evidence"}
             if confidence == "CONFIRMED":
                 hypothesis.status = "confirmed"
                 self._persist_confirmation(hypothesis, action_id, url, param,

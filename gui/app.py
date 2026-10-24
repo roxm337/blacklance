@@ -3126,7 +3126,7 @@ class MainWindow(QMainWindow):
     def stop_scan(self):
         if self.process and self.process.state() != QProcess.NotRunning:
             self.process.terminate()
-            if not self.process.waitForFinished(2000):
+            if not self.process.waitForFinished(15000):
                 self.process.kill()
         self._stop_run_timers()
 

@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyyaml aiohttp beautifulsoup4 dnspython lxml python-dotenv litellm h2
-          pip install pytest pytest-asyncio
+          pip install pytest pytest-asyncio build
 
       - name: Compile check (3.10 syntax gate)
         # Catches version-gated syntax (PEP-701 f-strings, match edge
@@ -61,6 +61,14 @@ jobs:
             --ignore=tests/test_gui_graph.py \
             --ignore=tests/test_gui_enhancements.py \
             --ignore=tests/test_results_integrity.py
+
+      - name: Build and smoke-test installed wheel
+        env:
+          PYTHON_DOTENV_DISABLED: "1"
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+        run: |
+          python -m build --wheel --outdir "$RUNNER_TEMP/osint-wheel"
+          python scripts/check_wheel.py "$RUNNER_TEMP"/osint-wheel/*.whl
 
   test-gui:
     # Scanner save/load helpers live in the GUI tests; ignoring them let

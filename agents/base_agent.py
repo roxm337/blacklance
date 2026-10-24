@@ -146,6 +146,8 @@ class BaseAgent:
                 return {"success": False, "error": str(exc), "blocked": True}
             result = await ActionRegistry.execute(action_id, ctx)
         return {
+            "action_id": action_id,
+            "result_kind": meta.result_kind,
             "success": result.success,
             "data": result.data,
             "confidence": result.confidence,
