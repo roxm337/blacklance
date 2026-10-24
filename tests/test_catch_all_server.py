@@ -90,6 +90,9 @@ def test_a_real_exposed_env_is_still_reported(monkeypatch):
     )
     env = [f for f in findings if f["title"] == "Exposed Environment File"][0]
     assert env["severity"] == "CRITICAL"
+    assert env["verified"] is True
+    assert env["verification"]["method"] == "misconfig_content_gate"
+    assert env["verification"]["url"].endswith("/.env")
 
 
 def test_a_catch_all_server_does_not_manufacture_critical_findings(monkeypatch):

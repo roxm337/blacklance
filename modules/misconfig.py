@@ -262,15 +262,19 @@ class MisconfigProbes(BaseModule):
             evidence = [f"URL: {base_url}{f['path']}"]
             if f.get("body_preview"):
                 evidence.append(f"Preview: {f['body_preview'][:200]}")
+            verified = f["severity"] != "INFO"
             self.state.add_finding(
                 title=f["title"],
                 severity=f["severity"],
-                confidence="CONFIRMED" if f["severity"] != "INFO" else "FIRM",
-                category="Information Disclosure" if f["severity"] != "INFO" else "Enumeration",
+                confidence="CONFIRMED" if verified else "FIRM",
+                category="Information Disclosure" if verified else "Enumeration",
                 description=f["desc"],
                 evidence=evidence,
                 remediation=self._remediation(f["path"]),
                 asset_keys=[f"webapp:{base_url}"],
+                verified=verified,
+                verification={"method": "misconfig_content_gate",
+                              "url": f"{base_url}{f['path']}"} if verified else {},
             )
 
         self.state.complete_module(self.id)
