@@ -12,11 +12,24 @@ class BuildWithResources(build_py):
         super().run()
         root = Path(__file__).resolve().parent
         destination = Path(self.build_lib) / "osint_agent_resources"
+        resource_outputs = set()
         for relative in [Path("config.example.yaml"), *sorted(root.glob("rules/semgrep/*.yaml"))]:
             source = root / relative
             target = destination / source.relative_to(root)
             target.parent.mkdir(parents=True, exist_ok=True)
             self.copy_file(str(source), str(target))
+            resource_outputs.add(target.resolve())
+        # Wheel installation copies the entire build directory, not only
+        # find_packages(). Old tests or local files there otherwise leak into
+        # a wheel even after they have been excluded from package discovery.
+        expected = {Path(path).resolve() for path in self.get_outputs(include_bytecode=False)}
+        expected.update(resource_outputs)
+        unexpected = [path for path in Path(self.build_lib).rglob("*")
+                      if path.is_file() and path.resolve() not in expected]
+        if unexpected:
+            raise RuntimeError(
+                "Unexpected files in wheel staging; use a fresh build directory "
+                "(no files were deleted).")
 
 setup(
     name="osint-agent",
