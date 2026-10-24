@@ -81,6 +81,7 @@ def build_report_bundle(state: Any, target: str) -> dict:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "report_version": "2.0",
             "output_dir": str(state.output_dir),
+            "assessment": dict(state.module.get("assessment") or {}),
         },
         "summary": {
             "assets": len(assets),

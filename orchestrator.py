@@ -74,18 +74,6 @@ def probe_chains_first(graph, chains, proposed):
     return probe_chains + list(chains), probe_chains
 
 
-def _explicit_port(host: str) -> bool:
-    """Does this bare `host[:port]` name a port the user typed?
-
-    Deliberately not `":" in host`: an IPv6 literal contains colons and is not
-    a port at all, and treating `[::1]:8080` as portless would send it to
-    HTTPS on 443.
-    """
-    if host.startswith("["):
-        return "]" in host and host.split("]", 1)[1].startswith(":")
-    return ":" in host
-
-
 def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively layer `override` over `base`.
 
@@ -159,7 +147,9 @@ class Orchestrator:
 
     def __init__(self, target: str, output_dir: str,
                  config_path: str = "config.yaml",
-                 mode: str = "auto", resume_budget: bool = False):
+                 mode: str = "auto", resume_budget: bool = False,
+                 run_mode: str = "fresh", assessment_id: str = None,
+                 from_assessment: str = None):
         self.raw_target = target
         self.output_dir = Path(output_dir)
         self.config = self._load_config(config_path)
@@ -185,13 +175,40 @@ class Orchestrator:
         self.config["target"]["mode"] = mode
         self.config["target"]["active"] = mode == "active"
 
-        report_dir = self.output_dir / self.domain
-        self.state = StateManager(str(report_dir))
+        from core.assessments import AssessmentStore, AssessmentLease
+        if resume_budget and run_mode != "resume":
+            raise ValueError("--resume-budget requires --run-mode resume and --assessment")
+        self.assessment_store = AssessmentStore(self.output_dir, self.base_url)
+        # Canonical aliases must keep artifact filenames and host-level dedup stable.
+        self.domain = urlparse(self.assessment_store.origin).hostname
+        self.target = self.domain
+        self.config["target"]["domain"] = self.domain
+        self.assessment = self.assessment_store.select(
+            run_mode, assessment_id=assessment_id, parent_id=from_assessment)
+        self._assessment_lease = AssessmentLease(self.assessment.directory)
+        self.run_mode = run_mode
+        try:
+            self._initialize_assessment_runtime()
+        except BaseException:
+            self.close()
+            raise
+
+        self.execute_chains = False
+        self.max_risk = "DESTRUCTIVE"
+        self.max_actions = 0
+        self.max_chains = 0
+
+    def _initialize_assessment_runtime(self):
+        self.state = StateManager(str(self.assessment.directory))
+        if self.state.module.get("assessment") != self.assessment.metadata:
+            raise ValueError("Assessment metadata does not match its committed state")
+        self.config["assessment"] = dict(self.assessment.metadata)
         from core.audit_log import AuditLog
         self.audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
         self.state.audit = self.audit
-        if resume_budget:
-            self.config.setdefault("budget_limits", {})["resume"] = True
+        # A resumed assessment retains its counters. Fresh/retest cannot be
+        # turned into budget resume by an old operator-local configuration.
+        self.config.setdefault("budget_limits", {})["resume"] = self.run_mode == "resume"
 
         # One budget follows the engagement through modules, pentest chains and
         # autonomous agents. Counters are atomically checkpointed after every
@@ -200,6 +217,13 @@ class Orchestrator:
             self.config,
             checkpoint_path=self.state.state_dir / "budget.json",
         )
+        recovered = self.state.recover_interrupted_runs() if self.run_mode == "resume" else []
+        if recovered:
+            self.state.save()
+        self.audit.record("assessment.open", {
+            "assessment": self.assessment.metadata, "lifecycle": self.run_mode,
+            "interrupted_runs": recovered,
+        })
         configure_http_budget(self.budget)
         configure_tool_budget(self.budget)
         # Count wire requests from modules, pentest actions and agents alike.
@@ -209,12 +233,27 @@ class Orchestrator:
 
         configure_oob(self.config)
 
-        # Chain execution is opt-in. The caller selects a risk ceiling;
-        # the unrestricted DESTRUCTIVE default is shared with the CLI.
-        self.execute_chains = False
-        self.max_risk = "DESTRUCTIVE"
-        self.max_actions = 0
-        self.max_chains = 0
+    def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        audit = getattr(self, "_audit", None)
+        lease = getattr(self, "_assessment_lease", None)
+        try:
+            budget = getattr(self, "budget", None)
+            if budget is not None:
+                budget.checkpoint()
+        finally:
+            try:
+                if audit is not None:
+                    audit.close()
+            finally:
+                if lease is not None:
+                    lease.close()
+
+    def _require_open(self):
+        if getattr(self, "_closed", False):
+            raise ValueError("Assessment executor is closed; resume it with a new Orchestrator")
 
     def _load_config(self, path: str) -> dict:
         """Load YAML config, laying the given file over `config.yaml`.
@@ -255,7 +294,7 @@ class Orchestrator:
         # Default config
         return {
             "target": {"domain": "", "mode": "active"},
-            "paths": {"output_dir": "reports", "state_dir": "reports/{target}/state"},
+            "paths": {"output_dir": "reports", "state_dir": "reports/services/{origin_key}/assessments/{assessment_id}/state"},
             "rate_limits": {"default": {"concurrent": 5, "per_minute": 60}},
             "detectability": {"default": "high"},
             "waf": {"block_codes": [503, 429], "honeypot_codes": [500]},
@@ -283,6 +322,7 @@ class Orchestrator:
 
     async def run_all(self):
         """Run all modules in sequence."""
+        self._require_open()
         # Configure rate limiter from config
         rl = self.config.get("rate_limits", {}).get("http", {})
         configure_http_limiter(
@@ -295,7 +335,8 @@ class Orchestrator:
         print(f"\n{'='*60}")
         print(f"  OSINT Agent — {self.target}")
         print(f"  Mode: {self.mode.upper()}")
-        print(f"  Output: {self.output_dir / self.target}")
+        print(f"  Assessment: {self.state.module.get('assessment', {}).get('assessment_id', 'legacy')}")
+        print(f"  Output: {self.state.output_dir}")
         print(f"{'='*60}\n")
 
         # The surface seeder read the target's own bundles before the modules
@@ -316,7 +357,7 @@ class Orchestrator:
             # Skip if already completed
             if self.state.is_module_complete(module_id):
                 print(f"  ⏭ {module_id}: already complete, skipping "
-                      f"(delete state to force a re-run)")
+                      f"(use a fresh assessment or retest to run again)")
                 continue
 
             entry = MODULE_REGISTRY.get(module_id)
@@ -354,7 +395,7 @@ class Orchestrator:
         print(f"  Findings: {summary['findings']}")
         print(f"  Requests: {summary['total_requests']}")
         print(f"  Completed: {len(summary['modules_completed'])} modules")
-        print(f"  Report: {self.output_dir / self.target / f'{self.target}_report.md'}")
+        print(f"  Report: {self.state.output_dir / f'{self.target}_report.md'}")
         from core.preflight import coverage_lines
         for line in coverage_lines(self.state):
             print(f"  {line}")
@@ -364,6 +405,7 @@ class Orchestrator:
 
     async def run_llm(self):
         """Run investigation guided by LLM decisions."""
+        self._require_open()
         from agents.orchestrator_agent import LLMOrchestrator
 
         rl = self.config.get("rate_limits", {}).get("http", {})
@@ -378,7 +420,8 @@ class Orchestrator:
         print(f"\n{'='*60}")
         print(f"  OSINT Agent — {self.target}")
         print(f"  Mode: LLM ({agent.model})")
-        print(f"  Output: {self.output_dir / self.target}")
+        print(f"  Assessment: {self.state.module.get('assessment', {}).get('assessment_id', 'legacy')}")
+        print(f"  Output: {self.state.output_dir}")
         print(f"{'='*60}\n")
 
         max_iterations = 30
@@ -415,7 +458,7 @@ class Orchestrator:
         print(f"  Findings: {summary['findings']}")
         print(f"  Requests: {summary['total_requests']}")
         print(f"  Completed: {len(summary['modules_completed'])} modules")
-        print(f"  Report: {self.output_dir / self.target / f'{self.target}_report.md'}")
+        print(f"  Report: {self.state.output_dir / f'{self.target}_report.md'}")
         from core.preflight import coverage_lines
         for line in coverage_lines(self.state):
             print(f"  {line}")
@@ -438,18 +481,8 @@ class Orchestrator:
         # before `raw_url` has been rewritten, and picking up a stale value
         # from the config file is how `localhost:3000` became something else.
         raw = str(target.get("target_input") or target.get("raw_url") or "").strip()
-        if not raw:
-            return f"https://{self.domain}"
-        if "://" not in raw:
-            # A bare hostname is assumed HTTPS, which is what every public
-            # target is and what the rest of this codebase has always assumed.
-            # A bare host:port is assumed HTTP, because a non-default port is
-            # almost always a development or staging service, and assuming
-            # TLS there is how `-t localhost:3000` dialled 443 and found
-            # nothing.
-            scheme = "http" if _explicit_port(raw) else "https"
-            raw = f"{scheme}://{raw}"
-        return raw.rstrip("/")
+        from core.assessments import target_url
+        return target_url(raw or f"https://{self.domain}")
 
     async def _seed_surface(self):
         """Add declared API surface to state when recon has not found any.
@@ -522,6 +555,7 @@ class Orchestrator:
 
     async def run_pentest(self):
         """Post-OSINT pentesting mode: build attack graph, discover chains, execute actions."""
+        self._require_open()
         print(f"\n{'='*60}")
         print(f"  PENTEST MODE — Attack Graph + Action Library")
         print(f"  Target: {self.target}")
@@ -537,7 +571,7 @@ class Orchestrator:
         # Build attack graph from current state
         graph = AttackGraph(self.state, config=self.config)
         graph.build()
-        graph.save(str(self.output_dir / self.target / "attack_graph.json"))
+        graph.save(str(self.state.output_dir / "attack_graph.json"))
         action_count = ActionRegistry.size()
         print(f"  Attack graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
         print(f"  Actions available: {action_count}")
@@ -561,7 +595,7 @@ class Orchestrator:
         # persisted graph has no `probe_plan` and no answer to the only
         # question anyone asks about a quiet scan — what was tried, and why
         # the rest was not.
-        graph.save(str(self.output_dir / self.target / "attack_graph.json"))
+        graph.save(str(self.state.output_dir / "attack_graph.json"))
         if proposed:
             print(f"  Proposed {len(proposed)} probe(s) on testable surface "
                   f"(risk ceiling {plan.get('risk_ceiling')}, "
@@ -582,7 +616,7 @@ class Orchestrator:
         chains = graph.find_chains(max_depth=12, min_score=0.3)
         if graph.chain_search.get("truncated"):
             print("  Graph search reached its expansion limit; chain coverage is partial.")
-        graph.save(str(self.output_dir / self.target / "attack_graph.json"))
+        graph.save(str(self.state.output_dir / "attack_graph.json"))
         graph_chains = len(chains)
         chains, probe_chains = probe_chains_first(graph, chains, proposed)
         if probe_chains:
@@ -622,7 +656,7 @@ class Orchestrator:
         if report is not None:
             print(f"  Edges proven: {report.proven}  ({report.summary()})")
         print(f"  Budget used: {budget_summary.get('requests', 'N/A')}")
-        print(f"  Attack graph: {self.output_dir / self.target / 'attack_graph.json'}")
+        print(f"  Attack graph: {self.state.output_dir / 'attack_graph.json'}")
         print(f"{'='*60}\n")
 
     async def _execute_chains(self, chains, probe_count: int = 0):
@@ -693,6 +727,7 @@ class Orchestrator:
 
     async def run_module(self, module_id: str):
         """Run a single module by ID."""
+        self._require_open()
         rl = self.config.get("rate_limits", {}).get("http", {})
         configure_http_limiter(
             max_concurrent=rl.get("concurrent", 5),
@@ -715,6 +750,7 @@ class Orchestrator:
 
     async def _run_module(self, module_id: str):
         """Internal: instantiate and run a module."""
+        self._require_open()
         if getattr(self, "audit", None) is None:
             from core.audit_log import AuditLog
             self.audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
@@ -722,7 +758,8 @@ class Orchestrator:
         # Seed once per process, whichever entry point got us here. `--module`
         # skips `run_all`, so without this a single-module invocation never
         # sees the object references the seeder derives from the bundle.
-        if not getattr(self, "_surface_seeded", False):
+        if (module_id not in ("reporting", "risk_prioritization", "bounty_submission", "attack_planner")
+                and not getattr(self, "_surface_seeded", False)):
             self._surface_seeded = True
             await self._seed_surface()
 
@@ -886,7 +923,13 @@ Examples:
                         help="Cap on chains executed per engagement "
                              "(default: 0 = unlimited)")
     parser.add_argument("--resume-budget", action="store_true",
-                        help="Resume counters from this target's last budget checkpoint")
+                        help="Compatibility flag; requires selected assessment resume")
+    parser.add_argument("--run-mode", choices=["fresh", "resume", "retest"], default="fresh",
+                        help="Assessment lifecycle: fresh (default), resume a selected ID, or retest a baseline")
+    parser.add_argument("--assessment", help="Assessment ID (required for resume; optional new ID otherwise)")
+    parser.add_argument("--from-assessment", help="Baseline ID for a new retest assessment")
+    parser.add_argument("--list-assessments", action="store_true", help="List assessments for this exact origin, without scanning")
+    parser.add_argument("--import-legacy", metavar="DIRECTORY", help="Copy inactive legacy results into an origin-bound assessment, then exit")
     parser.add_argument("--agent", action="store_true",
                         help="Autonomous multi-agent engagement (plan-only exploitation "
                              "unless --execute is supplied)")
@@ -901,15 +944,27 @@ Examples:
 
     args = parser.parse_args()
 
+    if args.list_assessments or args.import_legacy:
+        from core.assessments import AssessmentStore
+        try:
+            store = AssessmentStore(args.output, args.target)
+            if args.import_legacy:
+                if args.run_mode != "fresh" or args.from_assessment:
+                    parser.error("Legacy import cannot be combined with resume/retest")
+                selected = store.import_legacy(args.import_legacy, assessment_id=args.assessment)
+                print(f"Imported assessment: {selected.id}\nOrigin: {store.origin}\nOutput: {selected.directory}")
+            else:
+                print(f"Assessments for {store.origin}:")
+                for item in store.list():
+                    print(f"  {item.id}  {item.metadata['created_at']}  {item.metadata['kind']}")
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        return
+
     if args.tools:
         from tools.tool_manager import ToolManager
-        _probe = Orchestrator(
-            target=args.target,
-            output_dir=args.output,
-            config_path=args.config,
-            mode="auto",  # config layering only; nothing runs
-        )
-        tm = ToolManager(_probe.config)
+        loader = object.__new__(Orchestrator)
+        tm = ToolManager(loader._load_config(args.config))
         summary = tm.summary()
         print(f"\nExternal tools ({summary['available']}/{summary['total']} "
               f"available{tm.backend_note}):")
@@ -962,16 +1017,12 @@ Examples:
 
     if args.check_config:
         from core.config_doctor import coverage as _coverage
-        _probe = Orchestrator(
-            target=args.target,
-            output_dir=args.output,
-            config_path=args.config,
-            mode="auto",  # coverage reads config only; nothing runs
-        )
+        loader = object.__new__(Orchestrator)
+        loaded_config = loader._load_config(args.config)
         print(f"\nConfig coverage ({args.config} over config.yaml, "
               f"env OSINT_TOOLS_BACKEND/OSINT_TOOLS_IMAGE wins at runtime):")
         missing = 0
-        for dotted, present, value, why in _coverage(_probe.config):
+        for dotted, present, value, why in _coverage(loaded_config):
             mark = "set" if present else "default"
             if not present:
                 missing += 1
@@ -982,18 +1033,26 @@ Examples:
         return
 
     mode = "active" if args.active else args.mode
-    orchestrator = Orchestrator(
-        target=args.target,
-        output_dir=args.output,
-        config_path=args.config,
-        mode=mode,
-        resume_budget=bool(args.resume_budget),
-    )
+    if (args.module in ("reporting", "risk_prioritization", "bounty_submission", "attack_planner")
+            and not args.pentest and args.run_mode != "resume") or (
+                args.phase == "report" and args.run_mode != "resume"):
+        parser.error("Post-processing requires --run-mode resume --assessment ID")
+    try:
+        orchestrator = Orchestrator(
+            target=args.target, output_dir=args.output, config_path=args.config,
+            mode=mode, resume_budget=bool(args.resume_budget),
+            run_mode=args.run_mode, assessment_id=args.assessment,
+            from_assessment=args.from_assessment)
+    except (ValueError, OSError, RuntimeError) as exc:
+        parser.error(str(exc))
     orchestrator.execute_chains = bool(args.execute)
     orchestrator.max_risk = args.max_risk
     orchestrator.max_actions = args.max_actions
     orchestrator.budget.configure_action_limit(args.max_actions)
     orchestrator.max_chains = args.max_chains
+    print(f"\nAssessment: {orchestrator.assessment.id} ({args.run_mode})")
+    print(f"Origin: {orchestrator.assessment_store.origin}")
+    print(f"Output: {orchestrator.state.output_dir}\n")
 
     # Stale configs run new features on invisible code defaults. Say so
     # once, up front — silent when the file covers everything.
@@ -1077,8 +1136,10 @@ Examples:
         try:
             await _close_http()
         finally:
-            orchestrator.state.save()
-            orchestrator.audit.close()
+            try:
+                orchestrator.state.save()
+            finally:
+                orchestrator.close()
 
 
 async def _close_http() -> None:

@@ -21,7 +21,7 @@ See [FIX_PROGRESS.md](FIX_PROGRESS.md) for completed verification runs.
 | R3 | Conservative history and repeatable exports | Implemented | `core/history.py`, `core/reporting.py`; identical observation exports do not increment occurrences; absence is untested; resolution requires explicit negative-retest keys. JSON artifacts share annotations. |
 | R4 | Independent audit writers | Implemented | `core/audit_log.py`; process lock, refresh/verify externally changed tail, contiguous sequences, reject observed truncation/corruption. External anchoring remains R10. |
 | R5 | Accurate module retest status | Implemented | `state/manager.py`; starting a retest clears old success/skip/block state; unsuccessful completion cannot retain a success badge. |
-| R6 | Origin and assessment isolation; fresh/resume/retest | Planned | `orchestrator.py`, state, GUI. Versioned canonical origin and assessment IDs, separate service/run stores, explicit migration preserving old reports. Two ports on one hostname must not share completion state. No new target-selection restrictions. |
+| R6 | Origin and assessment isolation; fresh/resume/retest | Implemented | `core/assessments.py`, orchestrator, budgets, state, reporting and GUI. Canonical origin namespaces, explicit IDs, empty fresh/retest state, selected resume, history-only retest baselines, immutable-source legacy copy/import, one executor per assessment. Regression cases cover ports/schemes/aliases, selection identity, migration bytes and GUI report follow-up. Full OS/filesystem matrix and live labs remain R11/R12. |
 | R7 | One execution and accounting contract | Planned | Orchestrator, registry, all transports/tools. Every started/refused/failed/cancelled operation gets a typed result, accounting, and evidence references. Include browser, raw sockets, subprocesses, and Docker. |
 | R8 | Durable mutation/cleanup ledger | Planned | State, auth harness, mutating modules. Record before-state, owned test objects, attempted rollback and verified cleanup; cancellation/resume retries outstanding cleanup. Never imply a rollback succeeded without checking. |
 | R9 | Causal chain execution | Planned | `core/chain_executor.py`, action schemas. Typed preconditions, output bindings, branch outcomes, credential references and dependency ordering. A failed prerequisite prevents dependent execution; independent branches remain possible. Existing sorted edge probes are not completed causal chains. |
@@ -29,13 +29,15 @@ See [FIX_PROGRESS.md](FIX_PROGRESS.md) for completed verification runs.
 | R11 | Reproducible releases and compatibility | Planned | Pin scanner images by digest and tool/template versions; record provenance, SBOM and license inventory. Real Docker/parser compatibility jobs, installed-wheel checks, Python matrix, config schema, release/version alignment. Licensing requires the owner's choice. |
 | R12 | Measured assessment quality | Planned | Vulnerable/fixed/ambiguous lab pairs, negative controls, precision/recall, request cost, cleanup success, timeout/cancellation and expired-auth cases. Publish measured results before promoting a capability to validated. |
 
-R1 rejects conflicts; it does not merge independent writers or isolate origins/runs.
+R1 rejects conflicts; it does not merge independent writers. R6 supplies separate
+origin/assessment directories and a cooperating executor lease for CLI/GUI runs.
 Packaging also rejects unexpected stale staging files rather than silently shipping
 them. Clean installed-wheel state/evidence/report smoke checks are implemented;
 the remaining version pinning and compatibility matrix still belong to R11.
 Compatibility JSON views are not a multi-file transaction. New StateManager and GUI
-readers use the authoritative snapshot. R3 uses an observation digest, not a durable
-assessment ID; R6 must supply that later. Automatic collection of endpoint-specific
+readers use the authoritative snapshot. R6 now supplies durable assessment IDs and
+origin metadata; R3 additionally keeps per-item observation/export idempotence.
+Automatic collection of endpoint-specific
 negative retest evidence is still planned. Report exports do not infer resolution
 from module completion or an empty result list.
 

@@ -12,6 +12,7 @@ os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
+import pytest
 from PySide6.QtCore import QItemSelectionModel, QProcess, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QTableWidgetItem
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QTableWidgetItem
 from gui.app import MainWindow, build_scan_args
 from modules import get_all_module_ids
 from state.manager import StateManager
+from core.assessments import AssessmentStore
 
 
 def test_gui_loads_advanced_state_tabs(tmp_path):
@@ -403,6 +405,112 @@ def test_build_scan_args_reaches_cli():
     assert "--active" in args
     assert args[args.index("--mode") + 1] == "llm"
     assert args[args.index("--module") + 1] == "xss_scanner"
+
+
+def _assessment_window(tmp_path, target="localhost:3000"):
+    from PySide6.QtCore import QSettings
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window._settings = QSettings(str(tmp_path / "assessment-gui.ini"), QSettings.IniFormat)
+    window.output_dir = tmp_path / "reports"
+    window.target_input.setText(target)
+    window._target_reload_timer.stop()
+    return window, app
+
+
+@pytest.mark.parametrize("corruption", ["broken", "swapped"])
+def test_gui_selection_routes_all_artifacts_and_clears_other_run_data(tmp_path, corruption):
+    window, app = _assessment_window(tmp_path)
+    store = AssessmentStore(window.output_dir, "localhost:3000")
+    first, second = store.create(), store.create()
+    state = StateManager(str(first.directory))
+    state.complete_module("m")
+    state.add_finding("first", "HIGH", "FIRM", "Test", "fixture")
+    state.save()
+    window._refresh_assessments(preferred=first.id)
+    window.load_results()
+    assert window.current_findings[0]["title"] == "first"
+    assert window._report_path().parent == first.directory
+    assert window._triage_path().parent == first.directory
+    assert window._attack_graph_path().parent == first.directory
+    # A broken newly selected snapshot must not borrow last-good data from first.
+    snapshot = second.directory / "state" / "snapshot.json"
+    if corruption == "broken":
+        snapshot.write_text("{broken")
+    else:
+        snapshot.write_bytes((first.directory / "state" / "snapshot.json").read_bytes())
+    window._refresh_assessments(preferred=second.id)
+    window.load_results()
+    assert not window.current_findings
+    assert not window.current_module
+    assert "Corrupt" in window.status_label.text()
+    window.target_input.setText("localhost:3001")
+    window.load_results()
+    assert not window.current_findings
+    assert window.assessment_combo.currentData() is None
+    window.close()
+    app.processEvents()
+
+
+def test_gui_fresh_resume_and_retest_forward_their_selections(tmp_path, monkeypatch):
+    window, app = _assessment_window(tmp_path)
+    store = AssessmentStore(window.output_dir, "localhost:3000")
+    selected = store.create()
+    captured = []
+    monkeypatch.setattr(window, "_start_process", lambda args, **kw: captured.append(args))
+    monkeypatch.setattr(window, "_confirm_engagement", lambda: True)
+    window._refresh_assessments(preferred=selected.id)
+    window.start_scan()
+    fresh_id = captured[-1][captured[-1].index("--assessment") + 1]
+    assert fresh_id != selected.id
+    assert captured[-1][captured[-1].index("--run-mode") + 1] == "fresh"
+    window._pending_assessment = None
+    window._refresh_assessments(preferred=selected.id)
+    window.lifecycle_combo.setCurrentText("Resume")
+    window.start_scan()
+    assert captured[-1][captured[-1].index("--assessment") + 1] == selected.id
+    assert captured[-1][captured[-1].index("--run-mode") + 1] == "resume"
+    window.lifecycle_combo.setCurrentText("Retest")
+    window.start_scan()
+    assert captured[-1][captured[-1].index("--from-assessment") + 1] == selected.id
+    assert captured[-1][captured[-1].index("--assessment") + 1] != selected.id
+    window.close()
+    app.processEvents()
+
+
+def test_gui_automatic_report_resumes_the_just_completed_assessment(tmp_path, monkeypatch):
+    window, app = _assessment_window(tmp_path)
+    captured = []
+    monkeypatch.setattr(window, "_start_process", lambda args, **kw: captured.append((args, kw)))
+    monkeypatch.setattr(window, "_confirm_engagement", lambda: True)
+    window.start_scan()
+    args = captured[-1][0]
+    identifier = args[args.index("--assessment") + 1]
+    store = AssessmentStore(window.output_dir, "localhost:3000")
+    # Simulate the child's published assessment, not a second assessment.
+    store.create(assessment_id=identifier)
+    window._process_finished(0, None)
+    report_args, options = captured[-1]
+    assert report_args[report_args.index("--run-mode") + 1] == "resume"
+    assert report_args[report_args.index("--assessment") + 1] == identifier
+    assert report_args[report_args.index("--module") + 1] == "reporting"
+    assert options["report_run"]
+    assert len(store.list()) == 1
+    window.close()
+    app.processEvents()
+
+
+def test_gui_resume_requires_selection_not_an_implicit_legacy_run(tmp_path, monkeypatch):
+    window, app = _assessment_window(tmp_path)
+    warnings, started = [], []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args))
+    monkeypatch.setattr(window, "_start_process", lambda *args, **kw: started.append(args))
+    window.lifecycle_combo.setCurrentText("Resume")
+    window.start_scan()
+    assert warnings and not started
+    assert not window.output_dir.exists()
+    window.close()
+    app.processEvents()
 
 
 def test_build_scan_args_pentest_flags():

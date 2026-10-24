@@ -40,7 +40,7 @@ def atomic_json(path: Path, data: dict) -> None:
 
 
 @contextmanager
-def file_lock(path: Path):
+def file_lock(path: Path, *, blocking: bool = True):
     """Serialize cooperating processes. The lock file is permanent, not a lease."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,10 +52,10 @@ def file_lock(path: Path):
                 stream.write(b"\0")
                 stream.flush()
             stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         try:
             yield
         finally:

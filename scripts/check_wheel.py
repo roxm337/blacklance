@@ -31,7 +31,7 @@ with tempfile.TemporaryDirectory() as output:
     assert restored.verify_evidence(evidence_id)['ok']
     assert restored.assets['nodes'][0]['value'] == 'example.test'
     write_report_bundle(restored, 'example.test')
-    run.audit.close()
+    run.close()
 print('Installed wheel: CLI/resources, transactional state, evidence and reports OK')
 """
 

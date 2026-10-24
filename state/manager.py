@@ -287,6 +287,11 @@ class StateManager:
         findings that carry no host-bearing asset key. The report directory
         is named for the target (reports/<domain>/), so its basename is the
         host; falls back to a constant when that is unavailable."""
+        from urllib.parse import urlsplit
+        assessment = self.module.get("assessment") or {}
+        host = urlsplit(assessment.get("origin", "")).hostname
+        if host:
+            return host.lower()
         name = str(getattr(self.output_dir, "name", "") or "").lower()
         if name and name not in ("state", ""):
             return name
@@ -545,6 +550,14 @@ class StateManager:
             self.module["completed"].append(module_id)
         self.module["current"] = None
         self._dirty = True
+
+    def recover_interrupted_runs(self) -> list[str]:
+        """Called only after an executor acquires a resumed assessment's lease."""
+        unfinished = [run["id"] for run in self.module.get("runs", [])
+                      if run.get("status") == "running"]
+        for run_id in unfinished:
+            self.finish_module_run(run_id, "interrupted", "Previous executor stopped; module requires rerun")
+        return unfinished
 
     def skip_module(self, module_id: str, reason: str = ""):
         if not any(s.get("module_id") == module_id for s in self.module["skipped"]):

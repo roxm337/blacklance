@@ -131,8 +131,8 @@ python orchestrator.py -t example.com
 # LLM-guided module selection
 python orchestrator.py -t example.com --mode llm
 
-# Generate a testing plan
-python orchestrator.py -t example.com --module attack_planner
+# Generate a testing plan for a selected assessment
+python orchestrator.py -t example.com --run-mode resume --assessment ASSESSMENT_ID --module attack_planner
 
 # Active recon (port scan + high-detectability probes)
 python orchestrator.py -t example.com --active
@@ -147,9 +147,9 @@ python orchestrator.py -t example.com --agent --phase recon
 python orchestrator.py -t example.com --agent --execute --max-risk MEDIUM
 
 # Utilities
-python orchestrator.py --list-modules
-python orchestrator.py --list-actions
-python orchestrator.py --tools
+python orchestrator.py -t example.com --list-modules
+python orchestrator.py -t example.com --list-actions
+python orchestrator.py -t example.com --tools
 ```
 
 **Key flags:** `-t/--target` (required), `-o/--output` (default `reports`),
@@ -157,6 +157,8 @@ python orchestrator.py --tools
 `--active`, `--pentest`, `--agent`, `--execute`,
 `--max-risk {SAFE,LOW,MEDIUM,HIGH,DESTRUCTIVE}` (default `DESTRUCTIVE`),
 `--max-actions` / `--max-chains` (default `0` = unlimited), `--resume-budget`,
+`--run-mode {fresh,resume,retest}`, `--assessment ID`, `--from-assessment ID`,
+`--list-assessments`, `--import-legacy DIRECTORY`,
 `--phase {plan,recon,vuln,exploit,verify,report}`,
 `--list-modules`, `--list-actions`, `--tools`, `--install-tools`.
 
@@ -168,6 +170,11 @@ python -m gui.app        # or: osint-agent-gui
 
 The GUI drives the same `orchestrator.py` engine (via `QProcess`), so GUI and CLI share
 identical state and config contracts.
+
+The Mission Setup panel has **Fresh / Resume / Retest** lifecycle controls and
+an origin-specific assessment selector. Report, prioritization, submission and
+attack-plan actions operate on the selected assessment. Import legacy results
+with the explicit copy/import action; legacy directories are never silently resumed.
 
 - **Six-screen console** — icon nav rail: Run (mission setup + live log), Triage
   (findings workflow), Graph (asset + attack graph), Data (assets/modules/evidence/
@@ -231,9 +238,61 @@ counter covers HTTP calls made through the framework wrappers, while
 `max_external_commands` caps scanner/tool process launches. External scanners such as
 Nuclei or sqlmap still enforce their own configured request rates because their internal
 traffic is outside the wrapper.
-Budget counters are checkpointed to `state/budget.json` after each reservation. A new
-run starts with fresh counters unless `--resume-budget` (or `budget_limits.resume`) is
-explicitly enabled; stopped time is not charged against the wall-clock limit.
+Budget counters are checkpointed to the selected assessment's `state/budget.json`
+after each reservation. Fresh/retest starts with new counters; resume restores the
+selected assessment's counters and verifies checkpoint identity. Stopped time is not
+charged against the wall-clock limit. The CLI lifecycle overrides the standalone
+`budget_limits.resume` default; `--resume-budget` is only a compatibility flag for
+an explicitly selected resume, not a way to resume a target's guessed latest run.
+
+### Assessment lifecycle and migration
+
+Canonical origin includes scheme, hostname and port. Paths/query strings do not
+create new service namespaces; explicit default ports, IDNA names and equivalent
+IPv6 spellings normalize to the same origin. HTTP vs HTTPS and different ports do
+not share state.
+
+| Lifecycle | Selection | State behavior |
+|---|---|---|
+| `fresh` (default) | Optional new ID | New empty assessment; no old completion, findings, evidence or budget. |
+| `resume` | Required assessment ID | Continue that assessment's state, evidence, audit and budget. Full pipelines skip its completed modules; an explicitly selected module reruns. |
+| `retest` | Required baseline ID | Create a new assessment linked to the baseline. Carry only history, never old findings, assets, credentials or completion flags. Missing baseline items remain untested without negative-retest proof. |
+
+```bash
+# Start a fresh assessment; the CLI prints its ID and output directory
+python orchestrator.py -t http://localhost:3000
+
+# List only this exact origin's assessments (no scan, no new directories)
+python orchestrator.py -t http://localhost:3000 --list-assessments
+
+# Continue the assessment selected by ID
+python orchestrator.py -t http://localhost:3000 --run-mode resume --assessment ASSESSMENT_ID
+
+# A new retest with a selected history baseline
+python orchestrator.py -t http://localhost:3000 --run-mode retest --from-assessment ASSESSMENT_ID
+
+# Report-only processing never discovers/probes surface
+python orchestrator.py -t http://localhost:3000 --run-mode resume --assessment ASSESSMENT_ID --module reporting
+
+# Explicit copy of inactive legacy output; original files are unchanged; exits without scanning
+python orchestrator.py -t https://example.com --import-legacy reports/example.com
+```
+
+New layout: `reports/services/<origin-key>/assessments/<assessment-id>/` contains
+`assessment.json`, reports, triage, submissions, and `state/` with snapshot/evidence/
+budget/audit data. A single executor lease protects each assessment; separate
+assessments can coexist. Lifecycle controls select stored data, not engagement scope.
+Interrupted modules restart at module boundaries on resume; this is not an in-flight
+HTTP/scanner checkpoint. Abandoned running records are marked interrupted. Python API
+callers should call `Orchestrator.close()` to checkpoint the budget and release the
+executor lease; use separate processes for simultaneous assessments (transport globals
+are not yet per-context; see the unified execution work in the integration plan).
+
+Legacy origin identity was not recorded reliably: importing explicitly declares the
+origin of the copy. Stop any writer first. Imports refuse nested symlinks and invalid
+state; existing files are copied, never moved/deleted. A failed import may leave an
+unpublished destination for inspection; it is not a resumable assessment. Use the
+printed imported ID for subsequent resume/report commands.
 
 `BaseModule.http_get()` records WAF block/allow signals for reporting, and
 `modules.max_consecutive_empty` caps unproductive probing per module — an efficiency

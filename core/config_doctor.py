@@ -38,7 +38,7 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
     ("budget_limits.max_external_commands", 0,
      "external scanner/tool process-launch cap (0 = unlimited)"),
     ("budget_limits.resume", False,
-     "explicitly restore counters from the target budget checkpoint"),
+     "standalone budget default; CLI assessment lifecycle owns resume behavior"),
     ("budget_limits.max_concurrent_actions", 5,
      "throughput knob for agent actions"),
     ("auth.identities", {},

@@ -43,6 +43,7 @@ class BudgetManager:
     def __init__(self, config: dict | None = None,
                  checkpoint_path: str | Path | None = None):
         cfg = config or {}
+        self.assessment = cfg.get("assessment")
         limits = cfg.get("budget_limits", {})
 
         self.max_requests = int(limits.get("max_requests", 0) or 0)
@@ -72,6 +73,8 @@ class BudgetManager:
             return
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or not isinstance(payload.get("state"), dict):
+                raise ValueError("Invalid budget checkpoint shape")
             counters = payload.get("state", {})
             self.state.requests_used = max(
                 0, int(counters.get("requests_used", 0) or 0))
@@ -88,8 +91,13 @@ class BudgetManager:
             self.state.exceeded = ([str(item) for item in exceeded]
                                    if isinstance(exceeded, list) else [])
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            if self.assessment:
+                raise RuntimeError("Selected assessment has an invalid budget checkpoint")
             # A corrupt checkpoint must not prevent a new controlled run.
             self.state = BudgetState(wall_start=time.time())
+            return
+        if self.assessment and payload.get("assessment") != self.assessment:
+            raise RuntimeError("Budget checkpoint belongs to a different assessment")
 
     def _checkpoint_locked(self) -> None:
         path = self._checkpoint_path
@@ -98,6 +106,7 @@ class BudgetManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
+            "assessment": self.assessment,
             "updated_at": time.time(),
             "elapsed_seconds": max(0.0, time.time() - self.state.wall_start),
             "state": asdict(self.state),

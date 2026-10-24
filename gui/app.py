@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sys
 import time
 from html import escape as html_escape
@@ -75,6 +76,7 @@ from gui.graph import (
 from actions import ActionRegistry
 from agents import get_llm_config
 from core.keyvault import KEY_SPECS, KeyVault
+from core.assessments import AssessmentStore, new_assessment_id
 from modules import MODULE_REGISTRY, get_all_module_ids
 from tools.external import (
     DOCKER_TOOLS,
@@ -115,6 +117,9 @@ STATUS_COLORS = {
     "running": "#7dd3fc",
     "timeout": "#fbbf24",
     "incomplete": "#fbbf24",
+    "interrupted": "#fbbf24",
+    "cancelled": "#fbbf24",
+    "stopped": "#fbbf24",
     "error": "#f87171",
     "failed": "#f87171",
     "blocked": "#fb923c",
@@ -218,6 +223,9 @@ def build_scan_args(
     max_risk: str = "DESTRUCTIVE",
     max_actions: int = 0,
     max_chains: int = 0,
+    run_mode: str = "fresh",
+    assessment_id: str | None = None,
+    from_assessment: str | None = None,
 ) -> list[str]:
     """Build orchestrator argv for a GUI run.
 
@@ -233,6 +241,11 @@ def build_scan_args(
         "-o", str(output_dir),
         "-c", str(config_path),
     ]
+    args.extend(["--run-mode", run_mode])
+    if assessment_id:
+        args.extend(["--assessment", assessment_id])
+    if from_assessment:
+        args.extend(["--from-assessment", from_assessment])
     if active:
         args.append("--active")
     # Independent of `active`: both flags may legitimately apply at once.
@@ -286,6 +299,9 @@ class MainWindow(QMainWindow):
         self._findings_sort: list = [3, Qt.DescendingOrder]
         self._filtered_findings: list[dict] = []
         self.output_dir = ROOT_DIR / "reports"
+        self._assessment_context = None
+        self._pending_assessment = None
+        self._loaded_assessment_path = None
         self.config_path = ROOT_DIR / "config.yaml"
         self._run_started_at: float | None = None
         # Modules this run will touch: 1 for Single module / module actions,
@@ -687,7 +703,7 @@ class MainWindow(QMainWindow):
         if not self.current_findings:
             QMessageBox.information(self, "Export CSV", "No findings to export.")
             return
-        default = str(self.output_dir / f"{self._target_output_name()}_findings.csv")
+        default = str(self._assessment_dir() / f"{self._target_output_name()}_findings.csv")
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Findings", default, "CSV Files (*.csv)"
         )
@@ -765,6 +781,7 @@ class MainWindow(QMainWindow):
         self.output_input.setMinimumWidth(0)
         self.output_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         choose_output = QPushButton("Browse")
+        self.choose_output_button = choose_output
         choose_output.clicked.connect(self.choose_output_dir)
         output_row = QHBoxLayout()
         output_row.setContentsMargins(0, 0, 0, 0)
@@ -772,6 +789,24 @@ class MainWindow(QMainWindow):
         output_row.addWidget(choose_output)
         form.addRow("Target", self.target_input)
         form.addRow("Output", output_row)
+
+        self.lifecycle_combo = QComboBox()
+        self.lifecycle_combo.addItems(["Fresh", "Resume", "Retest"])
+        self.lifecycle_combo.setToolTip(
+            "Fresh: empty assessment. Resume: selected assessment and budget. "
+            "Retest: new assessment using only the selected history baseline.")
+        self.assessment_combo = QComboBox()
+        self.assessment_combo.setMinimumWidth(0)
+        self.assessment_combo.addItem("No assessment selected", None)
+        self.assessment_combo.currentIndexChanged.connect(self._assessment_changed)
+        refresh_assessments = QPushButton("Refresh assessments")
+        refresh_assessments.clicked.connect(lambda: self._refresh_assessments())
+        self.import_legacy_button = QPushButton("Import legacy results…")
+        self.import_legacy_button.clicked.connect(self.import_legacy_results)
+        form.addRow("Lifecycle", self.lifecycle_combo)
+        form.addRow("Assessment", self.assessment_combo)
+        form.addRow("", refresh_assessments)
+        form.addRow("", self.import_legacy_button)
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Auto", "LLM", "Single module"])
@@ -2522,7 +2557,7 @@ class MainWindow(QMainWindow):
         status_combo.setObjectName("filterCombo")
         status_combo.addItem("All statuses")
         for status in (
-            "completed", "running", "pending", "timeout", "incomplete",
+            "completed", "running", "pending", "timeout", "incomplete", "interrupted", "cancelled", "stopped",
             "error", "failed", "blocked", "skipped",
         ):
             status_combo.addItem(status)
@@ -2789,6 +2824,8 @@ class MainWindow(QMainWindow):
         self.start_scan()
 
     def choose_output_dir(self):
+        if self.process and self.process.state() != QProcess.NotRunning:
+            return
         selected = QFileDialog.getExistingDirectory(
             self,
             "Output Directory",
@@ -2797,6 +2834,8 @@ class MainWindow(QMainWindow):
         if selected:
             self.output_dir = Path(selected)
             self.output_input.setText(str(self.output_dir))
+            self._refresh_assessments()
+            self.load_results()
             self._update_operation_context()
 
     def choose_config_file(self):
@@ -2863,6 +2902,12 @@ class MainWindow(QMainWindow):
             )
             return
         self._run_scope_total = 1 if module else len(get_all_module_ids())
+        try:
+            lifecycle = self._lifecycle_selection(for_action=module in (
+                "reporting", "risk_prioritization", "bounty_submission", "attack_planner"))
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Assessment Required", str(exc))
+            return
         args = build_scan_args(
             target=target,
             output_dir=self.output_dir,
@@ -2875,6 +2920,7 @@ class MainWindow(QMainWindow):
             max_risk=self.risk_combo.currentText(),
             max_actions=self.max_actions_spin.value(),
             max_chains=self.max_chains_spin.value(),
+            **lifecycle,
         )
 
         # Applies to every mode, not just Single module/LLM: an Auto run
@@ -2913,11 +2959,17 @@ class MainWindow(QMainWindow):
         if self.process and self.process.state() != QProcess.NotRunning:
             self.statusBar().showMessage("Already running — wait for the current process", 3000)
             return
+        try:
+            lifecycle = self._lifecycle_selection(for_action=True)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Assessment Required", str(exc))
+            return
         args = build_scan_args(
             target=target,
             output_dir=self.output_dir,
             config_path=self.config_path,
             module=module_id,
+            **lifecycle,
         )
         self._run_scope_total = 1
         self._start_process(args, report_run=report_run)
@@ -2936,7 +2988,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Report path copied: {path}", 4000)
 
     def open_target_folder(self):
-        path = self.output_dir / self._target_output_name()
+        path = self._assessment_dir()
         if not path.exists():
             QMessageBox.information(self, "Folder Missing", "No output folder exists for this target yet.")
             return
@@ -3003,7 +3055,16 @@ class MainWindow(QMainWindow):
         if snapshot_path.exists():
             snapshot = self._read_json(snapshot_path, None)
             if valid_snapshot(snapshot):
-                return {key: snapshot[key] for key in defaults}
+                valid_identity = True
+                if state_dir.parent.parent.name == "assessments":
+                    try:
+                        expected = AssessmentStore(self.output_dir, self.target_input.text()).open(
+                            state_dir.parent.name).metadata
+                        valid_identity = snapshot["module"].get("assessment") == expected
+                    except (ValueError, OSError):
+                        valid_identity = False
+                if valid_identity:
+                    return {key: snapshot[key] for key in defaults}
             # Never mix a broken commit with possibly stale compatibility views.
             errors = getattr(self, "_read_errors", [])
             errors.extend(["snapshot.json", *(f"{key}.json" for key in defaults)])
@@ -3019,7 +3080,7 @@ class MainWindow(QMainWindow):
         750ms poll shows module completions almost immediately instead of
         freezing the progress bar at its pre-run value.
         """
-        target_dir = self.output_dir / self._target_output_name()
+        target_dir = self._assessment_dir()
         module = self._read_investigation(target_dir / "state")["module"]
         if isinstance(module, dict) and module:
             self.current_module = module
@@ -3051,7 +3112,7 @@ class MainWindow(QMainWindow):
         previous table contents (same policy as load_results) and never
         fights the busy status pill.
         """
-        state_dir = self.output_dir / self._target_output_name() / "state"
+        state_dir = self._assessment_dir() / "state"
         self._read_errors = []
         stores = self._read_investigation(state_dir)
         findings, assets, evidence = (stores[k] for k in ("findings", "assets", "evidence"))
@@ -3071,6 +3132,9 @@ class MainWindow(QMainWindow):
             self.evidence_value.setText(str(len(evidence["items"])))
 
     def _restore_run_buttons(self):
+        for control in (self.target_input, self.choose_output_button,
+                        self.lifecycle_combo, self.assessment_combo, self.import_legacy_button):
+            control.setEnabled(True)
         self.run_button.setEnabled(True)
         self.ai_run_button.setEnabled(True)
         self.ai_plan_button.setEnabled(True)
@@ -3096,6 +3160,9 @@ class MainWindow(QMainWindow):
         self.prioritize_button.setEnabled(False)
         self.submission_button.setEnabled(False)
         self.stop_button.setEnabled(True)
+        for control in (self.target_input, self.choose_output_button,
+                        self.lifecycle_combo, self.assessment_combo, self.import_legacy_button):
+            control.setEnabled(False)
 
         self.process = QProcess(self)
         self.process.setProgram(sys.executable)
@@ -3212,7 +3279,18 @@ class MainWindow(QMainWindow):
         if not target:
             return
         self._read_errors = []
-        base = self.output_dir / self._target_output_name()
+        self._refresh_assessments()
+        base = self._assessment_dir()
+        identity = str(base.resolve())
+        if self._loaded_assessment_path != identity:
+            # Last-good data is local to one selection, never another service/run.
+            self.current_module = {}
+            self.current_assets = {"nodes": [], "edges": []}
+            self.current_evidence = {"items": []}
+            self.current_findings = []
+            self._triage = {}
+            self.current_attack_graph = {}
+            self._loaded_assessment_path = identity
         state_dir = base / "state"
         stores = self._read_investigation(state_dir)
         module, assets, findings, evidence = (
@@ -3377,20 +3455,113 @@ class MainWindow(QMainWindow):
 
     def _target_output_name(self) -> str:
         target = self.target_input.text().strip()
+        try:
+            return urlparse(AssessmentStore(self.output_dir, target).origin).hostname
+        except (ValueError, OSError):
+            pass
         parsed = urlparse(target if "://" in target else f"//{target}")
-        return parsed.hostname or target.rstrip("/").split("/")[0]
+        return re.sub(r"[^A-Za-z0-9._-]", "_", parsed.hostname or "invalid-target")
+
+    def _refresh_assessments(self, preferred=None):
+        try:
+            store = AssessmentStore(self.output_dir, self.target_input.text())
+            context = (str(store.root), store.origin)
+            entries = store.list()
+        except (ValueError, OSError):
+            context, entries = None, []
+        selected = self.assessment_combo.currentData()
+        if context != self._assessment_context:
+            selected = None
+            self._pending_assessment = None
+        self._assessment_context = context
+        selected = preferred or self._pending_assessment or selected
+        blocked = self.assessment_combo.blockSignals(True)
+        self.assessment_combo.clear()
+        for entry in entries:
+            self.assessment_combo.addItem(
+                f"{entry.metadata.get('created_at', '')} · {entry.id[:12]} · {entry.metadata.get('kind', '')}", entry.id)
+        if selected and self.assessment_combo.findData(selected) < 0:
+            self.assessment_combo.addItem(f"Pending / unavailable · {selected[:12]}", selected)
+        if not self.assessment_combo.count():
+            self.assessment_combo.addItem("No assessment — legacy results are unbound", None)
+        index = self.assessment_combo.findData(selected)
+        self.assessment_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.assessment_combo.blockSignals(blocked)
+
+    def _assessment_changed(self, *_args):
+        self._pending_assessment = None
+        if hasattr(self, "findings_table"):
+            self.load_results()
+
+    def _assessment_dir(self) -> Path:
+        try:
+            store = AssessmentStore(self.output_dir, self.target_input.text())
+            context = (str(store.root), store.origin)
+            if context != self._assessment_context:
+                self._refresh_assessments()
+            selected = self.assessment_combo.currentData()
+            if selected:
+                return store.directory(selected)
+            legacy = self.output_dir / self._target_output_name()
+            # Legacy directories have no origin binding. Never show them as
+            # results for an explicit non-default service on the same hostname.
+            parsed = urlparse(store.origin)
+            if legacy.exists() and (parsed.scheme != "https" or parsed.port is not None):
+                return store.service_dir / "unselected"
+            return legacy
+        except (ValueError, OSError):
+            return self.output_dir / "invalid-target"
+
+    def _lifecycle_selection(self, *, for_action=False):
+        self._refresh_assessments()
+        store = AssessmentStore(self.output_dir, self.target_input.text())
+        mode = "resume" if for_action else self.lifecycle_combo.currentText().lower()
+        selected = self.assessment_combo.currentData()
+        if mode in ("resume", "retest"):
+            if not selected:
+                raise ValueError("Select an assessment first. Import legacy results explicitly before resuming them.")
+            store.open(selected)
+        identifier = selected if mode == "resume" else new_assessment_id()
+        self._pending_assessment = identifier
+        self._refresh_assessments(preferred=identifier)
+        self.load_results()
+        return {"run_mode": mode, "assessment_id": identifier,
+                "from_assessment": selected if mode == "retest" else None}
+
+    def import_legacy_results(self):
+        if self.process and self.process.state() != QProcess.NotRunning:
+            return
+        source = QFileDialog.getExistingDirectory(self, "Inactive Legacy Result Directory", str(self.output_dir))
+        if not source:
+            return
+        try:
+            store = AssessmentStore(self.output_dir, self.target_input.text())
+            answer = QMessageBox.question(
+                self, "Import Legacy Results",
+                f"Copy this inactive legacy investigation and bind the copy to {store.origin}?\n"
+                "The original directory will not be changed.", QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                return
+            imported = store.import_legacy(source)
+            self._pending_assessment = None
+            self._refresh_assessments(preferred=imported.id)
+            self.load_results()
+            self._set_status("ok", f"Imported {imported.id[:12]}")
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Import Failed", str(exc))
 
     def _report_path(self) -> Path:
         target = self._target_output_name()
-        return self.output_dir / target / f"{target}_report.md"
+        return self._assessment_dir() / f"{target}_report.md"
 
     def _attack_plan_path(self) -> Path:
         target = self._target_output_name()
-        return self.output_dir / target / f"{target}_attack_plan.md"
+        return self._assessment_dir() / f"{target}_attack_plan.md"
 
     def _summary_path(self) -> Path:
         target = self._target_output_name()
-        return self.output_dir / target / f"{target}_summary.json"
+        return self._assessment_dir() / f"{target}_summary.json"
 
     def _load_findings(self, findings: list[dict]):
         self.current_findings = list(findings)
@@ -3720,7 +3891,7 @@ class MainWindow(QMainWindow):
 
     def _open_finding_evidence(self, finding: dict):
         refs = {str(ref) for ref in (finding.get("evidence_refs") or [])}
-        target_dir = self.output_dir / self._target_output_name()
+        target_dir = self._assessment_dir()
         resolvable = []
         for item in self.current_evidence.get("items", []):
             if str(item.get("id", "")) not in refs:
@@ -3753,7 +3924,7 @@ class MainWindow(QMainWindow):
 
     def _triage_path(self) -> Path:
         target = self._target_output_name()
-        return self.output_dir / target / f"{target}_triage.json"
+        return self._assessment_dir() / f"{target}_triage.json"
 
     def _read_triage(self) -> dict:
         data = self._read_json(self._triage_path(), {})
@@ -3813,7 +3984,7 @@ class MainWindow(QMainWindow):
                 continue
             seen.add(module_id)
             status = str(run.get("status", "")).lower()
-            if status in ("timeout", "error", "failed", "incomplete") and module_id not in resolved:
+            if status in ("timeout", "error", "failed", "incomplete", "interrupted", "cancelled", "stopped") and module_id not in resolved:
                 count += 1
         return count
 
@@ -3899,7 +4070,7 @@ class MainWindow(QMainWindow):
 
     def _load_submissions(self):
         target = self._target_output_name()
-        submission_dir = self.output_dir / target / "submissions"
+        submission_dir = self._assessment_dir() / "submissions"
         files = sorted(submission_dir.glob("*.md")) if submission_dir.exists() else []
         # INDEX.md is an operator bookkeeping file, not a submission.
         files = [p for p in files if p.name != "INDEX.md"]
@@ -4886,7 +5057,7 @@ class MainWindow(QMainWindow):
         item = self.evidence_table.item(row, 4)
         if not item:
             return
-        path = self.output_dir / self._target_output_name() / item.text()
+        path = self._assessment_dir() / item.text()
         if path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
@@ -5046,7 +5217,7 @@ class MainWindow(QMainWindow):
 
     def _attack_graph_path(self) -> Path:
         target = self._target_output_name()
-        return self.output_dir / target / "attack_graph.json"
+        return self._assessment_dir() / "attack_graph.json"
 
     def _load_attack_graph(self):
         if not hasattr(self, "attack_graph_view"):

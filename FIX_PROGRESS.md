@@ -33,11 +33,12 @@ The project graph was refreshed using AST extraction. `.graphifyignore` now excl
 
 This batch does not close every architectural recommendation in the review:
 
-- D5: origin/run isolation and explicit fresh/resume/retest behavior. Transactional
-  snapshots and stale-writer protection are implemented in the second batch below.
+- D5: origin/run isolation and explicit fresh/resume/retest behavior are implemented
+  in the third batch below. Distributed merging/network-filesystem guarantees remain
+  outside the current local cooperating-writer design.
 - D6: causal chain preconditions, output/artifact bindings, and dependency-aware execution; the path-search defect is fixed separately.
 - A common execution boundary for every module, complete accounting across transports, audit events for every refusal/failure path, and externally anchored evidence manifests.
-- Endpoint-specific negative-retest collection and durable assessment IDs. Conservative
+- Endpoint-specific negative-retest collection. Durable assessment IDs, conservative
   resolved/untested semantics and repeat-export idempotence are implemented below.
 - Secret-store references, credential expiry/revocation, and a durable mutation/cleanup ledger.
 - Pinned scanner images/tool versions, SBOMs, real Docker/scanner compatibility gates, and multi-stack precision/recall benchmarks.
@@ -95,5 +96,54 @@ Local process cancellation and HTTP redirect behavior have dedicated regression 
   HTML regeneration was skipped by graphify's size limit.
 
 This is a partial closure of D5/history gaps, not completion of every item in the
-original review. Origin/run isolation, causal chains, full transport accounting,
-cleanup lifecycle and real multi-stack assessment benchmarks remain explicitly open.
+original review. Causal chains, full transport accounting, cleanup lifecycle and
+real multi-stack assessment benchmarks remain explicitly open. Origin/run isolation
+was subsequently implemented in the third batch below.
+
+## Third batch — R6 origin and assessment lifecycle
+
+- Canonical HTTP(S) origins select service namespaces; independent assessment IDs
+  select state, evidence, audit, budget, reports, graph and triage directories.
+  Default ports, case/IDNA/IPv6 aliases normalize consistently. No scope gate was added.
+- Fresh is the default and starts empty. Resume requires an explicit ID and validates
+  metadata against the committed snapshot and budget. Retest creates a separate
+  assessment using only the selected parent's history baseline; no old completion,
+  assets, findings, evidence or credentials enter current state.
+- CLI/GUI executors take a nonblocking per-assessment lease before loading budgets or
+  running modules. A second executor cannot resume the same assessment concurrently.
+  Failed initialization releases the lease, and close checkpoints budgets. Resumed
+  abandoned module records are marked interrupted; resumption is module-level, not
+  in-flight scanner/HTTP continuation.
+- Legacy import is explicit, copy-only and exits without scanning. It preserves source
+  file bytes, evidence paths and artifacts, binds the copied budget and records the
+  operator-declared origin. Stop the source writer first. Invalid input and symlinks
+  are refused; failed/unpublished copies are retained, not recursively deleted.
+- GUI selection resolves all report/evidence/submission/triage/graph paths. Switching
+  service/run clears other-run last-good state. Automatic report generation resumes
+  the just-finished assessment rather than starting a fresh one.
+- Report, scoring, submission and plan-only post-processing requires selected resume
+  in the CLI and does not seed target surface. Listing/check-config creates no assessment.
+- README documents changed defaults, explicit migration and lifecycle commands.
+
+### Verification — third batch
+
+- Final non-GUI suite: **1,263 passed, 33 skipped** in 156.38 seconds.
+- GUI suite: **75 passed** in 54.88 seconds.
+- Combined: **1,338 passed, 33 skipped**, including 47 additional regression cases.
+- Cases exercise port/scheme separation, aliases, empty fresh/retest state, selected
+  resume counters, concurrent process exclusion, failed-resume cleanup, interrupted
+  run recovery, immutable-source import, snapshot identity rejection, read-only CLI
+  utilities and selected-assessment report follow-up without target discovery.
+- Clean-staging wheel build and installed smoke test passed outside the checkout.
+  The smoke test uses `Orchestrator.close()` to release its assessment lease.
+- All 11 changed/new Python files parse with Python 3.10 grammar, the example YAML
+  parses, and `git diff --check` passes. Runtime tests were on local Python 3.14;
+  this is not the full Python/OS/filesystem matrix or a live target assessment.
+- Graph refresh is deterministic AST-only; no LLM API was used. HTML visualization
+  remains over graphify's size limit.
+
+Known boundaries: legacy imports require an inactive source and an explicit origin
+declaration. Failed imports are retained unpublished. Concurrent assessments should
+use separate processes because transport globals are not yet context-local (R7).
+Distributed locking, cleanup lifecycle, causal chains and coverage-aware negative
+retest collection remain on the integration backlog.

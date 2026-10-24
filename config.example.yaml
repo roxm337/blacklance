@@ -23,7 +23,7 @@ target:
 paths:
   output_dir: "reports"
   wordlists: "wordlists"
-  state_dir: "reports/{target}/state"
+  state_dir: "reports/services/{origin_key}/assessments/{assessment_id}/state"  # descriptive; lifecycle resolver owns paths
 
 hibp_api_key: ""  # Set via env HIBP_API_KEY or here
 shodan_api_key: ""  # Set via env SHODAN_API_KEY
@@ -152,7 +152,7 @@ budget_limits:
   max_wall_clock_seconds: 0    # 0 = unlimited
   max_llm_calls: 0             # 0 = unlimited
   max_external_commands: 0     # scanner/tool process launches; 0 = unlimited
-  resume: false                # true resumes counters from state/budget.json
+  resume: false                # standalone budget API default; CLI fresh/resume/retest overrides this
   max_concurrent_actions: 5    # throughput knob, not a cap
 
 # Response codes recorded as WAF/honeypot signals on the state store. Purely
