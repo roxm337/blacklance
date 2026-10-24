@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.validators import redact_for_log
+from core.persistence import file_lock
 
 
 class AuditLogError(Exception):
@@ -45,14 +46,23 @@ class AuditLog:
         self._last_hash = _ZERO_HASH
         self._file = None
 
-        if self.path.exists():
-            if verify_existing:
-                state = self.verify()
-                if not state["ok"]:
-                    raise AuditLogError(
-                        f"existing audit log is corrupted at seq {state.get('broken_at_seq')}"
-                    )
-            self._load_tail()
+        with file_lock(self.path.with_suffix(self.path.suffix + ".lock")):
+            if self.path.exists():
+                if verify_existing:
+                    state = self.verify()
+                    if not state["ok"]:
+                        raise AuditLogError(
+                            f"existing audit log is corrupted at seq {state.get('broken_at_seq')}"
+                        )
+                self._load_tail()
+            self._tail_signature = self._signature()
+
+    def _signature(self):
+        try:
+            stat = self.path.stat()
+            return stat.st_ino, stat.st_size, stat.st_mtime_ns
+        except FileNotFoundError:
+            return None
 
     # ── lifecycle ─────────────────────────────────────────────────
 
@@ -90,11 +100,19 @@ class AuditLog:
 
     def record(self, event: str, data: Optional[dict] = None) -> int:
         """Append a record and return its sequence number."""
-        with self._lock:
+        with self._lock, file_lock(self.path.with_suffix(self.path.suffix + ".lock")):
+            if self._signature() != self._tail_signature:
+                integrity = self.verify()
+                if (not integrity["ok"] or not self.path.exists()
+                        or integrity["records"] < self._seq):
+                    raise AuditLogError("Audit log changed or was corrupted before append")
+                self._load_tail()
+                if self._file and not self._file.closed:
+                    self._file.close()
             self.open()
-            self._seq += 1
+            sequence = self._seq + 1
             payload = {
-                "seq": self._seq,
+                "seq": sequence,
                 "ts": _now(),
                 "event": event,
                 # Redact at the final persistence boundary so typed events,
@@ -113,6 +131,8 @@ class AuditLog:
             finally:
                 pass
             self._last_hash = h
+            self._seq = sequence
+            self._tail_signature = self._signature()
             return self._seq
 
     # ── verification ──────────────────────────────────────────────
@@ -134,7 +154,13 @@ class AuditLog:
                 except json.JSONDecodeError:
                     return {"ok": False, "records": count, "broken_at_seq": count,
                             "reason": "invalid JSON"}
+                if not isinstance(record, dict):
+                    return {"ok": False, "records": count, "broken_at_seq": count,
+                            "reason": "invalid record"}
                 stored_hash = record.get("hash")
+                if type(record.get("seq")) is not int or record.get("seq") != count:
+                    return {"ok": False, "records": count, "broken_at_seq": count,
+                            "reason": "non-contiguous sequence"}
                 stored_prev = record.get("prev")
                 recomputed = hashlib.sha256(
                     _canonical({

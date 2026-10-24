@@ -24,6 +24,33 @@ def test_append_and_verify(tmp_path):
     assert records[1]["prev"] == records[0]["hash"]
 
 
+def test_independent_loggers_share_a_contiguous_chain(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    first, second = AuditLog(path), AuditLog(path)
+    try:
+        first.record("first")
+        second.record("second")
+        first.record("third")
+    finally:
+        first.close()
+        second.close()
+    assert first.verify()["ok"]
+    assert [r["seq"] for r in first.read_records()] == [1, 2, 3]
+
+
+def test_live_logger_rejects_external_corruption(tmp_path):
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path)
+    try:
+        log.record("first")
+        path.write_text("{broken\n")
+        with pytest.raises(AuditLogError):
+            log.record("must-not-append")
+        assert path.read_text() == "{broken\n"
+    finally:
+        log.close()
+
+
 def test_tamper_detected(tmp_path):
     log = AuditLog(tmp_path / "audit.jsonl")
     log.record("test.event", {"a": 1})

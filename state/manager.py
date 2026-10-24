@@ -3,15 +3,21 @@
 import json
 import hashlib
 import logging
-import os
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Union
+
+from core.persistence import atomic_json, file_lock, valid_snapshot
 
 logger = logging.getLogger("osint-agent")
 
 CONFIDENCE_ORDER = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
 SEVERITY_ORDER = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
+class StateConflictError(RuntimeError):
+    """Another writer committed after this investigation was loaded."""
 
 
 def _finding_host(asset_keys) -> str:
@@ -96,6 +102,12 @@ class StateManager:
         self.evidence_dir = self.state_dir / "evidence"
         self.evidence_dir.mkdir(exist_ok=True)
 
+        self.snapshot_file = self.state_dir / "snapshot.json"
+        self.lock_file = self.state_dir / "state.lock"
+        snapshot = self._load_snapshot()
+        self._revision = snapshot.get("revision", 0) if snapshot else 0
+        self._loaded_snapshot = snapshot
+
         self.assets = self._read_json(self.assets_file, {"nodes": [], "edges": []})
         self.findings = self._read_json(self.findings_file, {"findings": []})
         self.evidence = self._read_json(self.evidence_file, {"items": []})
@@ -121,6 +133,7 @@ class StateManager:
                 "last_action": self._now(),
             }
         })
+        self._loaded_snapshot = None
         # Migrate old tuple format (module_id, reason) -> dict format
         for key in ("skipped", "blocked"):
             migrated = []
@@ -134,6 +147,7 @@ class StateManager:
         self.module.setdefault("completed_checks", [])
         self.findings.setdefault("findings", [])
         self.evidence.setdefault("items", [])
+        self.module.setdefault("investigation_id", uuid.uuid4().hex)
         self._dirty = False
 
     # ── Asset Management ──────────────────────────────────────────
@@ -468,6 +482,12 @@ class StateManager:
         # run will regenerate them. Drop them before the new run starts so
         # the state reflects the current code, not the last code.
         self.prune_module_findings(module_id)
+        # A previous success must not survive a failed or skipped retest.
+        self.module["completed"] = [mid for mid in self.module["completed"]
+                                    if mid != module_id]
+        for key in ("skipped", "blocked"):
+            self.module[key] = [item for item in self.module.get(key, [])
+                                if item.get("module_id") != module_id]
 
         run_id = f"RUN-{len(self.module.get('runs', [])) + 1:04d}"
         run = {
@@ -512,6 +532,10 @@ class StateManager:
                     run["findings_after"] - run.get("findings_before", 0)
                 )
                 run["error"] = error
+                if status not in ("done", "completed"):
+                    self.module["completed"] = [
+                        mid for mid in self.module["completed"]
+                        if mid != run.get("module_id")]
                 break
         self.module["current"] = None
         self._dirty = True
@@ -585,7 +609,9 @@ class StateManager:
     def add_evidence(self, module_id: str, evidence_type: str, subject: str,
                      data: Union[dict, list, str]) -> str:
         eid = self._next_evidence_id()
-        path = self.evidence_dir / f"{eid}.json"
+        # Stale managers can allocate the same display ID before save detects
+        # their conflict. Never let either overwrite the other's proof bytes.
+        path = self.evidence_dir / f"{eid}-{uuid.uuid4().hex}.json"
         item = {
             "id": eid,
             "module_id": module_id,
@@ -635,11 +661,37 @@ class StateManager:
     def save(self):
         if not self._dirty:
             return
-        self._write_json(self.assets_file, self.assets)
-        self._write_json(self.findings_file, self.findings)
-        self._write_json(self.module_file, self.module)
-        self._write_json(self.evidence_file, self.evidence)
-        self._dirty = False
+        with file_lock(self.lock_file):
+            self.check_revision()
+            revision = self._revision
+            snapshot = {"schema_version": 1, "revision": revision + 1,
+                        "assets": self.assets, "findings": self.findings,
+                        "module": self.module, "evidence": self.evidence}
+            if not valid_snapshot(snapshot):
+                raise ValueError("Cannot commit an invalid investigation snapshot")
+            # This one replace is the commit point for all four stores.
+            self._write_json(self.snapshot_file, snapshot)
+            self._revision = revision + 1
+            self._dirty = False
+            # Compatibility views are not the transaction source of truth.
+            # A failed export must not make a successful commit look lost.
+            for path, data in ((self.assets_file, self.assets),
+                               (self.findings_file, self.findings),
+                               (self.module_file, self.module),
+                               (self.evidence_file, self.evidence)):
+                try:
+                    self._write_json(path, data)
+                except OSError as exc:
+                    logger.warning("State committed; compatibility export %s failed: %s", path.name, exc)
+
+    def check_revision(self):
+        """Reject stale mutations/exports; caller holds state.lock for a transaction."""
+        current = self._load_snapshot()
+        revision = current.get("revision", 0) if current else 0
+        if revision != self._revision:
+            raise StateConflictError(
+                "Investigation changed in another process; reload state or use "
+                "a separate output directory. Unsaved changes were not overwritten.")
 
     def summary(self) -> dict:
         return {
@@ -674,17 +726,23 @@ class StateManager:
         return datetime.now(timezone.utc).isoformat()
 
     def _read_json(self, path: Path, default: dict) -> dict:
+        snapshot = getattr(self, "_loaded_snapshot", None)
+        if snapshot is not None:
+            return snapshot[path.stem]
         if path.exists():
-            try:
-                return json.loads(path.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                raise ValueError(f"Invalid investigation data: {path}")
+            return data
         return default
 
+    def _load_snapshot(self):
+        if not self.snapshot_file.exists():
+            return None
+        data = json.loads(self.snapshot_file.read_text())
+        if not valid_snapshot(data):
+            raise ValueError(f"Invalid investigation snapshot: {self.snapshot_file}")
+        return data
+
     def _write_json(self, path: Path, data: dict):
-        # Atomic replace: Path.write_text truncates first, so a GUI poll or
-        # report run reading between truncate and finish saw empty/partial
-        # JSON, treated it as "no data", and zeroed tables and metrics.
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, default=str))
-        os.replace(tmp, path)
+        atomic_json(path, data)

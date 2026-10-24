@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.history import annotate, annotate_assets, empty, load, save
+from core.fingerprints import fingerprint, finding_url
 from core.reporting import write_report_bundle
 from state.manager import StateManager
 
@@ -39,9 +40,10 @@ def test_second_run_is_recurring_and_keeps_first_seen():
     assert diff["new"] == []
 
 
-def test_a_vanished_finding_is_resolved_relative_to_the_last_scan():
+def test_resolution_requires_an_explicit_negative_retest():
     _, history, _ = annotate([FINDING], empty(), now="2026-01-01")
-    _, history, diff = annotate([], history, now="2026-02-01")
+    _, history, diff = annotate([], history, now="2026-02-01",
+                                retested={fingerprint(FINDING, finding_url(FINDING))})
     assert [item["title"] for item in diff["resolved"]] == ["Open admin"]
     _, history, diff = annotate([], history, now="2026-03-01")
     assert diff["resolved"] == []
@@ -71,13 +73,15 @@ def test_report_bundle_writes_regression_and_updates_history(tmp_path=None):
                       asset_keys=FINDING["asset_keys"])
     first = write_report_bundle(state, "example.com")
     doc = json.loads(Path(first["regression"]).read_text())
-    assert doc["counts"] == {"new": 1, "recurring": 0, "resolved": 0}
+    assert doc["counts"] == {"new": 1, "recurring": 0, "resolved": 0, "untested": 0}
     assert Path(first["regression"]).parent == root / "run" / "example.com"
 
     second = write_report_bundle(state, "example.com")
     doc = json.loads(Path(second["regression"]).read_text())
-    assert doc["counts"]["recurring"] == 1
-    assert doc["counts"]["new"] == 0
+    assert doc["counts"]["recurring"] == 0
+    assert doc["counts"]["new"] == 1
+    history = load(root / "run" / "example.com" / "findings_history.json")
+    assert next(iter(history["findings"].values()))["occurrences"] == 1
 
 
 def _asset(key, kind="url"):
@@ -92,7 +96,8 @@ def test_asset_diff_is_new_then_recurring_then_resolved():
     assert diff["resolved"] == []
 
     history, diff = annotate_assets(
-        [_asset("url:https://a.test")], history, now="2026-01-02")
+        [_asset("url:https://a.test")], history, now="2026-01-02",
+        retested={"url:https://b.test"})
     assert diff["new"] == []
     assert len(diff["recurring"]) == 1
     assert [item["key"] for item in diff["resolved"]] == ["url:https://b.test"]
@@ -122,7 +127,7 @@ def test_report_bundle_records_asset_diff(tmp_path=None):
 
     second = write_report_bundle(state, "example.com")
     doc = json.loads(Path(second["regression"]).read_text())
-    assert doc["assets"]["counts"] == {"new": 0, "recurring": 1, "resolved": 0}
+    assert doc["assets"]["counts"] == {"new": 1, "recurring": 0, "resolved": 0, "untested": 0}
     history = json.loads((Path(first["regression"]).parent /
                           "findings_history.json").read_text())
     assert "url:https://example.com/a" in history["assets"]

@@ -3,6 +3,7 @@
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from core.history import (annotate, annotate_assets,
                           load as load_history, regression,
                           save as save_history)
 from core.poc import write_pocs
+from core.persistence import atomic_json, file_lock
 from core.scoring import score_label
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -125,6 +127,16 @@ def build_report_bundle(state: Any, target: str) -> dict:
 
 def write_report_bundle(state: Any, target: str) -> dict:
     """Write markdown and JSON report artifacts into the state's output dir."""
+    # Serializes history read-modify-write and matching report exports.
+    with file_lock(Path(state.output_dir) / "report.lock"):
+        with file_lock(Path(state.output_dir) / "state" / "state.lock"):
+            check_revision = getattr(state, "check_revision", None)
+            if check_revision:
+                check_revision()
+            return _write_report_bundle(state, target)
+
+
+def _write_report_bundle(state: Any, target: str) -> dict:
     bundle = build_report_bundle(state, target)
     output_dir = Path(state.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,29 +149,52 @@ def write_report_bundle(state: Any, target: str) -> dict:
         "sarif": output_dir / f"{target}.sarif",
         "defectdojo": output_dir / f"{target}_defectdojo.json",
     }
+    # Reporting/prioritization themselves are not new target observations.
+    # Re-exporting identical observed state must not inflate occurrence counts.
+    observation = {
+        "investigation": state.module.get("investigation_id", ""),
+        "runs": [(r.get("id"), r.get("started_at"), r.get("finished_at"),
+                  r.get("status")) for r in state.module.get("runs", [])
+                 if r.get("module_id") not in
+                 ("reporting", "risk_prioritization", "bounty_submission")],
+        "findings": [(f.get("id"), f.get("last_seen"), f.get("created_at"))
+                     for f in bundle["findings"]],
+        "assets": [(a.get("key"), a.get("last_seen"))
+                   for a in state.assets.get("nodes", [])],
+    }
+    observation_id = hashlib.sha256(json.dumps(
+        observation, sort_keys=True, default=str).encode()).hexdigest()
+    # An unrelated module/asset update must not count old findings as retested.
+    # StateManager advances last_seen only when it observes that item again.
+    investigation_id = state.module.get("investigation_id", "")
+    finding_observations = {
+        _fingerprint(f, _finding_url(f)): json.dumps(
+            [investigation_id, f.get("last_seen") or f.get("created_at"), f.get("id")])
+        for f in bundle["findings"]}
+    asset_observations = {
+        a.get("key"): json.dumps([investigation_id, a.get("last_seen"), a.get("key")])
+        for a in state.assets.get("nodes", [])}
+    history_path = output_dir / "findings_history.json"
+    annotated, updated, diff = annotate(
+        bundle["findings"], load_history(history_path, strict=True),
+        run_id=observation_id, observation_ids=finding_observations)
+    updated, asset_diff = annotate_assets(
+        list(state.assets.get("nodes", [])), updated, run_id=observation_id,
+        observation_ids=asset_observations)
+    bundle["findings"] = annotated
+    bundle["metadata"]["observation_id"] = observation_id
     paths["report"].write_text(render_markdown(bundle))
     paths["executive_summary"].write_text(render_executive_summary(bundle))
-    paths["summary"].write_text(json.dumps(bundle, indent=2, default=str))
+    atomic_json(paths["summary"], bundle)
     findings_payload = dict(state.findings)
     findings_payload["findings"] = list(bundle.get("findings") or [])
-    paths["findings"].write_text(
-        json.dumps(findings_payload, indent=2, default=str))
-    paths["sarif"].write_text(json.dumps(render_sarif(bundle), indent=2,
-                                         default=str))
-    paths["defectdojo"].write_text(
-        json.dumps(render_defectdojo(bundle), indent=2, default=str))
-    history_path = output_dir / "findings_history.json"
-    annotated, updated, diff = annotate(bundle["findings"],
-                                        load_history(history_path))
-    updated, asset_diff = annotate_assets(
-        list(state.assets.get("nodes", [])), updated)
-    bundle["findings"] = annotated
-    save_history(history_path, updated)
+    atomic_json(paths["findings"], findings_payload)
+    atomic_json(paths["sarif"], render_sarif(bundle))
+    atomic_json(paths["defectdojo"], render_defectdojo(bundle))
     paths["regression"] = output_dir / f"{target}_regression.json"
-    paths["regression"].write_text(
-        json.dumps(regression(bundle, diff, asset_diff), indent=2,
-                   default=str))
+    atomic_json(paths["regression"], regression(bundle, diff, asset_diff))
     paths["pocs"] = Path(write_pocs(state, target, bundle, output_dir)["dir"])
+    save_history(history_path, updated)
     return {key: str(path) for key, path in paths.items()}
 
 

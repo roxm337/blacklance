@@ -131,14 +131,14 @@ def test_corrupt_findings_keep_previous_and_flag(tmp_path):
     window.load_results()
     assert window.findings_table.rowCount() == 1
 
-    (tmp_path / "reports" / "unit.test" / "state" / "findings.json").write_text("{torn")
+    (tmp_path / "reports" / "unit.test" / "state" / "snapshot.json").write_text("{torn")
     window.load_results()
     # Previous rows kept, not silently zeroed…
     assert window.findings_table.rowCount() == 1
     assert window.findings_value.text() == "1"
     # …and the header pill says which file is broken.
     assert "Corrupt" in window.status_label.text()
-    assert "findings.json" in window.status_label.text()
+    assert "snapshot.json" in window.status_label.text()
     window.close()
     app.processEvents()
 

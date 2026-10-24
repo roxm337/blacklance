@@ -2994,6 +2994,24 @@ class MainWindow(QMainWindow):
         completed = len((self.current_module or {}).get("completed", []))
         self.status_label.setText(f"Running · {min(completed, total)}/{total} · {elapsed}")
 
+    def _read_investigation(self, state_dir):
+        """Read one committed generation, with legacy JSON compatibility."""
+        from core.persistence import valid_snapshot
+        defaults = {"module": {}, "assets": {"nodes": [], "edges": []},
+                    "findings": {"findings": []}, "evidence": {"items": []}}
+        snapshot_path = state_dir / "snapshot.json"
+        if snapshot_path.exists():
+            snapshot = self._read_json(snapshot_path, None)
+            if valid_snapshot(snapshot):
+                return {key: snapshot[key] for key in defaults}
+            # Never mix a broken commit with possibly stale compatibility views.
+            errors = getattr(self, "_read_errors", [])
+            errors.extend(["snapshot.json", *(f"{key}.json" for key in defaults)])
+            self._read_errors = list(dict.fromkeys(errors))
+            return {key: None for key in defaults}
+        return {key: self._read_json(state_dir / f"{key}.json", default)
+                for key, default in defaults.items()}
+
     def _poll_run_state(self):
         """Tail state/module.json so metrics move while the engine runs.
 
@@ -3002,7 +3020,7 @@ class MainWindow(QMainWindow):
         freezing the progress bar at its pre-run value.
         """
         target_dir = self.output_dir / self._target_output_name()
-        module = self._read_json(target_dir / "state" / "module.json", {})
+        module = self._read_investigation(target_dir / "state")["module"]
         if isinstance(module, dict) and module:
             self.current_module = module
             stats = module.get("stats", {})
@@ -3035,9 +3053,8 @@ class MainWindow(QMainWindow):
         """
         state_dir = self.output_dir / self._target_output_name() / "state"
         self._read_errors = []
-        findings = self._read_json(state_dir / "findings.json", None)
-        assets = self._read_json(state_dir / "assets.json", None)
-        evidence = self._read_json(state_dir / "evidence.json", None)
+        stores = self._read_investigation(state_dir)
+        findings, assets, evidence = (stores[k] for k in ("findings", "assets", "evidence"))
         self._read_errors = []
         if isinstance(findings, dict) and isinstance(findings.get("findings"), list):
             self._load_findings(findings["findings"])
@@ -3197,10 +3214,9 @@ class MainWindow(QMainWindow):
         self._read_errors = []
         base = self.output_dir / self._target_output_name()
         state_dir = base / "state"
-        module = self._read_json(state_dir / "module.json", {})
-        assets = self._read_json(state_dir / "assets.json", {"nodes": []})
-        findings = self._read_json(state_dir / "findings.json", {"findings": []})
-        evidence = self._read_json(state_dir / "evidence.json", {"items": []})
+        stores = self._read_investigation(state_dir)
+        module, assets, findings, evidence = (
+            stores[k] for k in ("module", "assets", "findings", "evidence"))
         summary_bundle = self._read_json(self._summary_path(), {})
         # A corrupt file must not zero the UI: keep the previous
         # in-memory store for it and flag the problem. Returning the
