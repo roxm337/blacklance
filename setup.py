@@ -33,7 +33,9 @@ class BuildWithResources(build_py):
 
 setup(
     name="osint-agent",
-    version="1.0.0",
+    # Single source of truth: the VERSION file (SemVer, tagged vX.Y.Z).
+    version=(Path(__file__).resolve().parent / "VERSION")
+            .read_text(encoding="utf-8").strip(),
     description="LLM-Orchestrated OSINT Reconnaissance Pipeline",
     classifiers=[
         "Programming Language :: Python :: 3",
