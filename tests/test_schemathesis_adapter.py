@@ -38,6 +38,29 @@ class FakeRunCommand:
                 "exit_code": self.exit_code, "error": None}
 
 
+@pytest.fixture(autouse=True)
+def cleanup_workdirs(monkeypatch):
+    """Remove the adapter's staged workdirs after every test.
+
+    run_schemathesis stages into a cwd tempdir by design; callers own the
+    cleanup. Tests must not leak schemathesis-* directories into the repo.
+    """
+    import tools.schemathesis as adapter_mod
+    dirs = []
+    original = adapter_mod.run_schemathesis
+
+    async def wrapped(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        if isinstance(result, dict) and result.get("workdir"):
+            dirs.append(result["workdir"])
+        return result
+
+    monkeypatch.setattr(adapter_mod, "run_schemathesis", wrapped)
+    yield
+    for workdir in dirs:
+        adapter_mod.cleanup_workdir(workdir)
+
+
 @pytest.fixture()
 def fake_launcher(monkeypatch):
     fake = FakeRunCommand()
