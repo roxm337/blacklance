@@ -72,7 +72,7 @@ def create_invoice(request: Request, body: dict):
     if not user:
         raise HTTPException(status_code=401, detail="login required")
     _SEQ[0] += 1
-    _INVOICES[_SEQ[0]] = {
+    INVOICES[_SEQ[0]] = {
         "id": _SEQ[0], "owner": user,
         "note": body.get("note", ""),
     }
@@ -84,7 +84,7 @@ def get_invoice(request: Request, invoice_id: int):
     user = _user(request)
     if not user:
         raise HTTPException(status_code=401, detail="login required")
-    invoice = _INVOICES.get(invoice_id)
+    invoice = INVOICES.get(invoice_id)
     if not invoice:
         raise HTTPException(status_code=404, detail="not found")
     if MODE == "fixed" and invoice["owner"] != user:
@@ -95,10 +95,10 @@ def get_invoice(request: Request, invoice_id: int):
 @app.delete("/api/invoices/{invoice_id}", status_code=204)
 def delete_invoice(request: Request, invoice_id: int):
     user = _user(request)
-    invoice = _INVOICES.get(invoice_id)
+    invoice = INVOICES.get(invoice_id)
     if not invoice or (MODE == "fixed" and invoice["owner"] != user):
         raise HTTPException(status_code=404, detail="not found")
-    _INVOICES.pop(invoice_id, None)
+    INVOICES.pop(invoice_id, None)
     return Response(status_code=204)
 
 

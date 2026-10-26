@@ -165,10 +165,18 @@ def _module_config(base_url: str) -> dict:
 async def _run_against(base_url: str, tmp_path: Path):
     from modules.idor_differ import IdorDiffer
     from state.manager import StateManager
+    from tools import wrappers
+    # Loopback lab: the module walks hundreds of URLs; the production
+    # per-minute cap would turn this acceptance into an hour-long queue.
+    # Same convention as the aiohttp fixtures in tests/.
+    wrappers.configure_http_limiter(max_concurrent=20, max_per_minute=100000)
     state = StateManager(str(tmp_path / "run" / "twin"))
     config = _module_config(base_url)
     module = IdorDiffer(state, config)
-    result = await module.run()
+    try:
+        result = await module.run()
+    finally:
+        await wrappers.close_engine()
     return result, state
 
 
