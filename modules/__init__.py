@@ -21,6 +21,7 @@ from .api_workflows import APIWorkflows
 from .cspt_audit import CSPTAudit
 from .orm_filter_audit import ORMFilterAudit
 from .websocket_audit import WebSocketAudit
+from .mcp_audit import MCPAudit
 from .waf_module import WAFMapping
 from .login_enum import LoginEnum
 from .misconfig import MisconfigProbes
@@ -222,6 +223,13 @@ MODULE_REGISTRY = {
         "stage": 5,
         "detectability": "medium",
         "depends_on": ["browser_crawl"],
+        "active": False,
+    },
+    "mcp_audit": {
+        "class": MCPAudit,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": [],
         "active": False,
     },
     "cspt_audit": {
