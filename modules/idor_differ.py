@@ -493,6 +493,7 @@ class IdorDiffer(BaseModule):
     async def run(self) -> str:
         self.log("Loading identity sessions...")
         harness = AuthHarness(self.config)
+        harness.mutations = self.state.mutations
         self._merge_discovered_identities(harness)
         if not harness.identities:
             self.log("No identities in auth.identities — running "
@@ -586,7 +587,94 @@ class IdorDiffer(BaseModule):
 
         reported = await self._report(results, harness)
         self.log(f"{reported} finding(s) from {len(results)} probe(s)")
+
+        # I3: the shared authorization-matrix pass (ownership, sharing,
+        # freshness, revocation, canaries). Opt-in: legacy behavior and
+        # fixtures are unchanged unless modules.idor_differ.matrix.enabled
+        # is set. The pass adds its own CANDIDATE/PROOF rows.
+        matrix_cfg = self._cfg().get("matrix") or {}
+        if matrix_cfg.get("enabled") and harness.has_pair():
+            await self._run_matrix_pass(harness, templates, ownership)
         return "done"
+
+    async def _run_matrix_pass(self, harness, templates, ownership) -> None:
+        """Identity × object matrix over the discovered templates (I3)."""
+        from core.authorization import AuthorizationMatrix
+        matrix_cfg = self._cfg().get("matrix") or {}
+        identities = harness.usable
+        victims = [i for i in identities if not i.privileged] or identities
+        pairs = [(attacker, victim)
+                 for attacker in identities for victim in victims
+                 if attacker.name != victim.name]
+        objects = []
+        for template in templates:
+            by_owner = ownership.get(template.key, {})
+            refs = set(template.id_values) | set(by_owner)
+            shape = template.url_template or template.url
+            if "{id}" not in shape:
+                continue
+            for ref in refs:
+                objects.append({"template": shape, "ref": str(ref),
+                                "owner": by_owner.get(ref)})
+        matrix = AuthorizationMatrix(harness, self._base_url(), matrix_cfg,
+                                     self.state, log=self.log)
+        await matrix.run_ownership(objects, pairs)
+        sharing = matrix_cfg.get("sharing") or []
+        if sharing:
+            await matrix.run_sharing(sharing, {i.name: i for i in identities})
+        freshness = matrix_cfg.get("freshness") or {}
+        if freshness.get("enabled", True) and identities:
+            await matrix.run_freshness(identities[0])
+        revocation = matrix_cfg.get("revocation") or {}
+        if revocation.get("enabled", True) and identities:
+            await matrix.run_revocation(
+                identities[0], revocation.get("logout"))
+        canary_specs = (matrix_cfg.get("canaries") or {}).get("specs") or []
+        await matrix.run_canaries(canary_specs)
+
+        self.state.add_evidence(self.id, "matrix_report", self._base_url(),
+                                matrix.report.to_dict())
+        for row in matrix.finding_rows(self.id):
+            if row["tier"] == "candidate":
+                cell = row["cell"]
+                self.state.add_finding(
+                    title=row["title"],
+                    severity=row["severity"],
+                    confidence=row["confidence"],
+                    category="Authorization Matrix",
+                    description=(
+                        f"{cell.subject} reading {cell.object.get('template')} "
+                        f"(ref {cell.object.get('ref')}) as {cell.operation} "
+                        f"returned {cell.status}: {cell.outcome}. "
+                        f"Attribution: {cell.attribution}"),
+                    evidence=[f"cell_sha256:{cell.evidence_sha256}"],
+                    asset_keys=[f"url:{cell.object.get('template')}"],
+                    verified=False,
+                    verification={},
+                )
+            elif row["tier"] == "proof":
+                canary = row["canary"]
+                self.state.add_finding(
+                    title=row["title"],
+                    severity=row["severity"],
+                    confidence=row["confidence"],
+                    category="Authorization Matrix",
+                    description=(
+                        f"Canary {canary['name']}: {canary['read_by']} "
+                        f"observed the seeded object created by "
+                        f"{canary['created_by']} "
+                        f"(observed={canary.get('observed')!r}, "
+                        f"seed_intact={canary.get('seed_intact')}). "
+                        f"Cleanup: {canary.get('cleanup_status')}."),
+                    evidence=[f"canary:{canary['name']}"],
+                    asset_keys=[f"url:{self._base_url()}"],
+                    verified=True,
+                    verification=row["verification"],
+                )
+        self.log(f"  authorization matrix: {len(matrix.report.cells)} cell(s), "
+                 f"{len(matrix.report.violations())} leak(s), "
+                 f"{sum(1 for c in matrix.report.canaries if c.get('proven'))} "
+                 f"proven canary(s)")
 
     def _merge_discovered_identities(self, harness) -> None:
         """Adopt sessions auth_audit captured earlier in the run (shared)."""

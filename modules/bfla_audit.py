@@ -13,6 +13,8 @@ inconsistency that proves it is a gap, not a public feed).
 import json
 import re
 
+from core.auth_harness import AuthHarness
+from core.authorization import _identity_markers
 from core.site_profile import get_profile
 from modules.base import BaseModule
 from tools.wrappers import curl_with_status
@@ -106,10 +108,64 @@ class BFLAAudit(BaseModule):
                 asset_keys=[f"webapp:{base}"],
                 verification={"method": "unauth_collection_records", "url": url})
 
+        # I3: cross-identity pass — open collections read by each verified
+        # identity; records attributable to another identity are leaks.
+        matrix_cfg = (self.config.get("modules", {}).get(self.id, {})
+                      .get("matrix") or {}) if isinstance(
+            self.config.get("modules", {}), dict) else {}
+        if matrix_cfg.get("enabled"):
+            await self._cross_identity_pass(base, open_c)
+
         self.state.complete_module(self.id)
         self.log(f"BFLA: {len(open_c)} unauth data collection(s), "
                  f"{protected} protected, from {len(collections)} candidate(s)")
         return "done"
+
+    async def _cross_identity_pass(self, base: str, open_c: list) -> None:
+        """Read each open collection as every verified identity (I3).
+
+        A record that carries another identity's ownership markers in this
+        identity's response is a function-level authorization leak.
+        """
+        harness = AuthHarness(self.config)
+        harness.mutations = self.state.mutations
+        harness.adopt_discovered(self.state, log=self.log)
+        try:
+            identities = await harness.establish_all(base)
+        except Exception:
+            identities = []
+        if len(identities) < 2:
+            return
+        for url, path, _n in open_c:
+            own_markers = {}
+            for identity in identities:
+                result = await harness.request(identity.name, url)
+                body = str(result.get("body") or "")
+                own_markers[identity.name] = _identity_markers(body)
+            # Compare every identity's markers against the others'.
+            for identity in identities:
+                others = {m for name, markers in own_markers.items()
+                          if name != identity.name for m in markers}
+                if not others:
+                    continue
+                leaked = others & own_markers.get(identity.name, set())
+                if leaked:
+                    self.state.add_finding(
+                        title=(f"Cross-identity collection leak: {path} "
+                               f"({identity.name})"),
+                        severity="HIGH",
+                        confidence="FIRM",
+                        category="Broken Function Level Authorization",
+                        description=(
+                            f"{path} returned records attributable to another "
+                            f"identity in {identity.name}'s session "
+                            f"(markers: {sorted(leaked)[:5]})."),
+                        evidence=[f"GET {url} as {identity.name} → "
+                                  f"markers {sorted(leaked)[:5]}"],
+                        asset_keys=[f"webapp:{base}"],
+                        verified=False,
+                        verification={},
+                    )
 
     def _collections(self, base: str) -> list:
         from urllib.parse import urlparse

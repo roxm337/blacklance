@@ -1,6 +1,7 @@
 """Stage 4: GraphQL Enumeration — introspection, field suggestion, batch queries."""
 
 import json
+from core.auth_harness import AuthHarness
 from modules.base import BaseModule
 from tools.wrappers import curl_with_status, curl
 
@@ -99,10 +100,101 @@ class GraphQLAudit(BaseModule):
         # Audit each endpoint
         for endpoint in active_endpoints:
             await self._audit_endpoint(endpoint)
+            await self._matrix_pass(endpoint)
 
         self.state.complete_module(self.id)
         self.log(f"GraphQL: {len(active_endpoints)} endpoints audited")
         return "done"
+
+    async def _matrix_pass(self, endpoint: str) -> None:
+        """I3: field-level authorization probes across verified identities.
+
+        Opt-in via ``modules.graphql_audit.matrix.enabled``. Each configured
+        field probe runs as every verified identity; scalar leaf values
+        differing per identity are recorded as matrix cells. Read-only by
+        default — mutations require an explicit canary spec.
+        """
+        matrix_cfg = (self.config.get("modules", {}).get(self.id, {})
+                      .get("matrix") or {}) if isinstance(
+            self.config.get("modules", {}), dict) else {}
+        if not matrix_cfg.get("enabled"):
+            return
+        from core.authorization import AuthorizationMatrix, _leaf_paths, \
+            _value_at
+        harness = AuthHarness(self.config)
+        harness.mutations = self.state.mutations
+        harness.adopt_discovered(self.state, log=self.log)
+        try:
+            identities = await harness.establish_all(self.base_url)
+        except Exception:
+            identities = []
+        if len(identities) < 2:
+            return
+        max_queries = max(1, int(matrix_cfg.get("max_queries", 10) or 10))
+        probes = (matrix_cfg.get("field_probes") or [])[:max_queries]
+        for probe in probes:
+            query = str(probe.get("query") or "")
+            if not query:
+                continue
+            bodies = {}
+            for identity in identities:
+                result = await harness.request(
+                    identity.name, endpoint, method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=f'{{"query": {json.dumps(query)}}}')
+                bodies[identity.name] = str(result.get("body") or "")
+            import json as _json
+            parsed = {}
+            for name, body in bodies.items():
+                try:
+                    parsed[name] = _json.loads(body).get("data") or {}
+                except (ValueError, TypeError):
+                    parsed[name] = {}
+            leaves = set()
+            for doc in parsed.values():
+                leaves |= set(_leaf_paths(doc))
+            for path in sorted(leaves)[:max_queries]:
+                values = {name: _value_at(doc, path)
+                          for name, doc in parsed.items()}
+                unique = {repr(v) for v in values.values()}
+                if len(unique) > 1:
+                    self.state.add_evidence(
+                        self.id, "matrix_report", endpoint,
+                        {"field_probe": query, "path": path,
+                         "per_identity": {
+                             name: str(v) for name, v in values.items()}})
+                    self.state.add_finding(
+                        title=f"GraphQL field leak: {path} ({endpoint})",
+                        severity="HIGH",
+                        confidence="FIRM",
+                        category="Authorization Matrix",
+                        description=(
+                            f"Field {path!r} differs across identities for "
+                            f"probe {query!r}: {values}"),
+                        evidence=[f"probe:{query}", f"field:{path}"],
+                        asset_keys=[f"url:{endpoint}"],
+                        verified=False,
+                        verification={},
+                    )
+        canary_specs = (matrix_cfg.get("canaries") or {}).get("specs") or []
+        if canary_specs:
+            matrix = AuthorizationMatrix(harness, self.base_url,
+                                         matrix_cfg, self.state, log=self.log)
+            await matrix.run_canaries(canary_specs)
+            for row in matrix.finding_rows(self.id):
+                if row["tier"] == "proof":
+                    self.state.add_finding(
+                        title=row["title"],
+                        severity=row["severity"],
+                        confidence=row["confidence"],
+                        category="Authorization Matrix",
+                        description=f"GraphQL canary {row['canary']['name']} "
+                                    f"proven: {row['canary']}",
+                        evidence=[f"canary:{row['canary']['name']}"],
+                        asset_keys=[f"url:{endpoint}"],
+                        verified=True,
+                        verification=row["verification"],
+                    )
 
     async def _audit_endpoint(self, endpoint: str):
         # 1. Introspection
