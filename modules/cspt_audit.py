@@ -60,12 +60,16 @@ class CSPTAudit(BaseModule):
                 "disabled — it drives a real browser with traversal "
                 "payloads; set modules.cspt_audit.enabled: true to run")
             return "skipped"
-        try:
-            import playwright.async_api  # noqa: F401
-        except Exception:
-            self.state.skip_module(self.id, "playwright not installed")
-            return "skipped"
-
+        # An injected driver (module-level monkeypatch) does not need the
+        # real browser package; only the default driver does. Requiring
+        # Playwright unconditionally made the unit suite fail in CI, where
+        # the optional package is intentionally absent.
+        if _drive_epochs is _DEFAULT_DRIVE:
+            try:
+                import playwright.async_api  # noqa: F401
+            except Exception:
+                self.state.skip_module(self.id, "playwright not installed")
+                return "skipped"
         harness = AuthHarness(self.config)
         harness.mutations = self.state.mutations
         harness.adopt_discovered(self.state, log=self.log)
@@ -528,3 +532,8 @@ async def _drive_epochs(url: str, point: str, name: str, token: str,
         finally:
             await browser.close()
     return events
+
+
+# Sentinel for the gate above: if this name is rebound (test seam), the
+# default browser driver is not in use.
+_DEFAULT_DRIVE = _drive_epochs
