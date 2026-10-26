@@ -15,6 +15,10 @@ from __future__ import annotations
 # the point is surfacing invisible behavior, especially the write/safety
 # gates that default closed.
 KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
+    ("llm.allowed_providers", [],
+     "provider allowlist for agent models; empty = unrestricted"),
+    ("llm.data_policy.mode", "standard",
+     "standard | redacted | local_only; local_only rejects remote providers"),
     ("tools.backend", "local",
      "local uses host binaries, docker runs the toolchain image instead"),
     ("tools.image", "osint-tools:latest",

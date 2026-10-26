@@ -8,6 +8,7 @@ from typing import Any
 
 from agents import get_llm_config
 from agents.plan_validation import parse_json_object, validate_attack_plan
+from core.untrusted import with_untrusted_policy, wrap_untrusted
 
 logger = logging.getLogger("osint-agent")
 
@@ -63,7 +64,7 @@ class AttackPlanner:
 
     async def build_plan(self, bundle: dict) -> dict:
         """Return an LLM plan, falling back to deterministic heuristics."""
-        prompt = _build_user_prompt(bundle)
+        prompt = with_untrusted_policy(_build_user_prompt(bundle))
         kwargs = {
             "model": self.model,
             "messages": [
@@ -250,7 +251,9 @@ def _compact_bundle(bundle: dict) -> dict:
 
 def _build_user_prompt(bundle: dict) -> str:
     bundle_json = json.dumps(_compact_bundle(bundle), indent=2, default=str)
-    return USER_PROMPT.replace("{bundle}", bundle_json)
+    return USER_PROMPT.replace(
+        "{bundle}",
+        wrap_untrusted(bundle_json, source="osint-bundle", max_len=20000))
 
 
 def _parse_plan(content: str) -> dict:

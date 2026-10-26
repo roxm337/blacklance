@@ -1,7 +1,9 @@
 """LLM orchestrator agent — decides which modules to run via litellm."""
 
 import logging
-from agents import load_system_prompt, get_llm_config
+
+from agents import get_llm_config, load_system_prompt
+from core.untrusted import with_untrusted_policy, wrap_untrusted
 
 logger = logging.getLogger("osint-agent")
 
@@ -91,9 +93,11 @@ class LLMOrchestrator:
         ]
 
         waf = self.state.module.get("waf", {})
+        waf_vendor = wrap_untrusted(str(waf.get("vendor") or "unknown"),
+                                    source="waf-vendor", max_len=200)
         waf_status = (
             f"Detected: {waf.get('detected', False)}, "
-            f"Vendor: {waf.get('vendor', 'unknown')}, "
+            f"Vendor: {waf_vendor}, "
             f"Blocks: {len(waf.get('blocks', []))}"
         )
 
@@ -109,7 +113,9 @@ class LLMOrchestrator:
                 pending.append(f"  [{entry.get('stage', '?')}] {mid}")
 
         return BUILD_CONTEXT_PROMPT.format(
-            domain=self.config.get("target", {}).get("domain", "?"),
+            domain=wrap_untrusted(
+                str(self.config.get("target", {}).get("domain") or "?"),
+                source="target-domain", max_len=200),
             completed="\n".join(f"  - {m}" for m in completed) or "  (none)",
             skipped="\n".join(f"  - {m}" for m in skipped) or "  (none)",
             blocked="\n".join(f"  - {m}" for m in blocked) or "  (none)",
@@ -123,7 +129,7 @@ class LLMOrchestrator:
 
     async def decide_next(self) -> str:
         """Ask the LLM what to do next. Returns 'RUN_MODULE: <id>' or 'COMPLETE'."""
-        context = self._build_context()
+        context = with_untrusted_policy(self._build_context())
 
         kwargs = {
             "model": self.model,

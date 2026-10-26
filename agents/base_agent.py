@@ -9,6 +9,7 @@ from agents import get_llm_config
 from agents.blackboard import Blackboard, AgentRole
 from core.attack_graph import AttackGraph
 from core.budget_manager import BudgetManager, BudgetExceededError
+from core.untrusted import with_untrusted_policy, wrap_untrusted
 from state.manager import StateManager
 
 logger = logging.getLogger("osint-agent")
@@ -49,7 +50,7 @@ class BaseAgent:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": with_untrusted_policy(user_prompt)},
             ],
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -70,7 +71,9 @@ class BaseAgent:
     def _build_state_context(self) -> str:
         """Build a text summary of current state for LLM context."""
         summary = self.state.summary()
-        lines = [f"Target: {self.config.get('target', {}).get('domain', '?')}"]
+        domain = str(self.config.get("target", {}).get("domain") or "?")
+        lines = [f"Target: "
+                 f"{wrap_untrusted(domain, source='target-domain', max_len=200)}"]
         lines.append(f"Assets: {summary.get('assets', 0)}")
         lines.append(f"Findings: {summary.get('findings', 0)}")
         lines.append(f"Modules completed: {len(summary.get('modules_completed', []))}")
@@ -87,7 +90,9 @@ class BaseAgent:
         if self.state.findings.get("findings"):
             lines.append("Top findings:")
             for f in self.state.findings["findings"][:5]:
-                lines.append(f"  [{f['severity']}] {f['title']}")
+                lines.append("  " + wrap_untrusted(
+                    f"[{f.get('severity', 'INFO')}] {f.get('title', '')}",
+                    source="finding-title", max_len=500))
 
         hyp_count = len(self.bb.hypotheses)
         confirmed = len([h for h in self.bb.hypotheses if h.status == "confirmed"])
