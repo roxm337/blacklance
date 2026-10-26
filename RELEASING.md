@@ -36,6 +36,11 @@
 4. Build and smoke-test the installed wheel:
    - `python -m build --wheel`
    - `python scripts/check_wheel.py dist/*.whl`
+   - Locally, a generated `build/` directory can (a) shadow the `build`
+     module and (b) contaminate wheel staging. In that case build with a
+     fresh base:
+     `python setup.py build --build-base /tmp/osint-build bdist_wheel --bdist-dir /tmp/osint-bdist -d /tmp/osint-wheel`
+     then run the smoke check against that wheel.
 5. Merge the approved branch to `main` (fast-forward when possible) and
    verify `git rev-parse HEAD` is the tested commit.
 6. `git tag -a vX.Y.Z -m "vX.Y.Z"` on that commit.
