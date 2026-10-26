@@ -420,6 +420,48 @@ modules:
       #   url_template: "/api/items/{id}"
       #   verify: {method: http_get, expect_status: [404, 410]}
 
+  mcp_audit:
+    # I8: MCP tool/resource/session/audience authorization. Discovery is
+    # observation only; initialize acceptance is a candidate. Only a seeded
+    # canary (created through an owner tool call, observed through the
+    # forbidden lane, cleaned up and verified) can promote to PROOF.
+    # Instruction-like tool descriptions are treated as data, never acted on.
+    enabled: false
+    max_servers: 4
+    max_probes: 6
+    max_seconds: 240
+    timeout: 15
+    protocol_version: "2025-03-26"
+    discover_identity: ""       # defaults to the first configured identity
+    servers: []                 # [{name: app, url: "/mcp", headers: {}}]
+    audience_checks: []         # [{identity: alice, server: alt, expected: rejected}]
+    probes: []                  # candidate-tier tool probes; see below
+    canary:
+      enabled: true             # the only path to a verified finding
+      owner_identity: ""
+      forbidden_identity: ""
+      max: 2
+      probes: []
+      # seed:                   # R8-recorded before creation
+      #   tool: create_note
+      #   arguments: {text: "{run}"}
+      #   extract: {type: jsonpath, path: "structuredContent.id"}
+      # cleanup:
+      #   tool: delete_note
+      #   arguments: {id: "{id}"}
+      #   verify: {tool: read_note, arguments: {id: "{id}"}, expect: error}
+      # probe spec:
+      #   - name: tool-authz
+      #     mode: tool            # tool | resource | session | audience
+      #     read: {tool: read_note, arguments: {id: "{id}"},
+      #            extract: {type: jsonpath, path: "structuredContent.text"}}
+    # A candidate probe needs a server, identity, tool and extract spec;
+    # values are never stored:
+    # probes:
+    #   - {name: read-note, server: app, identity: alice, tool: read_note,
+    #      arguments: {id: "9"},
+    #      extract: {type: jsonpath, path: "structuredContent.text"}}
+
   prototype_pollution:
     # Sends a canary property through a JSON body and checks whether it turned
     # up on Object.prototype. Left on: a handful of POSTs, no data harmed, and
