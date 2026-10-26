@@ -31,11 +31,15 @@ class BuildWithResources(build_py):
                 "Unexpected files in wheel staging; use a fresh build directory "
                 "(no files were deleted).")
 
+# VERSION is operator-local (gitignored): read it when present, fall back
+# to a PEP 440 local version so a clean checkout (CI) still builds.
+_version_file = Path(__file__).resolve().parent / "VERSION"
+_version = (_version_file.read_text(encoding="utf-8").strip()
+            if _version_file.exists() else "0.0.0+local")
+
 setup(
     name="osint-agent",
-    # Single source of truth: the VERSION file (SemVer, tagged vX.Y.Z).
-    version=(Path(__file__).resolve().parent / "VERSION")
-            .read_text(encoding="utf-8").strip(),
+    version=_version,
     description="LLM-Orchestrated OSINT Reconnaissance Pipeline",
     classifiers=[
         "Programming Language :: Python :: 3",
