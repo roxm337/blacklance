@@ -68,3 +68,11 @@ Thumbs.db
 *.tmp
 digest.txt
 config copy.yaml
+
+# ============================================================
+#  Local-only release/planning/support files (never pushed)
+# ============================================================
+RELEASING.md
+VERSION
+AUDIT-JUICESHOP.md
+Vulnscan_results.md
