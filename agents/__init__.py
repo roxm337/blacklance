@@ -6,6 +6,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+class LLMConfigError(RuntimeError):
+    """The configured model violates the operator's data/provider policy."""
+
+
+LOCAL_PROVIDERS = frozenset({"ollama", "lmstudio", "vllm", "local", "localhost"})
+POLICY_MODES = frozenset({"standard", "redacted", "local_only"})
+
+
 # Shortcuts: config provider name -> litellm model string
 MODEL_SHORTCUTS = {
     "deepseek": "deepseek/deepseek-chat",
@@ -53,6 +61,24 @@ def get_llm_config(config: dict) -> dict:
         or "openai/gpt-4o"
     )
     model = resolve_model(raw_model)
+    policy = llm.get("data_policy") if isinstance(
+        llm.get("data_policy"), dict) else {}
+    mode = str(policy.get("mode") or "standard").strip().lower()
+    if mode not in POLICY_MODES:
+        raise LLMConfigError(
+            f"llm.data_policy.mode must be one of {sorted(POLICY_MODES)}")
+    allowed = [str(p).strip().lower()
+               for p in (llm.get("allowed_providers") or [])
+               if str(p).strip()]
+    provider = model.split("/")[0].lower() if "/" in model else ""
+    if allowed and provider not in allowed:
+        raise LLMConfigError(
+            f"LLM provider {provider!r} is not in llm.allowed_providers "
+            f"{allowed}")
+    if mode == "local_only" and provider not in LOCAL_PROVIDERS:
+        raise LLMConfigError(
+            f"llm.data_policy.mode=local_only forbids provider "
+            f"{provider!r}; configure a local model (ollama/lmstudio/vllm)")
     api_key = (
         llm.get("api_key")
         or (os.environ.get("DEEPSEEK_API_KEY") if model.startswith("deepseek/") else "")
@@ -66,6 +92,8 @@ def get_llm_config(config: dict) -> dict:
         "api_key": api_key,
         "temperature": llm.get("temperature", 0.1),
         "max_tokens": llm.get("max_tokens", 2000),
+        "data_policy": {"mode": mode},
+        "allowed_providers": allowed,
     }
 
 

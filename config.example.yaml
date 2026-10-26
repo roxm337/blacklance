@@ -107,6 +107,13 @@ llm:
   api_key: ""
   temperature: 0.1
   max_tokens: 2000
+  # Provider/data policy for agent prompts. Empty allowlist = unrestricted.
+  # local_only rejects remote providers (use ollama/lmstudio/vllm).
+  # All target-derived prompt content is framed as untrusted data regardless
+  # of mode; "redacted" documents that credential-shaped strings are scrubbed.
+  allowed_providers: []
+  data_policy:
+    mode: standard       # standard | redacted | local_only
 
 # Wall-clock ceiling for a single module, in seconds. A module that exceeds it
 # is recorded as `timeout` and the run continues. Without this the slowest
