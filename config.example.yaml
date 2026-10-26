@@ -627,6 +627,41 @@ modules:
     endpoints: []                # explicit cart/order endpoints
     # endpoints: ["/api/cart"]   # discovered api_endpoints win when present
 
+    # I6: declared invariants + bounded race testing. Opt-in; every run
+    # seeds fresh resources through the mutation ledger and cleans up with
+    # a verified re-read. Proof requires the serial/concurrent CONTRAST and
+    # a broken final state — timing never promotes.
+    race:
+      enabled: false
+      max_invariants: 3
+      trials: 4               # concurrent operations per invariant (cap 12)
+      concurrency: 4          # in flight at once (cap 10)
+      max_seconds: 180
+      invariants: []          # see RELEASING.md-adjacent docs; example:
+      # - name: coupon-single-redeem
+      #   kind: single_use     # single_use | balance | stock | idempotency
+      #   identity: alice
+      #   limit_semantics: "a one-time coupon must never grant more than once"
+      #   setup:
+      #     method: POST
+      #     url_template: /api/coupons
+      #     body_template: '{"code": "RACE-{run}", "value": 10}'
+      #     headers: {Content-Type: application/json}
+      #     extract_ids: [{type: jsonpath, path: id}]
+      #   operation:
+      #     method: POST
+      #     url_template: /api/coupons/{id}/redeem
+      #     headers: {Content-Type: application/json}
+      #   serial_control: {enabled: true, expect_second: rejected}
+      #   invariant:
+      #     read_probe: {method: GET, url_template: /api/coupons/{id}}
+      #     extract: {type: jsonpath, path: grants}
+      #     expect: [{op: lte, value: 1}]
+      #   cleanup:
+      #     method: DELETE
+      #     url_template: /api/coupons/{id}
+      #     verify: {method: http_get, expect_status: [404, 410]}
+
   misconfig_probes:
     concurrency: 12
     timeout: 5

@@ -24,7 +24,9 @@ volume is bounded by max_probes.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 
 from core.auth_harness import AuthHarness, Identity
 from modules.base import BaseModule
@@ -71,6 +73,7 @@ class BusinessLogic(BaseModule):
             return "skipped"
 
         harness = AuthHarness(self.config)
+        harness.mutations = self.state.mutations
         harness.adopt_discovered(self.state, log=self.log)
         identities = await harness.establish_all(self._base_url())
         if not identities:
@@ -80,16 +83,108 @@ class BusinessLogic(BaseModule):
 
         surface = await self._surface_pass(harness, attacker, cfg)
         tamper = await self._tamper_pass(harness, attacker, cfg)
+        race = await self._race_pass(harness, cfg)
 
-        for finding in surface + tamper:
+        for finding in surface + tamper + race:
             self.state.add_finding(**finding)
 
         self.state.complete_module(self.id)
         self.log(
             f"business logic: {len(surface)} surface note(s) | "
-            f"{len(tamper)} tamper finding(s)"
+            f"{len(tamper)} tamper finding(s) | {len(race)} race finding(s)"
         )
         return "done"
+
+    async def _race_pass(self, harness: AuthHarness, cfg: dict) -> list:
+        """I6: declared invariants + bounded race testing (opt-in).
+
+        Serial control first (the operation must behave when replayed one
+        at a time), then a concurrent batch on a FRESH seeded resource.
+        Proof needs the serial/concurrent CONTRAST, a final state that
+        breaks the invariant, and verified R8 cleanup of every seeded
+        object and effect. Timing never promotes.
+        """
+        race_cfg = cfg.get("race") or {}
+        if not isinstance(race_cfg, dict) or not race_cfg.get("enabled"):
+            return []
+        from core.invariants import (InvariantSpecError, RaceRunner,
+                                     parse_invariant)
+        specs = []
+        untested = []
+        for raw in race_cfg.get("invariants") or []:
+            try:
+                specs.append(parse_invariant(raw, race_cfg))
+            except InvariantSpecError as exc:
+                untested.append({"name": (raw or {}).get("name", ""),
+                                 "reason": exc.code})
+        if not specs:
+            return []
+        run_token = f"bl{hashlib.sha256(str(time.time()).encode()).hexdigest()[:6]}"
+        runner = RaceRunner(harness, self.state, self.id,
+                            self._base_url(), race_cfg, log=self.log)
+        report = await runner.run(specs, run_token)
+        report["untested"].extend(untested)
+        findings = []
+        for entry in report["invariants"]:
+            state = entry.get("state")
+            if state == "proof":
+                findings.append(self._race_finding(entry, verified=True))
+            elif state == "candidate":
+                findings.append(self._race_finding(entry, verified=False))
+        self.state.add_evidence(self.id, "race_report", self._base_url(),
+                                report)
+        self.state.add_asset(
+            "race_scan", f"race_scan:{self.domain}", self.domain,
+            confidence="FIRM", sources=[self.id],
+            attrs={"invariants": len(specs),
+                   "proof": report["state_counts"].get("proof", 0),
+                   "candidate": report["state_counts"].get("candidate", 0),
+                   "untested": len(report["untested"])})
+        self.log(f"  race: {report['state_counts']}")
+        return findings
+
+    def _race_finding(self, entry: dict, *, verified: bool) -> dict:
+        fp = entry.get("fingerprint") or ""
+        concurrent = entry.get("concurrent") or {}
+        serial = entry.get("serial") or {}
+        title = (f"Race condition proven: {entry['name']} [{fp[:8]}]"
+                 if verified else
+                 f"Race condition candidate: {entry['name']} [{fp[:8]}] "
+                 f"({entry.get('reason', '')})")
+        description = (
+            f"Invariant '{entry['name']}' ({entry['kind']}): "
+            f"{entry.get('limit_semantics') or 'declared limit'}. "
+            f"Serial control: first accepted={serial.get('first_accepted')}, "
+            f"second accepted={serial.get('second_accepted')}, "
+            f"invariant held={serial.get('expectation_held')}. "
+            f"Concurrent batch: {concurrent.get('accepted', 0)}/"
+            f"{concurrent.get('trials', 0)} accepted, "
+            f"max in flight={concurrent.get('max_in_flight', 0)}, "
+            f"final observed={entry.get('final_observed')!r}."
+        )
+        verification = {}
+        if verified:
+            verification = {"method": "race_invariant_violated",
+                            "invariant": entry["name"],
+                            "kind": entry["kind"],
+                            "accepted": concurrent.get("accepted"),
+                            "final_observed": entry.get("final_observed"),
+                            "mut_id": entry.get("mut_id"),
+                            "cleanup_status": (entry.get("cleanup") or {})
+                            .get("seed_status")}
+        return {
+            "title": title,
+            "severity": "HIGH" if verified else "MEDIUM",
+            "confidence": "CONFIRMED" if verified else "FIRM",
+            "category": "Race Condition",
+            "description": description,
+            "evidence": [f"invariant:{entry['name']}",
+                         f"kind:{entry['kind']}",
+                         f"seed_ref:{entry.get('seed_ref', '')}"],
+            "asset_keys": [f"url:{self._base_url()}"],
+            "verified": verified,
+            "verification": verification,
+        }
 
     # ── A. Privilege-field surface (read-only) ────────────────────
 
