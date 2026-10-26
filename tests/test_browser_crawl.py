@@ -34,7 +34,8 @@ PAGES = {
 RENDERED = []
 
 
-async def fake_render(url, config, wait_ms=1500, cookies=None, headers=None):
+async def fake_render(url, config, wait_ms=1500, cookies=None, headers=None,
+                      capture=None):
     RENDERED.append({"url": url, "cookies": dict(cookies or {}),
                      "headers": dict(headers or {})})
     page = PAGES.get(url, {"links": [], "scripts": [], "forms": [],

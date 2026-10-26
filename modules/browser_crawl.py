@@ -44,6 +44,7 @@ class BrowserCrawl(BaseModule):
         if crawl_cfg.get("enabled", True) is False:
             self.state.skip_module(self.id, "disabled in config")
             return "skipped"
+        capture_traffic = bool(crawl_cfg.get("capture_traffic", False))
         try:
             max_pages = int(crawl_cfg.get("max_targets", 0) or 0)
             if max_pages <= 0:
@@ -99,13 +100,32 @@ class BrowserCrawl(BaseModule):
         dom_sinks: list[dict] = []
         evidence_refs = []
         context_stats: list[dict] = []
+        captured_events = []
+        capture_enabled = capture_traffic
 
         for name, cookies, headers, authenticated in contexts:
             if _time_guard.monotonic() >= stop_at:
                 self.log("  Time-box hit — keeping the pages crawled so far")
                 break
+            capture = None
+            if capture_enabled:
+                from core.traffic import TrafficCapture
+                capture = TrafficCapture(identity={
+                    "name": name,
+                    "source": "auth_harness" if authenticated else "anonymous",
+                    "verified": bool(authenticated),
+                })
             rendered = await self._crawl_context(
-                name, seeds, depth, max_pages, wait_ms, cookies, headers)
+                name, seeds, depth, max_pages, wait_ms, cookies, headers,
+                capture=capture)
+            if capture is not None:
+                try:
+                    capture.settle_budget(getattr(self, "budget", None))
+                except Exception as exc:
+                    self.log(f"  traffic capture budget stop: {exc}")
+                    captured_events.extend(capture.events)
+                    break
+                captured_events.extend(capture.events)
             discovered.update(rendered["links"])
             discovered.update(rendered["forms"])
             js_urls.update(rendered["scripts"])
@@ -140,6 +160,12 @@ class BrowserCrawl(BaseModule):
         http_urls = [url for url in sorted(discovered)
                      if _is_http(url)
                      and in_scope_url(url, self.base_url, self.domain)]
+
+        # I1: persist the redacted traffic capture and anchor it in the
+        # evidence chain. Capture is opt-in; without it this is a no-op.
+        if capture_enabled:
+            await self._store_traffic(captured_events)
+
         for url in http_urls[:1000]:
             asset_type = "api_endpoint" if _looks_api(url) else "url"
             self.state.add_asset(
@@ -226,7 +252,8 @@ class BrowserCrawl(BaseModule):
     async def _crawl_context(self, name: str, seeds: list, depth: int,
                              max_pages: int, wait_ms: int,
                              cookies: dict | None,
-                             headers: dict | None) -> dict:
+                             headers: dict | None,
+                             capture=None) -> dict:
         """BFS render queue for one identity: same-origin links followed
         to `depth`, total pages capped. Cross-origin links are recorded
         as discovered assets by the caller, never rendered here."""
@@ -246,7 +273,8 @@ class BrowserCrawl(BaseModule):
                 continue
             visited.add(url)
             rendered = await _render_page(url, self.config, wait_ms=wait_ms,
-                                          cookies=cookies, headers=headers)
+                                          cookies=cookies, headers=headers,
+                                          capture=capture)
             if rendered.get("error"):
                 errors.append(f"{url}: {rendered['error']}"[:200])
                 continue
@@ -265,6 +293,24 @@ class BrowserCrawl(BaseModule):
         return {"links": links, "forms": forms, "scripts": scripts,
                 "source_maps": source_maps, "dom_sinks": sinks,
                 "pages": pages, "errors": errors}
+
+    async def _store_traffic(self, events: list) -> None:
+        """Persist a redacted capture and anchor it in the evidence chain."""
+        from core.traffic import TrafficStore
+        store = TrafficStore(self.state.state_dir / "traffic.jsonl")
+        written = store.append_many(events)
+        digest = store.digest()
+        self.state.add_evidence(
+            self.id, "traffic_capture", self.base_url,
+            {
+                "events_written": written,
+                "events_captured": len(events),
+                "sha256": digest,
+                "redacted": True,
+            },
+        )
+        self.log(f"  traffic capture: {written} event(s) stored "
+                 f"(sha256 {digest[:12]}…)")
 
     async def _confirm_source_maps(self, map_urls: list) -> None:
         """Fetch candidate maps: JSON with sources is exposure.
@@ -333,7 +379,8 @@ async def _playwright_available() -> bool:
 
 async def _render_page(url: str, config: dict, wait_ms: int = 1500,
                      cookies: dict | None = None,
-                     headers: dict | None = None) -> dict:
+                     headers: dict | None = None,
+                     capture=None) -> dict:
     from playwright.async_api import async_playwright
     from core.http_credentials import origin, credential_header_names, without_credentials
 
@@ -372,6 +419,8 @@ async def _render_page(url: str, config: dict, wait_ms: int = 1500,
         if auth_cookies:
             await context.add_cookies(auth_cookies)
         page = await context.new_page()
+        if capture is not None:
+            capture.attach(page)
 
         async def capture_response(response):
             resp_url = response.url
