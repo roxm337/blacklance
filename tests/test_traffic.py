@@ -171,3 +171,72 @@ def test_build_workflow_orders_by_capture_and_skips_assets():
     assert workflow.steps[0].identity_ref == "user_a"
     assert workflow.steps[1].body == '{"a": 1}'
     assert workflow.identity_order == ["user_a", "anonymous"]
+
+
+# ── WebSocket capture (I7) ──────────────────────────────────────
+
+class FakeWebSocket:
+    def __init__(self, url):
+        self.url = url
+        self.handlers = {}
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    def emit(self, event, payload):
+        if event in self.handlers:
+            return self.handlers[event](payload)
+        return None
+
+
+def test_ws_capture_redacts_frames_and_counts_handshake():
+    page = FakePage()
+    capture = TrafficCapture(identity={"name": "user_a"})
+    capture.attach(page)
+    socket = FakeWebSocket("wss://x/ws")
+    page.emit("websocket", socket)
+    jwt = ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+           "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U")
+    socket.emit("framesent", '{"password":"hunter2","note":"' + jwt + '"}')
+    socket.emit("framereceived", "hello " + jwt)
+    socket.emit("framereceived", b"\x00\x01")
+
+    kinds = [e.kind for e in capture.events]
+    assert kinds == ["ws_open", "ws_frame", "ws_frame", "ws_frame"]
+    assert capture.requests_seen == 1
+
+    sent = capture.events[1]
+    assert sent.direction == "sent" and sent.opcode == "text"
+    assert "hunter2" not in sent.payload
+    assert "eyJ" not in json.dumps(sent.to_dict())
+    received = capture.events[2]
+    assert received.direction == "received"
+    assert "eyJ" not in received.payload
+    binary = capture.events[3]
+    assert binary.opcode == "binary"
+    assert binary.payload == "<binary 2 bytes>"
+    assert all(e.identity["name"] == "user_a" for e in capture.events)
+
+
+def test_ws_frame_cap_per_socket():
+    page = FakePage()
+    capture = TrafficCapture(max_frames_per_socket=2)
+    capture.attach(page)
+    socket = FakeWebSocket("wss://x/ws")
+    page.emit("websocket", socket)
+    for index in range(4):
+        socket.emit("framesent", f"m{index}")
+    frames = [e for e in capture.events if e.kind == "ws_frame"]
+    assert len(frames) == 2
+
+
+def test_workflow_skips_ws_events():
+    events = [
+        {"kind": "ws_open", "url": "wss://x/ws", "identity": {"name": "a"}},
+        {"kind": "ws_frame", "url": "wss://x/ws", "direction": "sent",
+         "payload": '{"type":"subscribe"}', "opcode": "text"},
+        {"kind": "xhr", "url": "https://x/api/1", "method": "GET",
+         "resource_type": "xhr", "identity": {"name": "a"}},
+    ]
+    workflow = build_workflow(events)
+    assert [s.url for s in workflow.steps] == ["https://x/api/1"]

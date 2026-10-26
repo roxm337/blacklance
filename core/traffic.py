@@ -49,6 +49,10 @@ class TrafficEvent:
     response_body: str = ""
     parent_request_id: str = ""  # response → its request
     timestamp: str = ""
+    # WebSocket frames (I7): direction is sent|received, payload is redacted.
+    direction: str = ""
+    payload: str = ""
+    opcode: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -61,7 +65,8 @@ class TrafficCapture:
                  capture_documents: bool = True,
                  max_events: int = DEFAULT_MAX_EVENTS,
                  max_request_body: int = DEFAULT_MAX_REQUEST_BODY,
-                 max_response_body: int = DEFAULT_MAX_RESPONSE_BODY):
+                 max_response_body: int = DEFAULT_MAX_RESPONSE_BODY,
+                 max_frames_per_socket: int = 200):
         self.events: list[TrafficEvent] = []
         self._lock = threading.Lock()
         self._identity = identity or {"name": "anonymous",
@@ -70,6 +75,8 @@ class TrafficCapture:
         self.max_events = max_events
         self.max_request_body = max_request_body
         self.max_response_body = max_response_body
+        self.max_frames_per_socket = max(1, int(max_frames_per_socket))
+        self._ws_frames: dict[str, int] = {}
         self.requests_seen = 0
         self._page = None
 
@@ -108,6 +115,7 @@ class TrafficCapture:
         self._page = page
         page.on("request", self._on_request)
         page.on("response", self._on_response)
+        page.on("websocket", self._on_websocket)
 
     def _wanted(self, resource_type: str, kind: str) -> bool:
         if kind == "navigation":
@@ -207,6 +215,77 @@ class TrafficCapture:
             if url:
                 return str(url)
         return ""
+
+    # ── WebSocket capture (I7) ────────────────────────────────────
+
+    def _on_websocket(self, ws) -> None:
+        """Record the socket URL and both frame directions.
+
+        Playwright emits one ``websocket`` event per connection; frames are
+        delivered through ``framesent``/``framereceived``. Payloads are
+        redacted and capped before they ever reach the event list.
+        """
+        try:
+            url = redact_for_log(str(getattr(ws, "url", "") or ""))
+            if not url:
+                return
+            self._count()
+            self._append(TrafficEvent(
+                kind="ws_open",
+                request_id=f"WS {url}",
+                url=url,
+                resource_type="websocket",
+                page_url=self._page_url(),
+                identity=dict(self._identity),
+                timestamp=_now(),
+            ))
+            ws.on("framesent",
+                  lambda payload: self._on_ws_frame(url, "sent", payload))
+            ws.on("framereceived",
+                  lambda payload: self._on_ws_frame(url, "received", payload))
+        except Exception:
+            pass
+
+    def _on_ws_frame(self, url: str, direction: str, payload) -> None:
+        try:
+            binary = isinstance(payload, (bytes, bytearray))
+            with self._lock:
+                seen = self._ws_frames.get(url, 0)
+                if seen >= self.max_frames_per_socket:
+                    return
+                self._ws_frames[url] = seen + 1
+            if binary:
+                text = f"<binary {len(payload)} bytes>"
+                opcode = "binary"
+            else:
+                text = redact_body(str(payload or ""))
+                opcode = "text"
+            self._append(TrafficEvent(
+                kind="ws_frame",
+                request_id=f"WS {url}",
+                url=url,
+                resource_type="websocket",
+                page_url=self._page_url(),
+                identity=dict(self._identity),
+                direction=direction,
+                payload=text[:self.max_request_body],
+                opcode=opcode,
+                timestamp=_now(),
+            ))
+        except Exception:
+            pass
+
+    def _page_url(self) -> str:
+        try:
+            return str(getattr(self._page, "url", "") or "")
+        except Exception:
+            return ""
+
+    def _append(self, event: TrafficEvent) -> None:
+        with self._lock:
+            if len(self.events) >= self.max_events:
+                return
+            self.events.append(event)
 
 
 class TrafficStore:

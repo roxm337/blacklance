@@ -103,7 +103,10 @@ def redact_body(body: str) -> str:
             import json
             parsed = json.loads(text)
             cleaned = sanitize(parsed)
-            return json.dumps(cleaned, sort_keys=True)
+            # Keyed sanitize does not know every credential-shaped value;
+            # JWT shapes are scrubbed wherever they appear, as promised by
+            # the module docstring.
+            return redact_jwt_like(json.dumps(cleaned, sort_keys=True))
         except (ValueError, TypeError):
             pass
     return redact_jwt_like(redact_for_log(text))
