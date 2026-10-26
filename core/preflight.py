@@ -75,14 +75,55 @@ def preflight(config: dict, context: dict | None = None) -> dict:
 
     # Authenticated coverage needs test identities; without them the auth
     # modules skip (recorded per module, repeated here so it is seen).
+    from core import secrets as secretrefs
     identities = ((config or {}).get("auth", {}) or {}).get("identities", {})
-    count = len(identities) if isinstance(identities, (dict, list)) else 0
+    if isinstance(identities, dict):
+        identities = [{"name": key, **value}
+                      for key, value in identities.items()
+                      if isinstance(value, dict)]
+    if not isinstance(identities, list):
+        identities = []
+    count = len(identities)
     if count:
         notices.append(f"{count} test identities configured — "
                        "authenticated modules can run")
     else:
         notices.append("no test identities — authenticated modules "
                        "(business_logic, IDOR sessions) will skip")
+    require_refs = bool(((config or {}).get("auth", {}) or {}).get(
+        "require_secret_refs", False))
+    for entry in identities:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "?")
+        for field, value in secretrefs.credential_fields(entry):
+            try:
+                secretrefs.resolve_tree(value)
+            except secretrefs.SecretError as exc:
+                warnings.append(
+                    f"identity {name}: {field} reference unresolved — {exc}")
+        try:
+            lifecycle = secretrefs.credential_state(
+                entry.get("expires_at") or entry.get("expires"),
+                bool(entry.get("revoked", False)))
+        except secretrefs.SecretError as exc:
+            warnings.append(f"identity {name}: {exc}")
+            lifecycle = None
+        if lifecycle:
+            if lifecycle["revoked"]:
+                warnings.append(
+                    f"identity {name}: credential revoked — it will not be used")
+            elif lifecycle["expired"]:
+                warnings.append(
+                    f"identity {name}: credential expired at "
+                    f"{lifecycle['expires_at']} — it will not be used")
+        if require_refs:
+            literals = secretrefs.literal_secret_fields(entry)
+            if literals:
+                warnings.append(
+                    f"identity {name}: plaintext credential field(s) "
+                    f"{', '.join(literals)} while auth.require_secret_refs "
+                    "is true — use env:NAME or file:/path")
 
     # Arming proving actions above LOW is the one decision that can hurt
     # someone: say it where it cannot be missed.

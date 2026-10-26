@@ -30,6 +30,9 @@ shodan_api_key: ""  # Set via env SHODAN_API_KEY
 urlscan_api_key: ""  # Set via env URLSCAN_API_KEY
 
 api_keys:
+  # Values may be env:/file: references resolved at use time, e.g.
+  # virustotal: "env:VT_API_KEY" or "file:~/.secrets/vt". Resolved values
+  # are never persisted in state, evidence or reports.
   virustotal: ""       # VIRUSTOTAL_API_KEY or VT_API_KEY
   greynoise: ""        # GREYNOISE_API_KEY
   abuseipdb: ""        # ABUSEIPDB_API_KEY
@@ -80,25 +83,31 @@ auth:
   #
   #   3. Bearer token:
   #        user_c:
-  #          bearer_token: "eyJhbGci..."
+  #          bearer_token: "env:TARGET_BEARER"
   #          verify_url: "https://target/api/me"
   #
   #   4. HTTP Basic:
   #        user_d:
-  #          basic_auth: {user: "api-user", password: "..."}
+  #          basic_auth: {user: "api-user", password: "env:TARGET_PASS"}
   #          verify_url: "https://target/api/me"
   #
   # `success_marker` sits on the identity, not inside `login`, and matters more
   # than it looks: a failed login usually returns HTTP 200 with the login form
   # again, so without a marker the harness cannot tell a real session from a
   # bounce and will report confident nonsense.
+  # Credentials may be env:/file: references resolved at use time. Resolved
+  # values live in memory only and never reach state, evidence or reports.
+  # Set true to reject plaintext credential values at preflight.
+  require_secret_refs: false
   identities: {}
   #   user_a:
-  #     cookies: {session: "..."}
+  #     cookies: {session: "env:TARGET_SESSION_A"}
   #     verify_url: "https://target/dashboard"
   #     success_marker: "Sign out"
+  #     expires_at: "2026-12-31T00:00:00Z"   # expired credentials are unused
+  #     revoked: false                       # explicit operator kill switch
   #   user_b:
-  #     cookies: {session: "..."}
+  #     cookies: {session: "env:TARGET_SESSION_B"}
   #     verify_url: "https://target/dashboard"
   #     success_marker: "Sign out"
 
