@@ -324,9 +324,13 @@ def _extract(spec: dict, body: str) -> Optional[str]:
             return None
         current: Any = obj
         for part in str(spec.get("path") or "").split("."):
-            if not isinstance(current, dict) or part not in current:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            elif isinstance(current, list) and part.isdigit() \
+                    and int(part) < len(current):
+                current = current[int(part)]
+            else:
                 return None
-            current = current[part]
         return None if isinstance(current, (dict, list)) else str(current)
     return None
 

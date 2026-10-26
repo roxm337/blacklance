@@ -379,6 +379,47 @@ modules:
       expect: {}                # {"type": "jsonpath", "path": "secret"}
       equals: ""
 
+  orm_filter_audit:
+    # I5: ORM/filter authorization leaks. Filters that change WHAT you can
+    # see are access-control defects; candidates from real records are
+    # capped (values never stored), and only the seeded-record canary can
+    # verify. Timing-only signals never promote.
+    enabled: false
+    max_surfaces: 8
+    max_payloads: 12
+    max_seconds: 300
+    # Filter values tried against discovered surfaces to spot rows
+    # attributable to another identity (candidate tier only).
+    vector_values: []
+    traffic_surfaces: true      # mine filter params from captured traffic
+    augment_collections: true   # try default filter names on collections
+    filter_names: []            # defaults q/search/owner_id/user_id/...
+    surfaces: []                # explicit {url, filter_params: [...]}
+    source_rules:
+      # Offline importer: names probes from operator-supplied sources.
+      enabled: false
+      root: ""
+    canary:
+      enabled: true             # the only path to a verified finding
+      owner_identity: ""
+      forbidden_identity: ""
+      max: 2
+      # record:                 # R8-recorded before creation
+      #   method: POST
+      #   url_template: "/api/items"
+      #   body_template: '{"name": "{run}"}'
+      #   extract_id: {type: jsonpath, path: "id"}
+      # read:
+      #   direct_url_template: "/api/items/{id}"
+      #   extract: {type: jsonpath, path: "name"}
+      # probes:
+      #   - {url_template: "/api/items", param: q, bind: seed,
+      #      extract: {type: jsonpath, path: "name"}}
+      # cleanup:
+      #   method: DELETE
+      #   url_template: "/api/items/{id}"
+      #   verify: {method: http_get, expect_status: [404, 410]}
+
   prototype_pollution:
     # Sends a canary property through a JSON body and checks whether it turned
     # up on Object.prototype. Left on: a handful of POSTs, no data harmed, and

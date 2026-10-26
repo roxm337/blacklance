@@ -500,30 +500,9 @@ class AuthorizationMatrix:
 
     async def _cleanup_canary(self, mut_id: str, ref: str, cleanup: dict,
                               owner: str, forbidden: str) -> None:
-        template = str(cleanup.get("url_template") or "")
-        if not template:
-            self.state.mutations.mark_not_required(
-                mut_id, "no canary cleanup spec")
-            return
-        url = self.base_url + template.replace("{id}", ref)
-        result = await self._request(
-            owner, url, method=str(cleanup.get("method") or "DELETE"))
-        verify = cleanup.get("verify") or {}
-        check = await self._request(owner, url)
-        check_status = int(check.get("status", 0) or 0)
-        expect = list(verify.get("expect_status") or [404, 410])
-        gone = check_status in expect or check_status >= 400
-        verification = {"method": str(verify.get("method") or "http_get"),
-                        "cleanup_status": result.get("status", 0),
-                        "check_status": check_status}
-        self.state.mutations.record_rollback(
-            mut_id, "verified" if gone else "failed",
-            verification=verification)
-        if gone:
-            self.state.mutations.verify_cleanup(mut_id, verification)
-        else:
-            self.state.mutations.mark_failed(
-                mut_id, f"canary cleanup verify read returned {check_status}")
+        await finalize_canary_cleanup(
+            self.state, self._request, self.base_url,
+            mut_id, ref, cleanup, owner)
 
     # ── grading ──────────────────────────────────────────────────
 
@@ -567,3 +546,37 @@ class AuthorizationMatrix:
 def _short_id() -> str:
     import uuid
     return uuid.uuid4().hex[:8]
+
+
+async def finalize_canary_cleanup(state, request, base_url: str,
+                                   mut_id: str, ref: str, cleanup: dict,
+                                   owner: str) -> str:
+    """Delete a canary record and record the honestly-verified cleanup.
+
+    ``request(identity, url, method=...)`` is the caller's transport.
+    Returns the terminal cleanup status: verified | failed | not_required.
+    """
+    template = str((cleanup or {}).get("url_template") or "")
+    if not template:
+        state.mutations.mark_not_required(mut_id, "no canary cleanup spec")
+        return "not_required"
+    url = base_url.rstrip("/") + template.replace("{id}", str(ref))
+    result = await request(owner, url,
+                           method=str(cleanup.get("method") or "DELETE"))
+    verify = cleanup.get("verify") or {}
+    check = await request(owner, url)
+    check_status = int(check.get("status", 0) or 0)
+    expect = list(verify.get("expect_status") or [404, 410])
+    gone = check_status in expect or check_status >= 400
+    verification = {"method": str(verify.get("method") or "http_get"),
+                    "cleanup_status": result.get("status", 0),
+                    "check_status": check_status}
+    state.mutations.record_rollback(
+        mut_id, "verified" if gone else "failed",
+        verification=verification)
+    if gone:
+        state.mutations.verify_cleanup(mut_id, verification)
+        return "verified"
+    state.mutations.mark_failed(
+        mut_id, f"canary cleanup verify read returned {check_status}")
+    return "failed"

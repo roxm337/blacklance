@@ -19,6 +19,7 @@ from .sitemap import SitemapExploit
 from .rest_api import RestAPIAudit
 from .api_workflows import APIWorkflows
 from .cspt_audit import CSPTAudit
+from .orm_filter_audit import ORMFilterAudit
 from .waf_module import WAFMapping
 from .login_enum import LoginEnum
 from .misconfig import MisconfigProbes
@@ -206,6 +207,13 @@ MODULE_REGISTRY = {
         "stage": 4,
         "detectability": "low",
         "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "orm_filter_audit": {
+        "class": ORMFilterAudit,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": ["parameter_discovery", "rest_api_audit"],
         "active": False,
     },
     "cspt_audit": {
