@@ -23,6 +23,7 @@ from .orm_filter_audit import ORMFilterAudit
 from .websocket_audit import WebSocketAudit
 from .mcp_audit import MCPAudit
 from .ai_conversation_audit import AIConversationAudit
+from .pyrit_audit import PyritAudit
 from .waf_module import WAFMapping
 from .login_enum import LoginEnum
 from .misconfig import MisconfigProbes
@@ -235,6 +236,13 @@ MODULE_REGISTRY = {
     },
     "ai_conversation_audit": {
         "class": AIConversationAudit,
+        "stage": 5,
+        "detectability": "medium",
+        "depends_on": [],
+        "active": False,
+    },
+    "pyrit_audit": {
+        "class": PyritAudit,
         "stage": 5,
         "detectability": "medium",
         "depends_on": [],
