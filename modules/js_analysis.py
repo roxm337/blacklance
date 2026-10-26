@@ -400,8 +400,8 @@ class JSAnalysis(BaseModule):
         js_urls = set()
 
         # From wayback data. Vendor libraries (jQuery, GSAP, WP core,
-        # analytics) hold no first-party endpoints, secrets or sinks; the
-        # euro2c run queued 140 js_file assets, mostly theme/library bundles,
+        # analytics) hold no first-party endpoints, secrets or sinks; one
+        # reference run queued 140 js_file assets, mostly theme/library bundles,
         # and analysing each is how this module burned its whole 300s budget
         # and timed out. Skip anything tagged vendor at discovery, and fall
         # back to a path check for assets tagged before the flag existed.

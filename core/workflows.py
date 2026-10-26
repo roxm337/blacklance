@@ -107,6 +107,10 @@ def build_workflow(events: list[dict], *,
     for event in events:
         if event.get("kind") == "response":
             continue
+        # WebSocket events are replayed by tools/websocket_engine, not as
+        # HTTP workflow steps.
+        if str(event.get("kind") or "").startswith("ws_"):
+            continue
         url = str(event.get("url") or "")
         resource_type = str(event.get("resource_type") or "")
         if skip_assets and resource_type not in ("xhr", "fetch", "document"):

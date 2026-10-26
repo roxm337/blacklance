@@ -2,8 +2,8 @@
 
 The orchestrator runs each module under a hard `asyncio.wait_for` guillotine.
 When a module overruns, that guillotine cancels it mid-flight — discarding
-every finding it had not yet written and recording a bare "timeout". On the
-euro2c run eighteen modules died that way, which is *why* the report was
+every finding it had not yet written and recording a bare "timeout". On one
+reference run eighteen modules died that way, which is *why* the report was
 passive recon noise: the entire active-testing stage was guillotined before
 it could produce or persist a single finding.
 

@@ -969,44 +969,44 @@ async def main():
         epilog="""
 Examples:
   # Full auto recon (passive)
-  python orchestrator.py -t euro2c.com
+  python orchestrator.py -t example.com
 
   # Active recon (includes port scan, high-detectability probes)
-  python orchestrator.py -t euro2c.com --active
+  python orchestrator.py -t example.com --active
 
   # Single module
-  python orchestrator.py -t euro2c.com --module email_security
+  python orchestrator.py -t example.com --module email_security
 
   # LLM-guided mode (requires API key in config or env)
-  python orchestrator.py -t euro2c.com --mode llm
+  python orchestrator.py -t example.com --mode llm
 
   # Pentest mode: build attack graph + run action library
-  python orchestrator.py -t euro2c.com --pentest
+  python orchestrator.py -t example.com --pentest
 
   # Pentest and prove the chains (choose the desired risk ceiling explicitly)
-  python orchestrator.py -t euro2c.com --pentest --execute --max-risk LOW
+  python orchestrator.py -t example.com --pentest --execute --max-risk LOW
 
   # Raise the ceiling. This is what unlocks sqlmap, cloud metadata and the
   # rest, so it should be a deliberate choice rather than a default.
-  python orchestrator.py -t euro2c.com --pentest --execute --max-risk MEDIUM
+  python orchestrator.py -t example.com --pentest --execute --max-risk MEDIUM
 
   # Pentest with active vuln scanning first
-  python orchestrator.py -t euro2c.com --active --pentest
+  python orchestrator.py -t example.com --active --pentest
 
   # Multi-agent assessment (exploit and verify are plan-only by default)
-  python orchestrator.py -t euro2c.com --agent
+  python orchestrator.py -t example.com --agent
 
   # Allow agent action execution, still bounded by the risk ceiling
-  python orchestrator.py -t euro2c.com --agent --execute --max-risk MEDIUM
+  python orchestrator.py -t example.com --agent --execute --max-risk MEDIUM
 
   # List available modules
-  python orchestrator.py -t euro2c.com --list-modules
+  python orchestrator.py -t example.com --list-modules
 
   # List available actions
-  python orchestrator.py -t euro2c.com --list-actions
+  python orchestrator.py -t example.com --list-actions
 
   # Custom output dir
-  python orchestrator.py -t euro2c.com -o ./reports
+  python orchestrator.py -t example.com -o ./reports
         """
     )
     parser.add_argument("-t", "--target", required=True, help="Target domain")

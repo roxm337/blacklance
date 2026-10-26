@@ -184,8 +184,12 @@ class Identity:
             self.verification_note = f"logout returned {status}"
             return False
         # Drop the local session material so the next read is truly stale.
+        # The Authorization header is cleared too: `_perform_login` copies a
+        # freshly extracted token into `headers`, and leaving it behind made
+        # a later re-establishment send the revoked token.
         self.bearer_token = ""
         self.cookies = {}
+        self.headers.pop("Authorization", None)
         self.verified = False
         return True
 

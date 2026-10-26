@@ -1,7 +1,7 @@
 """Tests for the scan-signal overhaul: dedupe, honest verification,
 batched nuclei, reflection seeding, VT thresholds, and time-boxes.
 
-Background: a scan of get-ads.agency produced 26 findings, 17 of which
+Background: a scan of a live target produced 26 findings, 17 of which
 were identical "Proven: verify.reproducible" CONFIRMED Exploitation
 claims — one per static JS chunk, each duplicated — while nuclei, cloud
 enum and open redirect timed out with zero findings to show for it.

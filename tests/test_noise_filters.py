@@ -1,6 +1,6 @@
 """Regression tests for core/noise_filters.
 
-Fixtures are the exact garbage the euro2c.com run surfaced: millisecond
+Fixtures are the exact garbage the example.com run surfaced: millisecond
 epoch "phones", plugin-credit "people", `?ver=` cache-buster "parameters",
 and jQuery/GSAP "JS files". Each assertion pins one piece of that noise out
 of the asset graph while keeping the one real value in the same class.
@@ -29,7 +29,7 @@ def test_real_formatted_phone_is_kept():
 
 
 def test_millisecond_epoch_is_rejected():
-    # The 15 phantom phones from the euro2c report — all bare ms epochs.
+    # The 15 phantom phones from a past report — all bare ms epochs.
     for junk in ("1499763626209", "1508502157074", "1609250087616",
                  "1609250157453"):
         assert not is_probable_phone(junk), junk
@@ -85,13 +85,13 @@ def test_real_app_parameter_is_kept():
 
 def test_vendor_libraries_flagged():
     for lib in (
-        "https://euro2c.com/wp-content/themes/bridge/js/jquery.stretch.js?ver=5.4.9",
-        "https://euro2c.com/wp-content/themes/bridge/js/TweenLite.min.js",
-        "https://euro2c.com/wp-includes/js/zxcvbn-async.min.js",
+        "https://example.com/wp-content/themes/bridge/js/jquery.stretch.js?ver=5.4.9",
+        "https://example.com/wp-content/themes/bridge/js/TweenLite.min.js",
+        "https://example.com/wp-includes/js/zxcvbn-async.min.js",
     ):
         assert is_vendor_js(lib), lib
 
 
 def test_first_party_js_kept():
-    assert not is_vendor_js("https://euro2c.com/assets/app.bundle.js")
-    assert not is_vendor_js("https://euro2c.com/static/checkout.js")
+    assert not is_vendor_js("https://example.com/assets/app.bundle.js")
+    assert not is_vendor_js("https://example.com/static/checkout.js")
