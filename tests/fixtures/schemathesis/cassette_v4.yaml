@@ -1,0 +1,41 @@
+command: 'st run http://localhost:8101/openapi.json'
+recorded_with: 'Schemathesis 4.32.5'
+seed: 7
+http_interactions:
+- id: 'OK0001'
+  status: 'SUCCESS'
+  generation:
+    time: 0.1
+    mode: positive
+  phase:
+    name: 'coverage'
+  checks:
+    - name: 'not_a_server_error'
+      status: 'SUCCESS'
+  request:
+    uri: 'http://localhost:8101/api/orders/1'
+    method: 'GET'
+    body: {}
+  response:
+    status:
+      code: '200'
+- id: 'FL0001'
+  status: 'FAILURE'
+  generation:
+    time: 0.2
+    mode: negative
+  phase:
+    name: 'stateful'
+  checks:
+    - name: 'negative_data_rejection'
+      status: 'FAILURE'
+      message: 'Schema-violating request accepted'
+  request:
+    uri: 'http://localhost:8101/api/orders/9/pay'
+    method: 'POST'
+    body:
+      encoding: 'utf-8'
+      string: '{"amount": -1000}'
+  response:
+    status:
+      code: '200'

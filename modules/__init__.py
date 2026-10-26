@@ -17,6 +17,7 @@ from .tls_audit import TLSAudit
 from .port_scan_module import PortScan
 from .sitemap import SitemapExploit
 from .rest_api import RestAPIAudit
+from .api_workflows import APIWorkflows
 from .waf_module import WAFMapping
 from .login_enum import LoginEnum
 from .misconfig import MisconfigProbes
@@ -205,6 +206,13 @@ MODULE_REGISTRY = {
         "detectability": "low",
         "depends_on": ["tech_detection"],
         "active": False,
+    },
+    "api_workflows": {
+        "class": APIWorkflows,
+        "stage": 5,
+        "detectability": "high",
+        "depends_on": ["rest_api_audit", "graphql_audit"],
+        "active": True,
     },
     "rest_api_audit": {
         "class": RestAPIAudit,

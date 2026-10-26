@@ -1,3 +1,8 @@
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+markers = [
+    "lab: requires a live lab instance (OSINT_LAB_URL); skipped when unreachable",
+]

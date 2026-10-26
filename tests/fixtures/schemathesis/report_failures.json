@@ -1,0 +1,38 @@
+[
+  {
+    "path": "/api/orders/{order_id}/pay",
+    "method": "POST",
+    "status": "failure",
+    "seed": 42,
+    "interactions": 3,
+    "checks": [
+      {
+        "name": "not_a_server_error",
+        "value": "FAIL",
+        "message": "Internal Server Error: 500 on POST /api/orders/1/pay",
+        "response": {"status_code": 500, "body": "Internal Server Error"},
+        "example": {
+          "path": "/api/orders/1/pay",
+          "method": "POST",
+          "body": {"amount": -1000}
+        }
+      }
+    ]
+  },
+  {
+    "path": "/api/orders",
+    "method": "POST",
+    "status": "failure",
+    "seed": 7,
+    "interactions": 1,
+    "checks": [
+      {
+        "name": "response_schema_conformance",
+        "value": "FAIL",
+        "message": "The received response does not conform to the defined schema",
+        "response": {"status_code": 200, "body": "{\"id\": 1}"},
+        "example": {"path": "/api/orders", "method": "POST", "body": {}}
+      }
+    ]
+  }
+]

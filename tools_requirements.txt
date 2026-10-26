@@ -211,3 +211,6 @@ Minimum tools that should show as available for serious web testing:
 For confirmed browser XSS:
     python3 -c "import playwright.async_api"
     python3 -m playwright install chromium
+
+For stateful API workflow testing (modules/api_workflows, I2):
+    pip install schemathesis    # >= 3.21 (v4 verified); isolated process, optional

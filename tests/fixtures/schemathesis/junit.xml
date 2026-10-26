@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuite name="schemathesis" tests="2" failures="1">
+  <testcase classname="/api/orders/{order_id}/pay POST" name="not_a_server_error">
+    <failure message="500 on POST /api/orders/1/pay">Internal Server Error</failure>
+  </testcase>
+  <testcase classname="/api/health GET" name="positive"/>
+</testsuite>

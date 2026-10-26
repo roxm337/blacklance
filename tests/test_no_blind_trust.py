@@ -57,6 +57,10 @@ ALLOWLIST = {
                       "(choices[0].message.content) from a credential-free "
                       "request",
     "port_scan_module.py": "TCP connect, not HTTP",
+    "api_workflows.py": "status comparisons gate spec-fetch retries (401/403) "
+                        "and cleanup verification; findings come from parsed "
+                        "schemathesis reports plus a configured impact probe, "
+                        "never from a bare 200",
     # The oracle is not the status — it is a before/after comparison, so a 200
     # is a precondition rather than the evidence. Gating these on a catch-all
     # check would be wrong: a SPA shell is a perfectly good baseline for

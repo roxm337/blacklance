@@ -1,0 +1,26 @@
+{
+  "schemathesis_version": "4.32.5",
+  "seed": 7,
+  "exit_code": 1,
+  "failures": [
+    {
+      "type": "AcceptedNegativeData",
+      "code": "ST201",
+      "title": "Schema-violating request accepted",
+      "severity": "medium",
+      "count": 2,
+      "operations": [
+        "POST /api/orders/{order_id}/items",
+        "POST /api/orders/{order_id}/pay"
+      ]
+    },
+    {
+      "type": "UndefinedStatusCode",
+      "code": "ST103",
+      "title": "Undocumented status code",
+      "severity": "low",
+      "count": 1,
+      "operations": ["GET /api/orders/{order_id}"]
+    }
+  ]
+}

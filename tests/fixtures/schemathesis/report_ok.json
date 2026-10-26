@@ -1,0 +1,10 @@
+[
+  {
+    "path": "/api/health",
+    "method": "GET",
+    "status": "success",
+    "seed": 1,
+    "interactions": 1,
+    "checks": []
+  }
+]
