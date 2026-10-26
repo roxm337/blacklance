@@ -85,6 +85,24 @@ def test_skips_without_identities(monkeypatch, tmp_path):
     assert "no verified identities" in module.state.module["skipped"][-1]["reason"]
 
 
+def test_skips_without_playwright_when_no_driver_is_injected(monkeypatch,
+                                                             tmp_path):
+    import builtins
+
+    module, state = _module(tmp_path, cfg={"enabled": True})
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if str(name).startswith("playwright"):
+            raise ImportError("no playwright")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert asyncio.run(module.run()) == "skipped"
+    assert "playwright not installed" in \
+        state.module["skipped"][-1]["reason"]
+
+
 def _epochs(token, natural_path, payloads, altered):
     from urllib.parse import unquote
 
