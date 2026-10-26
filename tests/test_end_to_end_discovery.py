@@ -291,10 +291,10 @@ def test_base_url_preserves_the_port_and_scheme():
     for typed, expected in [
         ("localhost:3000", "http://localhost:3000"),
         ("http://localhost:3000", "http://localhost:3000"),
-        ("https://euro2c.com", "https://euro2c.com"),
+        ("https://example.com", "https://example.com"),
         # A bare hostname stays HTTPS: that is what public targets are, and
         # what this codebase assumed before.
-        ("euro2c.com", "https://euro2c.com"),
+        ("example.com", "https://example.com"),
         ("[::1]:8080", "http://[::1]:8080"),
     ]:
         o = Orchestrator(target=typed, output_dir=tempfile.mkdtemp(),

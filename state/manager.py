@@ -23,8 +23,8 @@ class StateConflictError(RuntimeError):
 def _finding_host(asset_keys) -> str:
     """The host a finding names in its asset keys, or "" if none.
 
-    Asset keys look like "webapp:https://euro2c.com", "url:https://e/x" or
-    "email_domain:euro2c.com". Pull the first host out of them. Many posture
+    Asset keys look like "webapp:https://example.com", "url:https://e/x" or
+    "email_domain:example.com". Pull the first host out of them. Many posture
     findings carry no host-bearing asset; the caller supplies the run's
     primary host as the fallback so that two reports of one class — one
     tagged `webapp:…`, one untagged — still collapse within a single-target

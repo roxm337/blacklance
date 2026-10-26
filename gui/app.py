@@ -770,7 +770,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(target_box)
         form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.target_input = QLineEdit("get-ads.agency")
+        self.target_input = QLineEdit("example.com")
         self.target_input.setPlaceholderText("example.com")
         # Enter in the target field is the classic "just run it" gesture.
         self.target_input.returnPressed.connect(self.start_scan)

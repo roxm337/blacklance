@@ -1,6 +1,6 @@
 """Semantic (vuln-class) finding dedup.
 
-The euro2c run filed the one WordPress user list as three findings with
+One run filed the one WordPress user list as three findings with
 three titles and three severities. These pin that it now collapses to a
 single HIGH finding with the evidence unioned — while proving the guard
 that keeps point-scoped findings (XSS on different params) separate.
@@ -17,7 +17,7 @@ from state.manager import StateManager
 
 
 def _state():
-    return StateManager(str(Path(tempfile.mkdtemp()) / "euro2c.com"))
+    return StateManager(str(Path(tempfile.mkdtemp()) / "example.com"))
 
 
 # ── taxonomy ─────────────────────────────────────────────────────────
@@ -56,12 +56,12 @@ def test_wp_user_enum_trio_collapses_to_one_high():
         title="WordPress Author Enumeration: 4 usernames", severity="LOW",
         confidence="CONFIRMED", category="Information Disclosure",
         description="authors", evidence=["User ID 8 -> laurent"],
-        asset_keys=["webapp:https://euro2c.com"], verified=True)
+        asset_keys=["webapp:https://example.com"], verified=True)
     st.add_finding(
         title="WordPress REST User Enumeration", severity="MEDIUM",
         confidence="CONFIRMED", category="Attack Surface",
         description="rest users", evidence=["Users: alexia_122, studio122"],
-        asset_keys=["webapp:https://euro2c.com"], verified=True)
+        asset_keys=["webapp:https://example.com"], verified=True)
 
     findings = st.findings["findings"]
     assert len(findings) == 1, [f["title"] for f in findings]
@@ -88,8 +88,8 @@ def test_missing_headers_dedupes_across_modules():
     st = _state()
     st.add_finding(title="Missing Security Headers", severity="LOW",
                    confidence="CONFIRMED", category="Hardening Deficiency",
-                   description="h", asset_keys=["webapp:https://euro2c.com"])
-    st.add_finding(title="Missing security headers on euro2c.com",
+                   description="h", asset_keys=["webapp:https://example.com"])
+    st.add_finding(title="Missing security headers on example.com",
                    severity="LOW", confidence="CONFIRMED",
                    category="Hardening Deficiency", description="h",
                    asset_keys=[])
