@@ -513,6 +513,50 @@ modules:
     #      arguments: {id: "9"},
     #      extract: {type: jsonpath, path: "structuredContent.text"}}
 
+  ai_conversation_audit:
+    # I8 remainder: multi-turn conversation isolation. Tests whether one
+    # identity can read or continue another identity's thread, or retrieve
+    # another identity's private document. Only a seeded canary can promote
+    # to PROOF. Target replies are data; instruction-like text is counted
+    # but never stored or acted on.
+    enabled: false
+    max_seconds: 240
+    max_probes: 6
+    probes: []                  # candidate-tier prompt probes
+    canary:
+      enabled: true             # the only path to a verified finding
+      owner_identity: ""
+      forbidden_identity: ""
+      max: 3
+      probes: []
+      # thread:
+      #   create: {method: POST, url_template: "/api/threads",
+      #            body_template: '{"title":"canary thread"}',
+      #            extract_id: {type: jsonpath, path: "id"}}
+      #   post: {method: POST, url_template: "/api/threads/{id}/messages",
+      #          body_template: '{"text":"{run}"}'}
+      #   read: {method: GET, url_template: "/api/threads/{id}",
+      #          extract: {type: jsonpath, path: "messages.0.text"}}
+      #   list: {method: GET, url_template: "/api/threads"}
+      #   continue: {method: POST,
+      #              url_template: "/api/threads/{id}/messages",
+      #              body_template: '{"text":"continue"}'}
+      #   cleanup: {method: DELETE, url_template: "/api/threads/{id}",
+      #             verify: {method: http_get, expect_status: [404, 410]}}
+      # retrieval:
+      #   create: {method: POST, url_template: "/api/documents",
+      #            body_template: '{"text":"{run}"}',
+      #            extract_id: {type: jsonpath, path: "id"}}
+      #   ask: {method: POST, url_template: "/api/ask",
+      #         body_template: '{"query":"{seed}"}',
+      #         extract: {type: jsonpath, path: "answer"}}
+      #   cleanup: {method: DELETE, url_template: "/api/documents/{id}",
+      #             verify: {method: http_get, expect_status: [404, 410]}}
+      # probe spec:
+      #   - {name: thread-read, mode: thread}
+      #   - {name: thread-continue, mode: continue}
+      #   - {name: retrieval-leak, mode: retrieval}
+
   prototype_pollution:
     # Sends a canary property through a JSON body and checks whether it turned
     # up on Object.prototype. Left on: a handful of POSTs, no data harmed, and
