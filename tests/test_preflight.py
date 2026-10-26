@@ -140,3 +140,33 @@ def test_skip_and_block_log_warnings(tmp_path, caplog):
     assert any("nuclei_scan" in m and "skipped" in m for m in warnings)
     assert any("blocked" in m for m in warnings)
     assert sum("nuclei_scan" in m for m in warnings) == 1
+
+
+def test_preflight_warns_on_credential_lifecycle(monkeypatch):
+    monkeypatch.delenv("OSINT_MISSING_TOKEN", raising=False)
+    config = {
+        "tools": {"backend": "local"},
+        "auth": {"identities": [
+            {"name": "expired", "bearer_token": "tok",
+             "expires_at": "2020-01-01T00:00:00Z"},
+            {"name": "revoked", "bearer_token": "tok", "revoked": True},
+            {"name": "missing", "bearer_token": "env:OSINT_MISSING_TOKEN"},
+        ]},
+    }
+    report = preflight(config)
+    joined = "\n".join(report["warnings"])
+    assert "expired" in joined
+    assert "revoked" in joined
+    assert "OSINT_MISSING_TOKEN" in joined
+
+
+def test_preflight_requires_references_when_configured():
+    config = {
+        "tools": {"backend": "local"},
+        "auth": {"require_secret_refs": True,
+                 "identities": [{"name": "literal",
+                                 "bearer_token": "plain-token"}]},
+    }
+    report = preflight(config)
+    assert any("plaintext credential" in warning
+               for warning in report["warnings"])

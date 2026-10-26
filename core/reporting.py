@@ -7,6 +7,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from core.evidence_manifest import write_manifest
 from core.fingerprints import fingerprint as _fingerprint
 from core.fingerprints import finding_url as _finding_url
 from core.history import (annotate, annotate_assets,
@@ -196,6 +197,10 @@ def _write_report_bundle(state: Any, target: str) -> dict:
     atomic_json(paths["regression"], regression(bundle, diff, asset_diff))
     paths["pocs"] = Path(write_pocs(state, target, bundle, output_dir)["dir"])
     save_history(history_path, updated)
+    manifest = write_manifest(
+        state, extra_paths=[*paths.values(), history_path])
+    paths["evidence_manifest"] = Path(manifest["path"])
+    paths["evidence_anchor"] = Path(manifest["anchor"])
     return {key: str(path) for key, path in paths.items()}
 
 

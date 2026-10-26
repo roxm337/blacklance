@@ -6,6 +6,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from core.secrets import SecretError, resolve
+
 load_dotenv()
 
 
@@ -95,7 +97,12 @@ class KeyVault:
         for path in spec.config_paths:
             value = self._config_value(path)
             if value:
-                return str(value).strip()
+                try:
+                    resolved = resolve(str(value).strip())
+                except SecretError:
+                    resolved = ""
+                if resolved:
+                    return resolved
 
         for env_name in spec.env:
             value = os.environ.get(env_name, "").strip()

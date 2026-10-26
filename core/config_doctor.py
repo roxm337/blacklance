@@ -19,6 +19,8 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
      "provider allowlist for agent models; empty = unrestricted"),
     ("llm.data_policy.mode", "standard",
      "standard | redacted | local_only; local_only rejects remote providers"),
+    ("auth.require_secret_refs", False,
+     "require env:/file: credential references instead of plaintext values"),
     ("tools.backend", "local",
      "local uses host binaries, docker runs the toolchain image instead"),
     ("tools.image", "osint-tools:latest",

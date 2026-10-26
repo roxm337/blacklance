@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 from tools.wrappers import curl, get_engine
+from core import secrets as secretrefs
 
 
 # Markers that indicate the request landed back on an unauthenticated page.
@@ -77,6 +78,13 @@ class Identity:
     # sacrificial session to prove tokens die with the session.
     logout_url: str = ""
     logout_method: str = "POST"
+    # R10: credential lifecycle. expires_at is ISO-8601 or epoch seconds;
+    # revoked is an explicit operator kill switch. Resolution errors (a
+    # missing env/file reference) keep the identity unusable rather than
+    # silently falling back to an unauthenticated session.
+    expires_at: Any = ""
+    revoked: bool = False
+    credential_error: str = ""
 
     _PRIVILEGED_ROLES = frozenset({
         "admin", "administrator", "root", "superadmin", "superuser",
@@ -132,6 +140,26 @@ class Identity:
         caller that gets False must not treat this identity as a victim or an
         attacker — the resulting findings would be meaningless.
         """
+        if self.credential_error:
+            self.verified = False
+            self.assumed = False
+            self.verification_note = self.credential_error
+            return False
+        try:
+            lifecycle = secretrefs.credential_state(self.expires_at,
+                                                    self.revoked)
+        except secretrefs.SecretError as exc:
+            self.verified = False
+            self.assumed = False
+            self.verification_note = str(exc)
+            return False
+        if not lifecycle["usable"]:
+            self.verified = False
+            self.assumed = False
+            self.verification_note = (
+                "credential revoked" if lifecycle["revoked"]
+                else f"credential expired at {lifecycle['expires_at']}")
+            return False
         if self.login:
             ok = await self._perform_login(base_url)
             if not ok:
@@ -526,13 +554,29 @@ class AuthHarness:
             name = str(entry.get("name") or "").strip()
             if not name:
                 continue
+            errors: list[str] = []
+
+            def resolved(field: str, value, required: bool = True):
+                try:
+                    return secretrefs.resolve_tree(value, required=required)
+                except secretrefs.SecretError as exc:
+                    errors.append(f"{field}: {exc}")
+                    return value
+
+            bearer = resolved(
+                "bearer_token",
+                str(entry.get("bearer_token") or entry.get("token") or ""))
             identity = Identity(
                 name=name,
-                cookies=_as_str_dict(entry.get("cookies")),
-                headers=_as_str_dict(entry.get("headers")),
-                bearer_token=str(entry.get("bearer_token") or entry.get("token") or ""),
-                basic_auth=_basic_pair(entry.get("basic_auth") or entry.get("basic")),
-                login=entry.get("login") or {},
+                cookies=_as_str_dict(resolved("cookies",
+                                              entry.get("cookies") or {})),
+                headers=_as_str_dict(resolved("headers",
+                                              entry.get("headers") or {})),
+                bearer_token=str(bearer or ""),
+                basic_auth=_basic_pair(resolved(
+                    "basic_auth",
+                    entry.get("basic_auth") or entry.get("basic") or "")),
+                login=resolved("login", entry.get("login") or {}) or {},
                 verify_url=str(entry.get("verify_url") or ""),
                 email=str(entry.get("email") or ""),
                 owner_id=str(entry.get("owner_id") or ""),
@@ -542,6 +586,9 @@ class AuthHarness:
                 role=str(entry.get("role") or ""),
                 logout_url=str(entry.get("logout_url") or ""),
                 logout_method=str(entry.get("logout_method") or "POST").upper(),
+                expires_at=entry.get("expires_at") or entry.get("expires") or "",
+                revoked=bool(entry.get("revoked", False)),
+                credential_error="; ".join(errors),
                 # Earlier documentation put this inside `login`, so both are
                 # honoured. A top-level value wins.
                 success_marker=str(
