@@ -173,7 +173,7 @@ class ChainExecutor:
     """Runs chain edges for real, under a risk ceiling and a budget."""
 
     def __init__(self, state, config: Optional[dict] = None,
-                 budget=None, audit=None,
+                 budget=None, audit=None, operations=None,
                  max_risk: RiskLevel = RiskLevel.DESTRUCTIVE,
                  max_actions: int = 0,
                  module_id: str = "chain_executor"):
@@ -181,6 +181,7 @@ class ChainExecutor:
         self.config = config or {}
         self.budget = budget
         self.audit = audit
+        self.operations = operations
         self.max_risk = max_risk
         self.max_actions = max(0, int(max_actions))
         self.module_id = module_id or "chain_executor"
@@ -451,6 +452,11 @@ class ChainExecutor:
 
     async def _run_one(self, planned: PlannedEdge) -> EdgeOutcome:
         if not risk_allows(planned.risk, self.max_risk):
+            if self.operations is not None:
+                self.operations.refuse(
+                    {"kind": "action", "id": planned.action_id}, "risk_blocked",
+                    f"{planned.action_id} is {planned.risk}, above the "
+                    f"{self.max_risk.value} ceiling", target=planned.url)
             return EdgeOutcome(
                 edge=planned.edge, action_id=planned.action_id,
                 status="blocked_risk",
@@ -459,6 +465,10 @@ class ChainExecutor:
             )
 
         if self.budget is not None and not self.budget.check():
+            if self.operations is not None:
+                self.operations.refuse(
+                    {"kind": "action", "id": planned.action_id},
+                    "budget_exhausted", "budget exhausted", target=planned.url)
             return EdgeOutcome(
                 edge=planned.edge, action_id=planned.action_id,
                 status="skipped", detail="budget exhausted",
@@ -475,6 +485,8 @@ class ChainExecutor:
         ctx.meta = entry[0] if entry else None
         if self.audit is not None:
             ctx.audit = self.audit
+        if self.operations is not None:
+            ctx.operations = self.operations
 
         if self.budget is not None:
             try:
@@ -484,6 +496,11 @@ class ChainExecutor:
                 else:
                     self.budget.record_action()
             except Exception as exc:
+                if self.operations is not None:
+                    self.operations.refuse(
+                        {"kind": "action", "id": planned.action_id},
+                        "action_budget_exhausted", str(exc) or "action budget exhausted",
+                        target=planned.url)
                 return EdgeOutcome(
                     edge=planned.edge, action_id=planned.action_id,
                     status="skipped", detail=str(exc) or "action budget exhausted",

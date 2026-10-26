@@ -21,6 +21,8 @@ from tools.external import configure_tool_backend, configure_tool_budget
 from core.attack_graph import AttackGraph, AttackPath
 from core.surface import seed_surface
 from core.budget_manager import BudgetManager, BudgetExceededError
+from core.results import (Outcome, ResultKind, reset_op_context,
+                          set_op_context)
 from actions import ActionRegistry, ActionContext, list_actions
 from actions.registry import ActionMeta, RiskLevel
 from core.verification_oracle import configure_oob
@@ -206,6 +208,16 @@ class Orchestrator:
         from core.audit_log import AuditLog
         self.audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
         self.state.audit = self.audit
+        from core.results import OperationsLedger, configure_wire_recorder
+        self.operations = OperationsLedger(
+            self.state.state_dir / "operations.jsonl")
+        # Transport hooks report wire accounting into the ledger, attributed
+        # to whichever operation the calling context is bound to.
+        configure_wire_recorder(self.operations.note_accounting)
+        from core.mutations import MutationLedger
+        self.mutations = MutationLedger(
+            self.state.state_dir / "mutations.jsonl")
+        self.state._mutations = self.mutations
         # A resumed assessment retains its counters. Fresh/retest cannot be
         # turned into budget resume by an old operator-local configuration.
         self.config.setdefault("budget_limits", {})["resume"] = self.run_mode == "resume"
@@ -238,6 +250,7 @@ class Orchestrator:
             return
         self._closed = True
         audit = getattr(self, "_audit", None)
+        operations = getattr(self, "operations", None)
         lease = getattr(self, "_assessment_lease", None)
         try:
             budget = getattr(self, "budget", None)
@@ -248,6 +261,8 @@ class Orchestrator:
                 if audit is not None:
                     audit.close()
             finally:
+                if operations is not None:
+                    operations.close()
                 if lease is not None:
                     lease.close()
 
@@ -358,6 +373,10 @@ class Orchestrator:
             if self.state.is_module_complete(module_id):
                 print(f"  ⏭ {module_id}: already complete, skipping "
                       f"(use a fresh assessment or retest to run again)")
+                self.operations.refuse(
+                    {"kind": "module", "id": module_id}, "already_complete",
+                    "module already complete in this assessment",
+                    target=self._safe_base_url())
                 continue
 
             entry = MODULE_REGISTRY.get(module_id)
@@ -369,6 +388,9 @@ class Orchestrator:
             if entry.get("active") and self.mode != "active":
                 self.state.skip_module(
                     module_id, "active module requires --active")
+                self.operations.refuse(
+                    {"kind": "module", "id": module_id}, "active_gated",
+                    "active module requires --active", target=self._safe_base_url())
                 continue
 
             # Check dependencies
@@ -441,12 +463,24 @@ class Orchestrator:
                 module_id = decision.split(":", 1)[1].strip()
                 if module_id not in MODULE_REGISTRY:
                     logger.info(f"  LLM requested unknown module: {module_id}")
+                    self.operations.refuse(
+                        {"kind": "module", "id": module_id}, "unknown_module",
+                        "LLM requested an unregistered module",
+                        target=self._safe_base_url())
                     continue
                 if MODULE_REGISTRY[module_id].get("active") and not self.config.get("target", {}).get("active", False):
                     self.state.skip_module(module_id, "active module requires --active")
+                    self.operations.refuse(
+                        {"kind": "module", "id": module_id}, "active_gated",
+                        "active module requires --active",
+                        target=self._safe_base_url())
                     continue
                 if self.state.is_module_complete(module_id):
                     logger.info(f"  {module_id} already complete, skipping.")
+                    self.operations.refuse(
+                        {"kind": "module", "id": module_id}, "already_complete",
+                        "module already complete in this assessment",
+                        target=self._safe_base_url())
                     continue
                 await self._run_module(module_id)
 
@@ -670,7 +704,7 @@ class Orchestrator:
         ceiling = RiskLevel(str(self.max_risk).upper())
         executor = ChainExecutor(
             self.state, self.config, budget=self.budget,
-            audit=self.audit,
+            audit=self.audit, operations=self.operations,
             max_risk=ceiling, max_actions=self.max_actions,
         )
         print(f"  Executing chains (risk ceiling: {ceiling.value}, "
@@ -739,6 +773,9 @@ class Orchestrator:
         if not entry:
             print(f"Unknown module: {module_id}")
             print(f"Available: {', '.join(MODULE_REGISTRY.keys())}")
+            self.operations.refuse(
+                {"kind": "module", "id": module_id}, "unknown_module",
+                "no such registered module", target=self._safe_base_url())
             return
         await self._run_module(module_id)
 
@@ -748,6 +785,26 @@ class Orchestrator:
                    if e.get("module_id") == module_id]
         return entries[-1].get("reason", "") if entries else ""
 
+    def _budget_snapshot(self) -> dict:
+        """Engagement counter snapshot for op terminal rows."""
+        b = getattr(self, "budget", None)
+        if b is None:
+            return {}
+        s = b.state
+        return {
+            "requests_used": s.requests_used,
+            "external_commands_used": s.external_commands_used,
+            "llm_calls_used": s.llm_calls_used,
+            "actions_used": s.actions_used,
+        }
+
+    def _safe_base_url(self) -> str:
+        """base_url without raising on partially constructed instances."""
+        try:
+            return self.base_url
+        except Exception:
+            return ""
+
     async def _run_module(self, module_id: str):
         """Internal: instantiate and run a module."""
         self._require_open()
@@ -755,6 +812,14 @@ class Orchestrator:
             from core.audit_log import AuditLog
             self.audit = AuditLog(self.state.state_dir / "engagement.audit.jsonl")
             self.state.audit = self.audit
+        if getattr(self, "operations", None) is None:
+            from core.results import OperationsLedger
+            state_dir = getattr(self.state, "state_dir", None)
+            if state_dir is None:
+                import tempfile
+                state_dir = Path(tempfile.mkdtemp(prefix="osint-ops-"))
+            self.operations = OperationsLedger(
+                Path(state_dir) / "operations.jsonl")
         # Seed once per process, whichever entry point got us here. `--module`
         # skips `run_all`, so without this a single-module invocation never
         # sees the object references the seeder derives from the bundle.
@@ -773,6 +838,10 @@ class Orchestrator:
             stage=entry.get("stage", 0),
         )
         self.audit.record("module.start", {"module_id": module_id, "run_id": run_id})
+        op = self.operations.start(
+            {"kind": "module", "id": module_id},
+            transport="module", target=self._safe_base_url())
+        op_token = set_op_context(op)
 
         print(f"\n[{module.stage}] {module.name} ({module_id})")
         print(f"  Detectability: {entry['detectability']}")
@@ -805,18 +874,32 @@ class Orchestrator:
 
             if result == "done":
                 print(f"  ✓ Complete")
+                op.finish(Outcome.COMPLETED, ResultKind.OBSERVATION,
+                          budget_reserved=self._budget_snapshot())
             elif result == "skipped":
                 reason = self._last_module_reason(module_id, "skipped")
                 print(f"  — Skipped: {reason}" if reason else "  — Skipped")
+                op.finish(Outcome.COMPLETED, ResultKind.UNSUPPORTED,
+                          error={"code": "module_skipped",
+                                 "message": reason or "no reason recorded"},
+                          budget_reserved=self._budget_snapshot())
             elif result == "blocked":
                 reason = self._last_module_reason(module_id, "blocked")
                 print(f"  ✗ Blocked: {reason}" if reason else "  ✗ Blocked")
+                op.finish(Outcome.FAILED, ResultKind.ERROR,
+                          error={"code": "module_blocked",
+                                 "message": reason or "no reason recorded"},
+                          budget_reserved=self._budget_snapshot())
             self.state.finish_module_run(run_id, result or "unknown")
         except asyncio.TimeoutError:
             # Say the coverage is partial. A timeout recorded as "done" or
             # silently dropped both understate the gap in the same direction.
             print(f"  ⏱ Timed out after {deadline:.0f}s — coverage from this "
                   f"module is incomplete")
+            op.finish(Outcome.TIMED_OUT, ResultKind.ERROR,
+                      error={"code": "timeout",
+                             "message": f"exceeded {deadline:.0f}s module deadline"},
+                      budget_reserved=self._budget_snapshot())
             self.state.finish_module_run(
                 run_id, "timeout",
                 f"exceeded {deadline:.0f}s module deadline")
@@ -827,18 +910,50 @@ class Orchestrator:
             # let the run loop halt cleanly on its next budget check instead
             # of every remaining module raising the same error in turn.
             print(f"  ⏹ Budget reached — stopping with partial coverage: {e}")
+            op.finish(Outcome.FAILED, ResultKind.ERROR,
+                      error={"code": "budget_exceeded", "message": str(e)},
+                      budget_reserved=self._budget_snapshot())
             self.state.finish_module_run(run_id, "stopped", str(e))
         except asyncio.CancelledError:
+            op.finish(Outcome.CANCELLED, ResultKind.ERROR,
+                      error={"code": "cancelled",
+                             "message": "execution cancelled"},
+                      budget_reserved=self._budget_snapshot())
             self.state.finish_module_run(run_id, "cancelled", "execution cancelled")
             raise
         except Exception as e:
             print(f"  ✗ Error: {e}")
             import traceback
             traceback.print_exc()
+            op.finish(Outcome.FAILED, ResultKind.ERROR,
+                      error={"code": "module_error", "message": str(e)},
+                      budget_reserved=self._budget_snapshot())
             self.state.block_module(module_id, str(e))
             self.state.finish_module_run(run_id, "error", str(e))
         finally:
+            if not op.is_finished:
+                op.finish(Outcome.FAILED, ResultKind.ERROR,
+                          error={"code": "unhandled_termination",
+                                 "message": "module run terminated without a typed result"},
+                          budget_reserved=self._budget_snapshot())
+            reset_op_context(op_token)
             clear_deadline()
+            terminal = getattr(op, "_terminal_row", None)
+            annotate = getattr(self.state, "annotate_module_run", None)
+            audit_operation = getattr(self.audit, "operation", None)
+            if terminal is not None:
+                if annotate is not None:
+                    annotate(run_id, terminal)
+                if audit_operation is not None:
+                    audit_operation({
+                        "op_id": terminal.get("op_id"),
+                        "caller": terminal.get("caller"),
+                        "outcome": terminal.get("outcome"),
+                        "result_kind": terminal.get("result_kind"),
+                        "accounting": terminal.get("accounting"),
+                        "evidence_refs": terminal.get("evidence_refs"),
+                        "error": terminal.get("error"),
+                    })
             self.audit.record("module.end", {
                 "module_id": module_id, "run_id": run_id,
                 "run": next((run for run in self.state.module.get("runs", [])

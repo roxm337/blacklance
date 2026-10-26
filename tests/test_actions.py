@@ -81,3 +81,60 @@ def test_risk_level_enum():
     assert RiskLevel.SAFE.value == "SAFE"
     assert RiskLevel.DESTRUCTIVE.value == "DESTRUCTIVE"
     assert RiskLevel.MEDIUM.value == "MEDIUM"
+
+
+def test_execute_with_operations_records_terminal_op(tmp_path):
+    """R7: action runs get one started + one terminal row in the ledger."""
+    import asyncio
+    from core.results import OperationsLedger
+
+    @action(
+        id="test.ping.op",
+        risk="SAFE",
+        detectability="low",
+        requires=["host"],
+        produces="PingResult",
+        category="test",
+    )
+    async def ping_op(ctx):
+        return ActionResult(True, data={"host": ctx.params["host"]})
+
+    ledger = OperationsLedger(tmp_path / "operations.jsonl")
+    ctx = ActionContext(
+        action_id="test.ping.op",
+        params={"host": "test.com"},
+        target="test.com",
+        operations=ledger,
+    )
+    result = asyncio.run(ActionRegistry.execute("test.ping.op", ctx))
+    assert result.success is True
+    records = ledger.read_records()
+    assert len(records) == 2
+    assert records[0]["outcome"] == "started"
+    assert records[1]["outcome"] == "completed"
+    assert records[1]["result_kind"] == "observation"
+    assert records[1]["caller"] == {"kind": "action", "id": "test.ping.op"}
+
+
+def test_execute_refusals_are_recorded(tmp_path):
+    """Unknown actions and missing params become refused ops."""
+    from core.results import OperationsLedger
+
+    ledger = OperationsLedger(tmp_path / "operations.jsonl")
+    ctx = ActionContext(
+        action_id="nope.missing",
+        params={},
+        target="test.com",
+        operations=ledger,
+    )
+    result = asyncio_run(ActionRegistry.execute("nope.missing", ctx))
+    assert result.success is False
+    rows = [r for r in ledger.read_records() if r["phase"] == "terminal"]
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "refused"
+    assert rows[0]["error"]["code"] == "unknown_action"
+
+
+def asyncio_run(coro):
+    import asyncio
+    return asyncio.run(coro)

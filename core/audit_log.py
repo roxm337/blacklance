@@ -23,8 +23,9 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from core.validators import redact_for_log
 from core.persistence import file_lock
+from core.redaction import sanitize as _sanitize
+from core.redaction import truncate as _truncate
 
 
 class AuditLogError(Exception):
@@ -233,6 +234,10 @@ class AuditLog:
     def budget(self, summary: dict) -> int:
         return self.record("budget", summary)
 
+    def operation(self, op: dict) -> int:
+        """Typed event for a terminal operation result (see core/results.py)."""
+        return self.record("operation.result", op)
+
 
 _ZERO_HASH = "0" * 64
 
@@ -240,43 +245,3 @@ _ZERO_HASH = "0" * 64
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
-
-
-_SENSITIVE_KEYS = {
-    "password", "passwd", "secret", "token", "api_key", "apikey",
-    "access_token", "refresh_token", "auth_token", "private_key",
-    "cookie", "authorization", "auth", "bearer", "session",
-    "sessionid", "session_id", "client_secret", "credential",
-}
-
-
-def _sensitive_key(key: Any) -> bool:
-    normalized = str(key).strip().lower().replace("-", "_")
-    if normalized in _SENSITIVE_KEYS:
-        return True
-    return normalized.endswith(("_password", "_secret", "_token", "_cookie",
-                                "_credential", "_api_key"))
-
-
-def _sanitize(value: Any) -> Any:
-    """Recursively redact keyed secrets and credentials embedded in strings."""
-    if isinstance(value, dict):
-        return {
-            str(key): ("<redacted>" if _sensitive_key(key) and item
-                       else _sanitize(item))
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [_sanitize(item) for item in value]
-    if isinstance(value, str):
-        return redact_for_log(value)
-    return value
-
-
-def _truncate(obj: Any, max_len: int = 2000) -> Any:
-    if isinstance(obj, dict):
-        return {k: _truncate(v, max_len) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_truncate(v, max_len) for v in obj][:20]
-    text = str(obj)
-    return text[:max_len] if len(text) > max_len else text

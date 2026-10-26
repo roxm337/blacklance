@@ -551,6 +551,37 @@ class StateManager:
         self.module["current"] = None
         self._dirty = True
 
+    @property
+    def mutations(self):
+        """Per-assessment mutation ledger (R8), created on first use.
+
+        The orchestrator shares its instance by assigning ``_mutations``
+        before any module runs; standalone module tests get a fresh ledger
+        in the same state dir.
+        """
+        ledger = getattr(self, "_mutations", None)
+        if ledger is None:
+            from core.mutations import MutationLedger
+            ledger = MutationLedger(self.state_dir / "mutations.jsonl")
+            self._mutations = ledger
+        return ledger
+
+    def annotate_module_run(self, run_id: str, op_row: Optional[dict] = None):
+        """Merge operations-ledger accounting into a finished run record."""
+        if not op_row:
+            return
+        accounting = op_row.get("accounting") or {}
+        for run in reversed(self.module.get("runs", [])):
+            if run.get("id") == run_id:
+                run["op_id"] = op_row.get("op_id")
+                run["outcome"] = op_row.get("outcome")
+                run["commands"] = accounting.get("commands", 0)
+                run["wall_ms"] = accounting.get("wall_ms", 0)
+                run["containers_removed"] = accounting.get(
+                    "containers_removed", 0)
+                break
+        self._dirty = True
+
     def recover_interrupted_runs(self) -> list[str]:
         """Called only after an executor acquires a resumed assessment's lease."""
         unfinished = [run["id"] for run in self.module.get("runs", [])

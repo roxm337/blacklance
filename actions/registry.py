@@ -49,6 +49,7 @@ class ActionContext:
     timeout: int = 120
     meta: Optional[ActionMeta] = None
     audit: Optional[Any] = None
+    operations: Optional[Any] = None
     _start_time: float = 0.0
 
     @property
@@ -100,6 +101,10 @@ class ActionRegistry:
     async def execute(cls, action_id: str, ctx: ActionContext) -> ActionResult:
         entry = cls.get(action_id)
         if not entry:
+            if ctx.operations is not None:
+                ctx.operations.refuse(
+                    {"kind": "action", "id": action_id}, "unknown_action",
+                    f"unknown action: {action_id}", target=ctx.target)
             return ActionResult(False, error=f"unknown action: {action_id}")
 
         meta, fn = entry
@@ -107,7 +112,27 @@ class ActionRegistry:
         # Validate required params
         for req in meta.requires:
             if req not in ctx.params:
+                if ctx.operations is not None:
+                    ctx.operations.refuse(
+                        {"kind": "action", "id": action_id}, "missing_param",
+                        f"missing required param: {req}", target=ctx.target)
                 return ActionResult(False, error=f"missing required param: {req}")
+
+        op = None
+        op_token = None
+        if ctx.operations is not None:
+            from core.results import (Outcome, ResultKind, reset_op_context,
+                                      set_op_context)
+            op = ctx.operations.start(
+                {"kind": "action", "id": action_id},
+                transport="action", target=ctx.target,
+                provenance={"risk": meta.risk.value})
+            op_token = set_op_context(op)
+
+        def _kind(result: ActionResult) -> "ResultKind":
+            if not result.success:
+                return ResultKind.ERROR
+            return ResultKind(meta.result_kind)
 
         # Execute with timeout
         ctx._start_time = time.time()
@@ -125,24 +150,39 @@ class ActionRegistry:
             if ctx.audit:
                 ctx.audit.action(action_id, ctx.target, ctx.params,
                                  risk=meta.risk.value, result=_result_brief(result))
+            if op is not None:
+                op.finish(Outcome.COMPLETED, _kind(result))
             return result
         except asyncio.TimeoutError:
             failed = ActionResult(False, error=f"timeout after {meta.timeout}s")
             if ctx.audit:
                 ctx.audit.action(action_id, ctx.target, ctx.params,
                                  risk=meta.risk.value, result=_result_brief(failed))
+            if op is not None:
+                op.finish(Outcome.TIMED_OUT, ResultKind.ERROR,
+                          error={"code": "timeout", "message": failed.error})
             return failed
         except asyncio.CancelledError:
             if ctx.audit:
                 ctx.audit.record("action.cancelled", {"action_id": action_id,
                                                       "target": ctx.target})
+            if op is not None:
+                op.finish(Outcome.CANCELLED, ResultKind.ERROR,
+                          error={"code": "cancelled",
+                                 "message": "action cancelled"})
             raise
         except Exception as e:
             failed = ActionResult(False, error=str(e))
             if ctx.audit:
                 ctx.audit.action(action_id, ctx.target, ctx.params,
                                  risk=meta.risk.value, result=_result_brief(failed))
+            if op is not None:
+                op.finish(Outcome.FAILED, ResultKind.ERROR,
+                          error={"code": "action_error", "message": str(e)})
             return failed
+        finally:
+            if op_token is not None:
+                reset_op_context(op_token)
 
     @classmethod
     def size(cls) -> int:

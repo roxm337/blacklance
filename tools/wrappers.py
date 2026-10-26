@@ -15,6 +15,7 @@ from urllib.parse import quote, urlencode, urljoin
 from core.deadline import clamp_timeout, deadline_reached
 from core.http_credentials import (configured_origin, credential_header_names,
                                    origin, without_credentials)
+from core.results import note_wire
 from tools import http_engine as _http_engine_mod
 from tools.http_engine import HttpEngine
 from tools.external import (consume_tool_budget, docker_wrap_shell,
@@ -290,6 +291,7 @@ async def bash(command: str, timeout: int = 120) -> dict:
                 "error": "deadline_exceeded"}
     timeout = clamp_timeout(timeout)
     consume_tool_budget()
+    note_wire({"transport": "subprocess", "commands": 1})
     command = docker_wrap_shell(command)
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -389,6 +391,7 @@ async def _curl_subprocess(url: str, method: str = "GET",
             _consume_http_budget()
             if _request_observer:
                 _request_observer()
+            note_wire({"transport": "subprocess", "requests": 1})
             final = await _curl_subprocess(
                 destination, next_method, None, next_data, http1_0, output, True, timeout,
                 next_headers, identity, use_cookies and same_origin, _redirects_remaining - 1)
@@ -520,6 +523,7 @@ async def curl(url: str, method: str = "GET",
             _request_observer()
         except Exception:
             pass
+    note_wire({"transport": "http", "requests": 1})
 
     if strip_global_auth:
         merged_headers = {str(k): v for k, v in (headers or {}).items()
