@@ -18,6 +18,7 @@ from .port_scan_module import PortScan
 from .sitemap import SitemapExploit
 from .rest_api import RestAPIAudit
 from .api_workflows import APIWorkflows
+from .cspt_audit import CSPTAudit
 from .waf_module import WAFMapping
 from .login_enum import LoginEnum
 from .misconfig import MisconfigProbes
@@ -205,6 +206,13 @@ MODULE_REGISTRY = {
         "stage": 4,
         "detectability": "low",
         "depends_on": ["tech_detection"],
+        "active": False,
+    },
+    "cspt_audit": {
+        "class": CSPTAudit,
+        "stage": 4,
+        "detectability": "medium",
+        "depends_on": ["browser_crawl"],
         "active": False,
     },
     "api_workflows": {

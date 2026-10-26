@@ -355,6 +355,30 @@ modules:
       #   - query: "{ user(id: \"{id}\") { id email } }"
       canaries: {max: 2, specs: []}
 
+  cspt_audit:
+    # I4: client-side path traversal. Drives a real browser with canary
+    # tokens injected into URL-borne inputs and watches XHR/fetch paths
+    # for resolved escapes. Traversal strings alone are never findings;
+    # only a configured impact probe (or canary) can confirm access.
+    enabled: false
+    max_targets: 3
+    max_payloads: 6
+    wait_ms: 1200
+    # Where the canary value is injected: query/fragment by default.
+    inject_points: ["query", "fragment"]
+    inject_names: []            # parameter names; defaults r/path/file/url
+    canary_route:
+      # Explicit sibling endpoints the traversal may reach.
+      sibling_paths: []
+      # Segments guessed from discovered endpoints when none are listed.
+      hint_segments: ["admin", "internal", "secrets", "users", "export"]
+    impact_probe:
+      enabled: true
+      # The only path to a verified finding: replay the altered URL and
+      # require this value, which the natural request does not return.
+      expect: {}                # {"type": "jsonpath", "path": "secret"}
+      equals: ""
+
   prototype_pollution:
     # Sends a canary property through a JSON body and checks whether it turned
     # up on Object.prototype. Left on: a handful of POSTs, no data harmed, and
