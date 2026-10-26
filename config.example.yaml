@@ -177,6 +177,32 @@ modules:
     # Ceiling on cross-account probes per endpoint template.
     max_probes_per_template: 0
 
+    # I3 authorization matrix: identity × operation × object × field
+    # differential checks over the discovered templates. Opt-in — legacy
+    # behaviour is unchanged while disabled. Reads only; the only writes
+    # are configured canaries, always R8-recorded with verified cleanup.
+    matrix:
+      enabled: false
+      max_cells: 200
+      sharing: []            # objects both identities must still read
+      freshness: {enabled: true}
+      revocation: {enabled: true}   # uses auth.identities.<name>.logout_url
+      canaries:              # the ONLY path to verified (PROOF) findings
+        max: 3
+        specs: []
+      #   specs:
+      #     - name: "invoice-read"
+      #       owner_identity: user_b
+      #       forbidden_identity: user_a
+      #       create: {method: POST, url_template: "/api/invoices",
+      #                body_template: '{"note": "osint-canary-{run}"}',
+      #                extract_id: {type: "jsonpath", path: "id"}}
+      #       read_probe: {url_template: "/api/invoices/{id}",
+      #                    extract: {type: "jsonpath", path: "note"},
+      #                    expect: {op: "eq", value: "osint-canary-{run}"}}
+      #       cleanup: {method: DELETE, url_template: "/api/invoices/{id}",
+      #                 verify: {method: "http_get", expect_status: [404]}}
+
     # Ownership for object shapes that have no listing endpoint — a basket,
     # a cart, an order fetched by id. Ownership normally comes from comparing
     # two accounts' views of a collection, so an endpoint nobody lists never
@@ -268,6 +294,66 @@ modules:
     # that binds arbitrary fields is almost always doing a partial update, so
     # the reset has to name the field — omitting it would leave the probe in.
     probe_type: bool   # bool | int | string
+
+  api_workflows:
+    # Stateful API workflow testing (schemathesis, isolated subprocess).
+    # Consumes OpenAPI/GraphQL schema assets discovered by rest_api_audit /
+    # graphql_audit. Off unless you turn it on: the fuzzer writes to the
+    # target and its runs are recorded in the mutation ledger (R8).
+    enabled: false
+
+    # Linked-operation sequences via the schema's x-links; "none" for
+    # single-operation fuzzing only.
+    stateful: "links"      # links | none
+    max_cases: 100         # max generated cases per operation
+    request_timeout: 10    # seconds per request
+    max_schemas: 3         # most endpoint-rich schemas first
+    max_seconds: 480       # per-schema wall budget
+    max_findings_per_schema: 5
+
+    # Identity NAMES (references, never secrets) whose live session headers
+    # are handed to the tool via a 0600 config file.
+    identities: []
+
+    # Restrict fuzzed methods. Empty = all.
+    methods: []
+    #   - "GET"
+    #   - "POST"
+
+    # Impact probe: the ONLY path to a verified (PROOF) finding. After the
+    # fuzzer reports a failing case, the module re-reads this template with
+    # path params bound from the failing case and requires the extracted
+    # value to meet the expectation (e.g. total < 0).
+    impact_probe: null
+    #   url_template: "/api/orders/{order_id}"
+    #   extract: {type: "jsonpath", path: "total"}
+    #   expect: {op: "lt", value: 0}    # eq | lt | gt | contains
+
+    # R8 cleanup of fuzzer-created resources; verified by re-read. Without
+    # it the ledger honestly records not_required (operator owns recovery).
+    cleanup: null
+    #   method: "DELETE"
+    #   url_template: "/api/orders/{order_id}"
+    #   verify: {method: "http_get", expect_status: [404]}
+
+  bfla_audit:
+    # I3: cross-identity pass over open collections. Opt-in; the anonymous
+    # pass above is unchanged. Each verified identity re-reads every open
+    # collection; records attributable to another identity are leaks.
+    matrix:
+      enabled: false
+
+  graphql_audit:
+    # I3: field-level authorization probes across verified identities.
+    # Opt-in; existing introspection/alias/field-suggestion audits are
+    # unchanged. field_probes run as every verified identity and differing
+    # scalar leaves become candidate findings; canaries are the proof path.
+    matrix:
+      enabled: false
+      max_queries: 10
+      field_probes: []
+      #   - query: "{ user(id: \"{id}\") { id email } }"
+      canaries: {max: 2, specs: []}
 
   prototype_pollution:
     # Sends a canary property through a JSON body and checks whether it turned
@@ -599,6 +685,10 @@ crawl:
     depth: 1                     # link-following depth, same-origin only (cap 3)
     max_identities: 2            # verified identities rendered (cap 5)
     wait_ms: 1500
+    # I1: persist redacted XHR/fetch traffic (state/traffic.jsonl) with
+    # identity provenance for later workflow replay. Off by default;
+    # browser requests are budget-counted post-hoc when enabled.
+    capture_traffic: false
 
 scoring:
   weights:
