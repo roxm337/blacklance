@@ -573,6 +573,29 @@ modules:
       #   - {name: thread-continue, mode: continue}
       #   - {name: retrieval-leak, mode: retrieval}
 
+  pyrit_audit:
+    # I8: optional PyRIT red-team pass. Requires an operator-provided PyRIT
+    # interpreter or runner; nothing is installed or credentialed by default.
+    # Judge scores and prompt compliance cap at CANDIDATE; a seeded canary in
+    # an assistant reply or tool-call argument is the only PROOF path.
+    enabled: false
+    timeout: 240
+    max_attacks: 3
+    max_prompts: 12
+    max_turns: 6
+    score_threshold: 0.7
+    canaries: []                # private markers seeded in target context
+    attacks: []                 # [{name, strategy, prompts: [...]}]
+    runner:
+      python: ""                # env:PYRIT_PYTHON or an interpreter path
+      command: []               # optional [{config}/{output} placeholders]
+      min_version: ""
+    target:
+      endpoint: ""              # OpenAI-compatible chat endpoint
+      model: ""
+      provider: ""
+      api_key_ref: ""           # env:/file: reference, never the value
+
   prototype_pollution:
     # Sends a canary property through a JSON body and checks whether it turned
     # up on Object.prototype. Left on: a handful of POSTs, no data harmed, and
