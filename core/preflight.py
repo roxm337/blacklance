@@ -146,6 +146,21 @@ def coverage_lines(state) -> list[str]:
         lines.append(f"WAF detected: vendor={waf.get('vendor', 'unknown')}, "
                      f"blocks={len(waf.get('blocks', []))}")
 
+    mutations = getattr(state, "mutations", None)
+    if mutations is not None:
+        try:
+            outstanding = mutations.outstanding()
+        except Exception:
+            outstanding = []
+        if outstanding:
+            lines.append(f"Outstanding cleanup: {len(outstanding)} mutation(s) "
+                         f"not yet verified (see state/mutations.jsonl)")
+            for record in outstanding[:5]:
+                lines.append(
+                    f"  ⚠ {record.get('module_id')} on "
+                    f"{record.get('identity') or 'unknown identity'}: "
+                    f"{record.get('mutation_kind')} cleanup outstanding")
+
     llm_used = getattr(state, "llm_calls_used", 0)
     if llm_used:
         lines.append(f"LLM calls used: {llm_used}")

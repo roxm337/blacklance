@@ -11,6 +11,7 @@ OOB callback, never to /etc/passwd; nothing executes on the target.
 import re
 import secrets
 
+from core.mutations import OwnedObject
 from core.probe_targets import iter_probe_points
 from modules.base import BaseModule
 from tools.wrappers import curl
@@ -247,22 +248,64 @@ class UploadAudit(BaseModule):
         return filed
 
     async def _cleanup_uploads(self, locations: list) -> None:
-        """Best-effort DELETE of probe artifacts. Servers without a delete
-        route answer 404/405 and the files stay — logged either way, so
-        the operator knows what litter, if any, is left behind."""
+        """Best-effort DELETE of probe artifacts, then re-check they are gone.
+
+        Servers without a delete route answer 404/405 and the files stay —
+        logged either way, so the operator knows what litter, if any, is
+        left behind. Each artifact is recorded in the mutation ledger (R8)
+        before the DELETE leaves, and cleanup is only marked verified after
+        a fresh GET confirms the location no longer serves the artifact.
+        """
         for location in dict.fromkeys(locations):
+            mut_id = None
+            try:
+                mut_id = self.state.mutations.begin(
+                    self.id, "upload",
+                    {"url": location, "method": "DELETE"},
+                    owned_objects=[OwnedObject(
+                        type="upload", identifier=location)])
+            except Exception:
+                pass
             try:
                 result = await curl(location, method="DELETE",
                                     output="status", timeout=10)
                 status = result.get("status", 0)
             except Exception as exc:
                 self.log(f"  cleanup {location}: request failed ({exc})")
+                self._record_upload_cleanup(mut_id, location, gone=False,
+                                            note=str(exc))
                 continue
-            if status in (200, 201, 202, 204):
-                self.log(f"  cleanup {location}: deleted (HTTP {status})")
+            gone = status in (200, 201, 202, 204)
+            if gone:
+                # Honest verification: deletion succeeded, now confirm the
+                # location no longer serves the artifact.
+                check = await self._fetch_text(location)
+                gone = check == ""
+            if gone:
+                self.log(f"  cleanup {location}: deleted and re-checked")
             else:
                 self.log(f"  cleanup {location}: left in place "
                          f"(HTTP {status or 'no response'})")
+            self._record_upload_cleanup(mut_id, location, gone=gone,
+                                        note=f"HTTP {status}")
+
+    def _record_upload_cleanup(self, mut_id, location: str, *, gone: bool,
+                               note: str = ""):
+        if not mut_id:
+            return
+        try:
+            verification = {"method": "http_get", "location": location,
+                            "note": note}
+            self.state.mutations.record_rollback(
+                mut_id, "verified" if gone else "failed",
+                verification=verification)
+            if gone:
+                self.state.mutations.verify_cleanup(mut_id, verification)
+            else:
+                self.state.mutations.mark_failed(
+                    mut_id, f"artifact still served at {location} ({note})")
+        except Exception:
+            pass
 
     async def _multipart(self, url: str, filename: str, content: bytes,
                          content_type: str) -> str:

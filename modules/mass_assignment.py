@@ -17,6 +17,7 @@ Two things keep it honest:
 import json
 
 from core.auth_harness import AuthHarness, Identity
+from core.mutations import OwnedObject
 from modules.base import BaseModule
 
 
@@ -83,6 +84,7 @@ class MassAssignment(BaseModule):
             return "skipped"
 
         harness = AuthHarness(self.config)
+        harness.mutations = self.state.mutations
         harness.adopt_discovered(self.state, log=self.log)
         identities = await harness.establish_all(self._base_url())
         if not identities:
@@ -119,9 +121,60 @@ class MassAssignment(BaseModule):
         for finding in findings:
             self.state.add_finding(**finding)
 
+        await self._retry_outstanding(harness, write_url, method)
+
         self.state.complete_module(self.id)
         self.log(f"mass assignment: {len(findings)} writable field(s)")
         return "done"
+
+    async def _retry_outstanding(self, harness: AuthHarness, write_url: str,
+                                 method: str):
+        """Resume path: re-attempt cleanup recorded but never verified.
+
+        Only rows this module owns are retried; a retry only ever writes the
+        neutral value and never re-applies the probe.
+        """
+        try:
+            outstanding = self.state.mutations.outstanding()
+        except Exception:
+            self.log("mass assignment: mutation ledger unavailable; "
+                     "outstanding cleanup not retried")
+            return
+        for record in outstanding:
+            if record.get("module_id") != self.id:
+                continue
+            identity = record.get("identity")
+            owned = record.get("owned_objects") or []
+            if not identity or not owned:
+                continue
+            for obj in owned:
+                field = obj.get("identifier")
+                neutral = obj.get("neutral_value")
+                probe = obj.get("probe_value")
+                if field is None:
+                    continue
+                payload = {field: neutral}
+                await self._write(harness, identity, write_url, payload,
+                                  method)
+                verified = await self._get_json(harness, identity, write_url)
+                gone = isinstance(verified, dict) and verified.get(field) != probe
+                verification = {
+                    "method": "re-read", "field": field,
+                    "now": (verified or {}).get(field, "<absent>"),
+                }
+                self.state.mutations.record_rollback(
+                    record.get("id"),
+                    "verified" if gone else "failed",
+                    verification=verification)
+                if gone:
+                    self.state.mutations.verify_cleanup(
+                        record.get("id"), verification)
+                    self.log(f"mass assignment: verified leftover cleanup of "
+                             f"{field} on {identity}")
+                else:
+                    self.state.mutations.mark_failed(
+                        record.get("id"),
+                        f"re-read still shows probe value on {field}")
 
     # ── Discovery ────────────────────────────────────────────────
 
@@ -180,23 +233,62 @@ class MassAssignment(BaseModule):
         payload = dict(before)
         payload[field] = probe
 
+        neutral = NEUTRAL_VALUES[str(cfg.get("probe_type") or "bool")]
+        # R8: the mutation is on record BEFORE the write leaves, with the
+        # pre-probe read as before-state and the field as the owned object.
+        mut_id = self.state.mutations.begin(
+            self.id, "http_write",
+            {"url": write_url, "method": method},
+            identity=attacker.name,
+            before_state={field: before.get(field, "<absent>")},
+            owned_objects=[OwnedObject(
+                type="user_field", identifier=field,
+                probe_value=probe, neutral_value=neutral)],
+        )
+
         write = await self._write(harness, attacker.name, write_url,
                                   payload, method)
         if write.get("status", 0) >= 400:
+            # Nothing was written (the endpoint refused), so nothing to undo.
+            self.state.mutations.record_rollback(
+                mut_id, "refused",
+                verification={"method": "http_status",
+                              "status": write.get("status", 0)})
+            self.state.mutations.mark_not_required(
+                mut_id, f"write refused with status {write.get('status', 0)}")
             return None
 
         after = await self._get_json(harness, attacker.name, target)
         if not isinstance(after, dict) or after.get(field) != probe:
             # The server accepted the request but did not keep the value. That
             # is a working whitelist, not a finding.
-            await self._restore(harness, attacker.name, write_url, after,
-                                method, field, probe)
+            restored = await self._restore(harness, attacker.name, write_url,
+                                           after, method, field, probe)
+            self._record_mutation_outcome(mut_id, restored)
             return None
 
         restored = await self._restore(harness, attacker.name, write_url,
                                        after, method, field, probe)
+        self._record_mutation_outcome(mut_id, restored)
         return self._finding(field, probe, before, after, restored, write_url,
                              method, target)
+
+    def _record_mutation_outcome(self, mut_id: str, restored: dict):
+        """Ledger rows for a rollback whose success was re-checked."""
+        verification = {
+            "method": "re-read",
+            "field": restored.get("field"),
+            "now": restored.get("now"),
+        }
+        self.state.mutations.record_rollback(
+            mut_id, "verified" if restored.get("ok") else "failed",
+            verification=verification)
+        if restored.get("ok"):
+            self.state.mutations.verify_cleanup(mut_id, verification)
+        else:
+            self.state.mutations.mark_failed(
+                mut_id,
+                f"re-read still shows the probe on {restored.get('field')}")
 
     async def _restore(self, harness: AuthHarness, identity_name: str,
                        write_url: str, current: dict, method: str,

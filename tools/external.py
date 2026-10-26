@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from core.deadline import clamp_timeout as _clamp_timeout
 from core.deadline import deadline_reached as _deadline_reached
+from core.results import note_wire
 from core.validators import redact_for_log
 
 
@@ -38,7 +39,7 @@ DOCKER_TOOLS = frozenset({
     "theHarvester", "maigret", "cmseek", "joomscan", "paramspider",
     "subzy", "assetfinder", "waybackurls", "dig", "whois",
     "jsluice", "gxss", "uro", "gitleaks", "graphql-cop",
-    "interactsh-client", "kr", "semgrep",
+    "interactsh-client", "kr", "semgrep", "schemathesis",
 })
 
 _BACKEND = {
@@ -96,7 +97,11 @@ def managed_container(command) -> str:
 
 
 async def terminate_tool(proc, command) -> None:
-    """Reap local children and remove only the uniquely named container we own."""
+    """Reap local children and remove only the uniquely named container we own.
+
+    Removal is verified with a follow-up ``docker ps`` check; the wire
+    recorder receives ``containers_verified`` only when that check ran.
+    """
     await terminate_process_tree(proc)
     name = managed_container(command)
     if not name:
@@ -111,6 +116,19 @@ async def terminate_tool(proc, command) -> None:
     except (OSError, asyncio.TimeoutError):
         if cleanup is not None:
             await terminate_process_tree(cleanup)
+        return
+    verified = None
+    try:
+        check = await asyncio.create_subprocess_exec(
+            "docker", "ps", "-a", "--filter", f"name={name}", "-q",
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=os.name != "nt")
+        out, _ = await asyncio.wait_for(check.communicate(), 5)
+        verified = bool(check.returncode == 0
+                        and not out.decode("utf-8", errors="replace").strip())
+    except (OSError, asyncio.TimeoutError):
+        verified = False
+    note_wire({"containers_removed": 1, "containers_verified": verified})
 
 
 def configure_tool_backend(config: dict | None = None) -> str:
@@ -314,7 +332,7 @@ def tools_available() -> dict:
         "nikto", "whatweb", "gobuster", "feroxbuster",
         "hakrawler", "arjun", "paramspider", "gowitness",
         "dalfox", "sqlmap", "corsy", "smuggler", "openredirex",
-        "kr", "semgrep",
+        "kr", "semgrep", "schemathesis",
     ]
     return {t: tool_available(t) for t in tools}
 
@@ -332,8 +350,11 @@ async def run_command(args: List[str], timeout: int = 120,
         return {"stdout": "", "stderr": "", "exit_code": -1,
                 "error": "deadline_exceeded"}
     timeout = _clamp_timeout(timeout)
+    docker_backend = _docker_wants(args)
     consume_tool_budget()
-    if _docker_wants(args):
+    note_wire({"transport": "docker" if docker_backend else "subprocess",
+               "commands": 1})
+    if docker_backend:
         args = docker_run_args(args, stdin=bool(stdin_data))
     try:
         proc = await asyncio.create_subprocess_exec(

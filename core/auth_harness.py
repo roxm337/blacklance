@@ -22,7 +22,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 from tools.wrappers import curl, get_engine
 
@@ -73,6 +73,10 @@ class Identity:
     owner_id: str = ""
     owner_markers: tuple = ()
     role: str = ""
+    # Revocation support (I3): a logout endpoint the harness may call on a
+    # sacrificial session to prove tokens die with the session.
+    logout_url: str = ""
+    logout_method: str = "POST"
 
     _PRIVILEGED_ROLES = frozenset({
         "admin", "administrator", "root", "superadmin", "superuser",
@@ -152,6 +156,39 @@ class Identity:
         return bool(self.cookies or self.bearer_token or self.basic_auth
                     or self.headers.get("Authorization"))
 
+    async def logout(self, base_url: str = "") -> bool:
+        """Invalidate the CURRENT session via the configured logout endpoint.
+
+        Revocation support (I3): the matrix calls this on a sacrificial,
+        freshly established session and then proves the old session is dead
+        and a new one works. Never submits login credentials.
+        """
+        url = self.logout_url
+        if not url and base_url:
+            url = urljoin(base_url, "/logout")
+        if not url:
+            self.verification_note = "no logout_url configured"
+            return False
+        if url and base_url and not url.startswith(("http://", "https://")):
+            from urllib.parse import urljoin as _urljoin
+            url = _urljoin(base_url, url)
+        try:
+            result = await curl(url, method=self.logout_method,
+                                identity=self.name, output="status",
+                                timeout=15, follow_redirects=True)
+        except Exception as exc:
+            self.verification_note = f"logout raised: {exc}"
+            return False
+        status = int(result.get("status", 0) or 0)
+        if status >= 500:
+            self.verification_note = f"logout returned {status}"
+            return False
+        # Drop the local session material so the next read is truly stale.
+        self.bearer_token = ""
+        self.cookies = {}
+        self.verified = False
+        return True
+
     # Claims that name a specific account rather than a role or a scope.
     # `role: admin` and `iss:` are deliberately absent: they are shared by
     # every admin and would attribute one account's record to another.
@@ -228,6 +265,13 @@ class Identity:
         url = spec.get("url", "")
         if not url and base_url:
             url = urlparse(base_url)._replace(path="/login").geturl()
+        elif url and base_url and not url.startswith(("http://", "https://")):
+            # Configs write login endpoints the way recon reports them — as
+            # paths. A relative path handed straight to the HTTP client
+            # resolves to nothing, and the login fails while looking like
+            # wrong credentials.
+            from urllib.parse import urljoin
+            url = urljoin(base_url, url)
         if not url:
             self.verification_note = "login block has no url"
             return False
@@ -331,6 +375,9 @@ class Identity:
         configured success marker when one is given.
         """
         url = self.verify_url or base_url
+        if url and base_url and not url.startswith(("http://", "https://")):
+            from urllib.parse import urljoin
+            url = urljoin(base_url, url)
         if not url:
             self.verified = self.has_credentials()
             self.assumed = bool(self.verified)
@@ -458,6 +505,7 @@ class AuthHarness:
         auth_cfg = (config.get("auth") or {}) if isinstance(config, dict) else {}
         self.raw_config = auth_cfg
         self.identities: dict[str, Identity] = {}
+        self.mutations = None
         self._load(auth_cfg)
 
     def _load(self, auth_cfg: dict) -> None:
@@ -488,6 +536,8 @@ class AuthHarness:
                     str(v) for v in (entry.get("owner_markers") or [])
                 ),
                 role=str(entry.get("role") or ""),
+                logout_url=str(entry.get("logout_url") or ""),
+                logout_method=str(entry.get("logout_method") or "POST").upper(),
                 # Earlier documentation put this inside `login`, so both are
                 # honoured. A top-level value wins.
                 success_marker=str(
@@ -558,11 +608,34 @@ class AuthHarness:
     async def establish_all(self, base_url: str = "") -> list[Identity]:
         for identity in self.identities.values():
             try:
-                await identity.establish(base_url)
+                ok = await identity.establish(base_url)
             except AuthError:
+                ok = False
                 identity.verified = False
                 identity.verification_note = "invalid identity configuration"
+            if ok and self.mutations is not None:
+                self._record_session(identity, base_url)
         return self.usable
+
+    def _record_session(self, identity: Identity, base_url: str):
+        """R8: session establishment is a mutation of server-side state.
+
+        Cleanup is honestly ``not_required`` — server sessions expire and no
+        logout endpoint can be assumed — never claimed as verified.
+        """
+        try:
+            from core.mutations import OwnedObject
+            mut_id = self.mutations.begin(
+                "auth_harness", "session",
+                {"url": base_url or "", "identity": identity.name},
+                identity=identity.name,
+                owned_objects=[OwnedObject(
+                    type="session", identifier=identity.name)])
+            self.mutations.mark_not_required(
+                mut_id,
+                "server-side session; no logout endpoint assumed")
+        except Exception:
+            pass
 
     # ── Requests ─────────────────────────────────────────────────
 
