@@ -17,7 +17,12 @@ from PySide6.QtCore import QItemSelectionModel, QProcess, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox, QTableWidgetItem
 
-from gui.app import MainWindow, build_scan_args
+from gui.app import (
+    MainWindow,
+    build_scan_args,
+    r10xm_config_overlay,
+    R10XM_CONFIG_NAME,
+)
 from modules import get_all_module_ids
 from state.manager import StateManager
 from core.assessments import AssessmentStore
@@ -1238,3 +1243,115 @@ def test_text_to_list_keeps_commas_inside_values():
     window = MainWindow.__new__(MainWindow)
     assert window._text_to_list("https://h.test/?a=1,b=2\n/x") == \
         ["https://h.test/?a=1,b=2", "/x"]
+
+
+# ── r10xM-mode ──────────────────────────────────────────────────────────
+
+def test_build_scan_args_agent_mode():
+    # r10xM emits --agent + --execute + --max-risk, and drops the per-module
+    # and per-mode selectors (the supervisor owns the whole lifecycle).
+    args = build_scan_args(
+        "e.com", "/o", "/c",
+        agent=True, execute=True, max_risk="DESTRUCTIVE",
+        max_actions=5,
+        # these must be ignored in agent mode:
+        mode="LLM", module="xss_scanner", pentest=True, max_chains=9,
+    )
+    assert "--agent" in args
+    assert "--execute" in args
+    assert args[args.index("--max-risk") + 1] == "DESTRUCTIVE"
+    assert args[args.index("--max-actions") + 1] == "5"
+    assert "--module" not in args
+    assert "--mode" not in args
+    assert "--pentest" not in args
+    assert "--max-chains" not in args
+
+
+def test_r10xm_config_overlay_maxes_access():
+    base = {
+        "target": {"domain": "keep.me", "mode": "passive"},
+        "auth": {"cookie": "secret-session"},
+        "tools": {"backend": "local", "network": "bridge"},
+        "budget_limits": {"max_requests": 500, "resume": True},
+    }
+    merged = r10xm_config_overlay(base)
+    # Docker toolchain by default, deep coverage, unlimited budgets, tokens up.
+    assert merged["tools"]["backend"] == "docker"
+    assert merged["target"]["mode"] == "deep"
+    assert merged["detectability"]["default"] == "high"
+    assert merged["llm"]["max_tokens"] >= 8192
+    for cap in ("max_requests", "max_wall_clock_seconds",
+                "max_llm_calls", "max_external_commands"):
+        assert merged["budget_limits"][cap] == 0
+    # Operator-owned keys are preserved, not clobbered.
+    assert merged["target"]["domain"] == "keep.me"
+    assert merged["auth"]["cookie"] == "secret-session"
+    assert merged["tools"]["network"] == "bridge"
+    assert merged["budget_limits"]["resume"] is True
+    # Pure: the base dict is not mutated in place.
+    assert base["tools"]["backend"] == "local"
+
+
+def test_r10xm_toggle_pins_and_releases_controls():
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.r10xm_check.setChecked(True)
+    # Preset pinned …
+    assert window.pentest_check.isChecked()
+    assert window.execute_check.isChecked()
+    assert window.active_check.isChecked()
+    assert window.risk_combo.currentText() == "DESTRUCTIVE"
+    # … and its selectors locked so the mode is unambiguous.
+    assert not window.mode_combo.isEnabled()
+    assert not window.execute_check.isEnabled()
+    assert window._r10xm_enabled() is True
+
+    window.r10xm_check.setChecked(False)
+    assert window.mode_combo.isEnabled()
+    assert window._r10xm_enabled() is False
+
+    window.close()
+    app.processEvents()
+
+
+def test_r10xm_confirm_engagement_always_gated(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    window.target_input.setText("example.com")
+
+    calls = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *_a, **_k: calls.append(1) or QMessageBox.No)
+
+    window.r10xm_check.setChecked(True)
+    # r10xM is autonomous DESTRUCTIVE execution: the gate fires and defaults No.
+    assert window._confirm_engagement() is False
+    assert len(calls) == 1
+
+    window.close()
+    app.processEvents()
+
+
+def test_r10xm_writes_derived_config_without_touching_base(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    base_config = tmp_path / "config.yaml"
+    base_config.write_text(yaml.safe_dump(
+        {"target": {"domain": "", "mode": "passive"},
+         "tools": {"backend": "local"}}))
+    window.config_path = base_config
+
+    derived = window._write_r10xm_config()
+    assert derived is not None
+    assert derived.name == R10XM_CONFIG_NAME
+    assert derived.parent == tmp_path
+    produced = yaml.safe_load(derived.read_text())
+    assert produced["tools"]["backend"] == "docker"
+    assert produced["budget_limits"]["max_llm_calls"] == 0
+    # The operator's own config.yaml is left exactly as written.
+    assert yaml.safe_load(base_config.read_text())["tools"]["backend"] == "local"
+
+    window.close()
+    app.processEvents()

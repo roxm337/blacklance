@@ -194,6 +194,33 @@ QGroupBox::title {
     background: #111820;
 }
 
+/* ── r10xM-mode: the one-switch maximum-autonomous preset ─────────────── */
+
+#r10xmBox {
+    border: 1px solid #e0533a;
+    background: #1c1410;
+}
+
+#r10xmBox::title {
+    color: #ff7a5c;
+    background: #1c1410;
+    font-weight: 700;
+}
+
+#r10xmToggle {
+    font-weight: 700;
+    color: #ffd7cc;
+}
+
+#r10xmToggle:checked {
+    color: #ff8763;
+}
+
+#r10xmHint {
+    color: #c9a79c;
+    font-size: 11px;
+}
+
 /* ── Ops strip + metrics ──────────────────────────────────────────────── */
 
 #opsStrip {

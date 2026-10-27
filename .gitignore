@@ -20,6 +20,7 @@ build/
 venv/
 env/
 config.yaml
+config.r10xm.generated.yaml
 
 # ============================================================
 #  Generated / runtime output

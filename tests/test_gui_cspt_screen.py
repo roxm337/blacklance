@@ -13,6 +13,9 @@ import yaml
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 import gui.app as gui_app_module
+# _browser_driver_present is resolved inside the CSPT screen mixin's own
+# module namespace, so patch it there (not on gui.app's re-export).
+import gui.screens.cspt as cspt_screen_module
 from gui.app import MainWindow
 from state.manager import StateManager
 
@@ -402,13 +405,13 @@ def test_run_requires_the_gate_then_the_browser_then_confirmation(
     # Gate on, but the module drives a real browser that is not here.
     window.cspt_enabled_check.setChecked(True)
     warnings.clear()
-    monkeypatch.setattr(gui_app_module, "_browser_driver_present",
+    monkeypatch.setattr(cspt_screen_module, "_browser_driver_present",
                         lambda: False)
     window._run_cspt_pass()
     assert warnings and "Playwright is not installed" in str(warnings[0])
 
     asked = []
-    monkeypatch.setattr(gui_app_module, "_browser_driver_present", lambda: True)
+    monkeypatch.setattr(cspt_screen_module, "_browser_driver_present", lambda: True)
 
     def fake_question(*_args, **_kwargs):
         asked.append(1)
