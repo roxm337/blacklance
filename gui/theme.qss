@@ -154,7 +154,7 @@ QToolButton#navButton:checked {
     background: transparent;
 }
 
-#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenAuthz, #screenCspt, #screenReport {
+#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenAuthz, #screenCspt, #screenOrm, #screenReport {
     background: transparent;
 }
 
@@ -1271,5 +1271,131 @@ QLineEdit#graphSearch {
 }
 
 #csptSplitter::handle:hover {
+    background: #35c7b1;
+}
+
+/* ── I5 ORM / filter leak screen ────────────────────────────────── */
+
+#ormStrip {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 8px;
+}
+
+#ormCaption {
+    color: #35c7b1;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+#ormState {
+    color: #93a3b0;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 10px;
+    background: #0c1218;
+    border: 1px solid #25313c;
+}
+
+#ormState[state="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border-color: #166534;
+}
+
+#ormTool {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#ormTool[tone="ok"] {
+    color: #83eadb;
+}
+
+#ormTool[tone="warn"] {
+    color: #fdba74;
+}
+
+#ormLegend {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+/* This screen's gate is the one that writes to the target, so its notes carry
+   an amber edge rather than the neutral one the read-only screens use. */
+#ormWarning {
+    color: #93a3b0;
+    font-size: 11px;
+    background: #0c1218;
+    border-left: 2px solid #854d0e;
+    padding: 6px 8px;
+}
+
+#ormProofState {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 8px;
+    border-radius: 5px;
+}
+
+#ormProofState[tone="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border: 1px solid #166534;
+}
+
+#ormProofState[tone="warn"] {
+    color: #fcd9a5;
+    background: #271f0a;
+    border: 1px solid #854d0e;
+}
+
+#ormResults {
+    background: transparent;
+}
+
+#ormViews {
+    background: transparent;
+}
+
+#ormIdentity {
+    background: #0c1218;
+    border: 1px solid #25313c;
+    border-radius: 5px;
+    color: #d8e2ea;
+    padding: 4px 6px;
+}
+
+#ormIdentity:focus {
+    border-color: #35c7b1;
+}
+
+#ormDetail {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 7px;
+}
+
+#ormDetailTitle {
+    color: #f3f7fa;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+#ormDetailBody {
+    background: #0c1218;
+    border: 1px solid #25313c;
+    border-radius: 5px;
+    color: #d8e2ea;
+}
+
+#ormSplitter::handle {
+    background: #25313c;
+    width: 3px;
+}
+
+#ormSplitter::handle:hover {
     background: #35c7b1;
 }

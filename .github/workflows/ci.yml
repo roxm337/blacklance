@@ -111,4 +111,5 @@ jobs:
             tests/test_gui_schema_screen.py \
             tests/test_gui_authz_screen.py \
             tests/test_gui_cspt_screen.py \
+            tests/test_gui_orm_screen.py \
             tests/test_results_integrity.py

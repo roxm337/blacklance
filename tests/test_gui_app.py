@@ -1145,7 +1145,7 @@ def test_nav_rail_switches_stacked_screens():
     # The rail is the app shell's own contract, so the full order is asserted
     # here and only here; each capability screen test checks its own entry.
     assert keys == ["run", "triage", "graph", "data", "schema", "authz",
-                    "cspt", "report", "settings"]
+                    "cspt", "orm", "report", "settings"]
     count = len(window.SCREEN_DEFS)
     assert window.screen_stack.count() == count
 
