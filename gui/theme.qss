@@ -154,7 +154,7 @@ QToolButton#navButton:checked {
     background: transparent;
 }
 
-#screenRun, #screenTriage, #screenGraph, #screenData, #screenReport {
+#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenReport {
     background: transparent;
 }
 
@@ -928,5 +928,124 @@ QLineEdit#graphSearch {
 }
 
 #graphSplitter::handle:hover {
+    background: #35c7b1;
+}
+
+/* ── I2 stateful API schema screen ───────────────────────────────────── */
+
+#schemaStrip {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 8px;
+}
+
+#schemaCaption {
+    color: #70daca;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+/* Module gate pill: the same four states as the header pill, so "enabled"
+   can never be mistaken for "ran" or "proved". */
+#schemaState {
+    padding: 5px 12px;
+    border-radius: 11px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+#schemaState[state="idle"] {
+    color: #a6b4bf;
+    background: #0c1218;
+    border: 1px solid #32404d;
+}
+
+#schemaState[state="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border: 1px solid #166534;
+}
+
+#schemaState[state="error"] {
+    color: #fecdd3;
+    background: #2a0f16;
+    border: 1px solid #7f1d1d;
+}
+
+#schemaTool {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#schemaTool[tone="ok"] {
+    color: #83eadb;
+}
+
+#schemaTool[tone="warn"] {
+    color: #fdba74;
+}
+
+#schemaLegend {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#schemaWarning {
+    color: #93a3b0;
+    font-size: 11px;
+    background: #0c1218;
+    border-left: 2px solid #47606c;
+    padding: 6px 8px;
+}
+
+#schemaProofState {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 8px;
+    border-radius: 5px;
+}
+
+#schemaProofState[tone="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border: 1px solid #166534;
+}
+
+#schemaProofState[tone="warn"] {
+    color: #fcd9a5;
+    background: #271f0a;
+    border: 1px solid #854d0e;
+}
+
+#schemaResults {
+    background: transparent;
+}
+
+#schemaDetail {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 7px;
+}
+
+#schemaDetailTitle {
+    color: #f3f7fa;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+#schemaDetailBody {
+    background: #0c1218;
+    border: 1px solid #25313c;
+    border-radius: 5px;
+    color: #d8e2ea;
+}
+
+#schemaSplitter::handle {
+    background: #25313c;
+    width: 3px;
+}
+
+#schemaSplitter::handle:hover {
     background: #35c7b1;
 }

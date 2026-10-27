@@ -60,6 +60,7 @@ jobs:
             --ignore=tests/test_gui_app.py \
             --ignore=tests/test_gui_graph.py \
             --ignore=tests/test_gui_enhancements.py \
+            --ignore=tests/test_gui_schema_screen.py \
             --ignore=tests/test_results_integrity.py
 
       - name: Build and smoke-test installed wheel
@@ -108,4 +109,5 @@ jobs:
             tests/test_gui_app.py \
             tests/test_gui_graph.py \
             tests/test_gui_enhancements.py \
+            tests/test_gui_schema_screen.py \
             tests/test_results_integrity.py
