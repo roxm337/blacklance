@@ -244,6 +244,8 @@ class APIWorkflows(BaseModule):
                 {
                     "fingerprint": group["fingerprint"],
                     "check": group["check"],
+                    "method": group["method"],
+                    "path": group["path"],
                     "count": group["count"],
                     "min_interactions": group["min_interactions"],
                     "seed": (group.get("seeds") or [None])[0],

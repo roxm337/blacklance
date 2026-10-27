@@ -1141,19 +1141,20 @@ def test_target_debounce_reloads_once_per_burst(monkeypatch):
 def test_nav_rail_switches_stacked_screens():
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
-    assert window.screen_stack.count() == len(window.SCREEN_DEFS) == 6
+    count = len(window.SCREEN_DEFS)
+    assert window.screen_stack.count() == count
 
-    for index in range(6):
+    for index in range(count):
         window.nav_buttons[index].click()
         app.processEvents()
         assert window.screen_stack.currentIndex() == index
         assert window.nav_buttons[index].isChecked()
 
     # Out-of-range switches are ignored, not crashes.
-    window.show_screen(99)
-    assert window.screen_stack.currentIndex() == 5
+    window.show_screen(count + 93)
+    assert window.screen_stack.currentIndex() == count - 1
     window.show_screen(-1)
-    assert window.screen_stack.currentIndex() == 5
+    assert window.screen_stack.currentIndex() == count - 1
 
     window.close()
     app.processEvents()
