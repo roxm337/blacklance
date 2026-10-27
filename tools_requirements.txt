@@ -1,4 +1,4 @@
-# OSINT Agent Tool Requirements
+# BlackLance Tool Requirements
 #
 # The platform degrades when tools are missing. That is useful for passive OSINT,
 # but it is bad if you expect real bug detection. For high-signal bug bounty

@@ -1,4 +1,4 @@
-# osintAgent offensive toolchain — one image, zero host installs.
+# BlackLance offensive toolchain — one image, zero host installs.
 #
 # Build:  docker build -f docker/Dockerfile.tools -t osint-tools:latest .
 # Use:    OSINT_TOOLS_BACKEND=docker orchestrator.py -t <target>

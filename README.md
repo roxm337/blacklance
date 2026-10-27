@@ -1,10 +1,10 @@
-# OSINT Agent
+# BlackLance
 
-**LLM-orchestrated OSINT & bug-bounty reconnaissance pipeline** — maps a target's
+**LLM-orchestrated reconnaissance and security testing framework** — maps a target's
 external attack surface, enriches discovered assets, records evidence, prioritizes
 findings, and generates reports or attack plans.
 
-[![CI](https://github.com/roxm337/osint-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/roxm337/osint-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/roxm337/blacklance/actions/workflows/ci.yml/badge.svg)](https://github.com/roxm337/blacklance/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![Modules](https://img.shields.io/badge/modules-85-brightgreen)
 
@@ -197,7 +197,7 @@ Requires **Python 3.10+**.
 
 ```bash
 # 1. Clone
-git clone https://github.com/roxm337/osint-agent.git osint-agent && cd osint-agent
+git clone https://github.com/roxm337/blacklance.git blacklance && cd blacklance
 
 # 2. Virtual environment
 python3 -m venv .venv
@@ -210,7 +210,7 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-Or install as a package (exposes the `osint-agent` and `osint-agent-gui` commands):
+Or install BlackLance as a package:
 
 ```bash
 pip install -e .            # core
@@ -312,7 +312,7 @@ python orchestrator.py -t example.com --tools
 ### GUI
 
 ```bash
-python -m gui.app        # or: osint-agent-gui
+python -m gui.app
 ```
 
 The GUI drives the same `orchestrator.py` engine via `QProcess`, so GUI and CLI share

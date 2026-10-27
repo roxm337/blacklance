@@ -1,4 +1,4 @@
-# Toolchain container — no installs on your machine
+# BlackLance toolchain container — no installs on your machine
 
 One image holds the whole offensive toolchain (nmap, nuclei + templates,
 ffuf, httpx, subfinder, amass, katana, dalfox v3, sqlmap, wpscan, nikto,

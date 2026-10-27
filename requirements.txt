@@ -1,4 +1,4 @@
-# OSINT Agent Core Dependencies
+# BlackLance Core Dependencies
 pyyaml>=6.0
 litellm>=1.60
 python-dotenv>=1.0

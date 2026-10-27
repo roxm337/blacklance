@@ -1,4 +1,4 @@
-"""Setup script for OSINT Agent."""
+"""Setup script for BlackLance."""
 
 from setuptools import setup, find_packages
 from setuptools.command.build_py import build_py
@@ -40,7 +40,7 @@ _version = (_version_file.read_text(encoding="utf-8").strip()
 setup(
     name="osint-agent",
     version=_version,
-    description="LLM-Orchestrated OSINT Reconnaissance Pipeline",
+    description="BlackLance — LLM-orchestrated reconnaissance and security testing framework",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",

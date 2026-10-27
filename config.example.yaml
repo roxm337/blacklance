@@ -1,4 +1,4 @@
-# OSINT Agent Configuration
+# BlackLance Configuration
 
 # External tool backend: where scanner binaries run.
 #   local (default) — use binaries installed on this machine.
