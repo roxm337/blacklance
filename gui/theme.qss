@@ -154,7 +154,7 @@ QToolButton#navButton:checked {
     background: transparent;
 }
 
-#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenReport {
+#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenAuthz, #screenReport {
     background: transparent;
 }
 
@@ -1047,5 +1047,117 @@ QLineEdit#graphSearch {
 }
 
 #schemaSplitter::handle:hover {
+    background: #35c7b1;
+}
+
+/* ── I3 authorization matrix screen ─────────────────────────────── */
+
+#authzStrip {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 8px;
+}
+
+#authzCaption {
+    color: #35c7b1;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+#authzState {
+    color: #93a3b0;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 10px;
+    background: #0c1218;
+    border: 1px solid #25313c;
+}
+
+#authzState[state="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border-color: #166534;
+}
+
+#authzTool {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#authzTool[tone="ok"] {
+    color: #83eadb;
+}
+
+#authzTool[tone="warn"] {
+    color: #fdba74;
+}
+
+#authzLegend {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#authzWarning {
+    color: #93a3b0;
+    font-size: 11px;
+    background: #0c1218;
+    border-left: 2px solid #47606c;
+    padding: 6px 8px;
+}
+
+#authzProofState {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 8px;
+    border-radius: 5px;
+}
+
+#authzProofState[tone="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border: 1px solid #166534;
+}
+
+#authzProofState[tone="warn"] {
+    color: #fcd9a5;
+    background: #271f0a;
+    border: 1px solid #854d0e;
+}
+
+#authzResults {
+    background: transparent;
+}
+
+#authzViews {
+    background: transparent;
+}
+
+#authzDetail {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 7px;
+}
+
+#authzDetailTitle {
+    color: #f3f7fa;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+#authzDetailBody {
+    background: #0c1218;
+    border: 1px solid #25313c;
+    border-radius: 5px;
+    color: #d8e2ea;
+}
+
+#authzSplitter::handle {
+    background: #25313c;
+    width: 3px;
+}
+
+#authzSplitter::handle:hover {
     background: #35c7b1;
 }
