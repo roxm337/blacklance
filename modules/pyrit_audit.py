@@ -122,6 +122,15 @@ class PyritAudit(BaseModule):
             timeout = max(10, int(cfg.get("timeout", 240) or 240))
         except (TypeError, ValueError):
             timeout = 240
+        # Never start a PyRIT run that would outlive the module deadline: clamp
+        # its timeout to the time left (minus a flush margin), and skip if there
+        # is not enough left to be worth starting.
+        left = self.time_left()
+        if left != float("inf"):
+            if left < 20:
+                self.state.skip_module(self.id, "insufficient time for a PyRIT run")
+                return "skipped"
+            timeout = min(timeout, max(10, int(left) - 10))
         result = await pyrit.run(
             spec, python_path=python, timeout=timeout,
             min_version=str(runner_cfg.get("min_version") or ""),

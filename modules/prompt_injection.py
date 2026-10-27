@@ -98,6 +98,8 @@ class PromptInjection(BaseModule):
             return "skipped"
         leaks = 0
         for asset in (endpoints if limit <= 0 else endpoints[:limit]):
+            if self.should_stop(reserve=8):
+                break
             url = str(asset.get("value", ""))
             if "chat/completions" not in url:
                 continue

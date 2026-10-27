@@ -141,6 +141,8 @@ class LLMSurface(BaseModule):
         model = None
         found = 0
         for url in candidates:
+            if self.should_stop(reserve=8):
+                break
             result = await self._fetch(url)
             kind = classify_fingerprint(result["status"], result["headers"],
                                         result["body"])
