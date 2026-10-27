@@ -124,6 +124,7 @@ class CSPTAudit(BaseModule):
                 report["untested"].append(
                     {"target": target, "reason": "time-box hit"})
                 break
+            report["targets"].append(target)
             for context_name, headers in contexts:
                 if time.monotonic() >= stop_at:
                     break
@@ -144,11 +145,13 @@ class CSPTAudit(BaseModule):
                                 "reason": f"browser error: {str(exc)[:120]}"})
                             continue
                         pairs = self._classify_epochs(epochs, run_token,
-                                                      payloads)
+                                                      payloads,
+                                                      point=point, name=name)
                         for pair in pairs:
                             state_counts[pair["state"]] = \
                                 state_counts.get(pair["state"], 0) + 1
                             pair["identity"] = context_name
+                            pair["target"] = target
                             report["pairs"].append(pair)
                         altered = [p for p in pairs
                                    if p["state"] == "path_altered"]
@@ -223,8 +226,13 @@ class CSPTAudit(BaseModule):
         return payloads
 
     def _classify_epochs(self, epochs: list[dict], token: str,
-                         payloads: list[str]) -> list[dict]:
+                         payloads: list[str], *, point: str = "",
+                         name: str = "") -> list[dict]:
         """Classify the request stream of one inject point (three states)."""
+        # Every pair carries the inject surface it came from: without it the
+        # operator cannot tell an escape injected in the query from one
+        # injected in the fragment.
+        surface = {"point": point, "name": name}
         baseline_sigs = set()
         natural_paths = []
         token_seen = False
@@ -241,7 +249,8 @@ class CSPTAudit(BaseModule):
                 natural_paths.append(server_view_path(url))
         if not token_seen:
             return [{"state": "not_reached", "natural_path": "",
-                     "probe_path": "", "prefix": [], "payload": ""}]
+                     "probe_path": "", "prefix": [], "payload": "",
+                     **surface}]
         prefixes = []
         for natural_path in natural_paths:
             prefix = stable_prefix(natural_path, token)
@@ -251,7 +260,8 @@ class CSPTAudit(BaseModule):
                 prefixes.append((prefix, natural_path))
         if not prefixes:
             return [{"state": "unchanged", "natural_path": natural_paths[0],
-                     "probe_path": "", "prefix": [], "payload": ""}]
+                     "probe_path": "", "prefix": [], "payload": "",
+                     **surface}]
         prefix, natural_path = min(prefixes, key=lambda item: len(item[0]))
         natural_sigs = set()
         for event in epochs:
@@ -290,10 +300,12 @@ class CSPTAudit(BaseModule):
                     "payload": str(event.get("payload") or ""),
                     "status": int(event.get("status", 0) or 0),
                     "natural_url": str(event.get("natural_url") or ""),
+                    **surface,
                 })
         if not pairs:
             return [{"state": "unchanged", "natural_path": natural_path,
-                     "probe_path": "", "prefix": prefix, "payload": ""}]
+                     "probe_path": "", "prefix": prefix, "payload": "",
+                     **surface}]
         return pairs
 
     # ── Impact verification (only PROOF path) ────────────────────

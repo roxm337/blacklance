@@ -154,7 +154,7 @@ QToolButton#navButton:checked {
     background: transparent;
 }
 
-#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenAuthz, #screenReport {
+#screenRun, #screenTriage, #screenGraph, #screenData, #screenSchema, #screenAuthz, #screenCspt, #screenReport {
     background: transparent;
 }
 
@@ -1159,5 +1159,117 @@ QLineEdit#graphSearch {
 }
 
 #authzSplitter::handle:hover {
+    background: #35c7b1;
+}
+
+/* ── I4 client-side path traversal screen ───────────────────────── */
+
+#csptStrip {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 8px;
+}
+
+#csptCaption {
+    color: #35c7b1;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+
+#csptState {
+    color: #93a3b0;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 10px;
+    background: #0c1218;
+    border: 1px solid #25313c;
+}
+
+#csptState[state="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border-color: #166534;
+}
+
+#csptTool {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#csptTool[tone="ok"] {
+    color: #83eadb;
+}
+
+#csptTool[tone="warn"] {
+    color: #fdba74;
+}
+
+#csptLegend {
+    color: #93a3b0;
+    font-size: 11px;
+}
+
+#csptWarning {
+    color: #93a3b0;
+    font-size: 11px;
+    background: #0c1218;
+    border-left: 2px solid #47606c;
+    padding: 6px 8px;
+}
+
+#csptProofState {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 8px;
+    border-radius: 5px;
+}
+
+#csptProofState[tone="ok"] {
+    color: #bbf7d0;
+    background: #0f2318;
+    border: 1px solid #166534;
+}
+
+#csptProofState[tone="warn"] {
+    color: #fcd9a5;
+    background: #271f0a;
+    border: 1px solid #854d0e;
+}
+
+#csptResults {
+    background: transparent;
+}
+
+#csptViews {
+    background: transparent;
+}
+
+#csptDetail {
+    background: #111820;
+    border: 1px solid #25313c;
+    border-radius: 7px;
+}
+
+#csptDetailTitle {
+    color: #f3f7fa;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+#csptDetailBody {
+    background: #0c1218;
+    border: 1px solid #25313c;
+    border-radius: 5px;
+    color: #d8e2ea;
+}
+
+#csptSplitter::handle {
+    background: #25313c;
+    width: 3px;
+}
+
+#csptSplitter::handle:hover {
     background: #35c7b1;
 }

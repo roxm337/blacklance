@@ -104,8 +104,9 @@ def test_authz_screen_is_registered_on_the_rail():
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
     keys = [entry[0] for entry in window.SCREEN_DEFS]
-    assert keys == ["run", "triage", "graph", "data", "schema", "authz",
-                    "report", "settings"]
+    # The full rail list is asserted once, in test_gui_app.py; here only the
+    # invariants matter, so adding a screen is not a second edit.
+    assert "authz" in keys
     index = MainWindow._screen_index("authz")
     assert index == keys.index("authz")
     assert window.screen_stack.count() == len(keys)
