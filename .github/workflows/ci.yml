@@ -54,15 +54,13 @@ jobs:
 
       - name: Run test suite (non-GUI)
         # GUI test files are ignored here because this job does not
-        # install PySide6; they run in the test-gui job instead.
+        # install PySide6; they run in the test-gui job instead. Globs, not a
+        # per-file list: forgetting an entry would fail this job red on an
+        # import, which is worse than a screen going unlisted in the GUI job.
         run: |
           python -m pytest -q \
-            --ignore=tests/test_gui_app.py \
-            --ignore=tests/test_gui_graph.py \
-            --ignore=tests/test_gui_enhancements.py \
-            --ignore=tests/test_gui_schema_screen.py \
-            --ignore=tests/test_gui_authz_screen.py \
-            --ignore=tests/test_results_integrity.py
+            --ignore-glob=tests/test_gui_*.py \
+            --ignore-glob=tests/test_results_integrity.py
 
       - name: Build and smoke-test installed wheel
         env:
@@ -112,4 +110,5 @@ jobs:
             tests/test_gui_enhancements.py \
             tests/test_gui_schema_screen.py \
             tests/test_gui_authz_screen.py \
+            tests/test_gui_cspt_screen.py \
             tests/test_results_integrity.py

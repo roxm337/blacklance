@@ -82,7 +82,7 @@ def test_schema_screen_is_registered_on_the_rail():
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
     keys = [entry[0] for entry in window.SCREEN_DEFS]
-    # The full rail list is asserted once, in test_gui_authz_screen.py; here
+    # The full rail list is asserted once, in test_gui_app.py; here
     # only the invariants matter, so adding a screen is not a second edit.
     assert "schema" in keys
     index = MainWindow._screen_index("schema")
