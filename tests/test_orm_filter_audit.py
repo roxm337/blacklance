@@ -354,3 +354,85 @@ def test_timing_alone_never_promotes(monkeypatch, tmp_path):
     assert result == "done"
     assert not [f for f in state.findings["findings"]
                 if f.get("verified") is True]
+
+
+# ── probe accounting (what a screen can honestly show) ──────────
+
+def _report(state):
+    item = next(e for e in state.evidence["items"]
+                if e["type"] == "orm_filter_report")
+    return json.loads((Path(state.output_dir) / item["path"])
+                      .read_text(encoding="utf-8"))["data"]
+
+
+def test_a_quiet_surface_is_recorded_as_probed_not_silently_absent(
+        monkeypatch, tmp_path):
+    def responder(identity, url, method, data):
+        if urlparse(url).path == "/api/items":
+            return {"status": 200, "body": '{"data": []}'}
+        return {"status": 404, "body": ""}
+
+    module, state, harness = _module(
+        tmp_path, cfg=_cfg(canary={"enabled": False}, vector_values=["1"]))
+    harness.responder = responder
+    assert _run(module, monkeypatch, harness) == "done"
+    report = _report(state)
+    # SURFACE names two params; only "q" is a filter vector, so only the
+    # surface that was actually driven gets a negative result.
+    assert len(report["observations"]) == 1
+    observation = report["observations"][0]
+    assert observation["state"] == "no_signal"
+    assert observation["param"] == "q"
+    assert observation["values_tried"] == 1
+    assert report["state_counts"]["observation"] == 1
+    assert report["probes"] == []
+
+
+def test_candidate_probing_reports_the_reason_it_did_not_run(
+        monkeypatch, tmp_path):
+    module, state, harness = _module(
+        tmp_path, cfg=_cfg(canary={"enabled": False}, vector_values=[]))
+    harness.responder = lambda i, u, m, d: {"status": 200,
+                                            "body": '{"data": []}'}
+    assert _run(module, monkeypatch, harness) == "done"
+    report = _report(state)
+    # The surfaces were planned but nothing went out: an empty report must
+    # never read as "tested and clean".
+    assert report["observations"] == []
+    assert report["state_counts"]["observation"] == 0
+    assert report["surfaces"]  # planned, not probed
+    assert "vector_values" in report["untested"][0]["reason"]
+
+
+def test_a_cap_leaves_the_half_probed_surface_unprobed_not_clean(
+        monkeypatch, tmp_path):
+    def responder(identity, url, method, data):
+        if urlparse(url).path == "/api/items":
+            return {"status": 200, "body": '{"data": []}'}
+        return {"status": 404, "body": ""}
+
+    module, state, harness = _module(
+        tmp_path, cfg=_cfg(canary={"enabled": False}, max_payloads=1,
+                           vector_values=["1", "2"]))
+    harness.responder = responder
+    assert _run(module, monkeypatch, harness) == "done"
+    report = _report(state)
+    # One value went out of two: not a negative result, so no observation row.
+    assert report["observations"] == []
+    assert report["state_counts"]["observation"] == 0
+    assert any("max_payloads reached after 1 of 2" in item["reason"]
+               for item in report["untested"])
+
+
+def test_canary_enabled_without_a_record_template_says_there_is_no_proof_path(
+        monkeypatch, tmp_path):
+    cfg = _cfg(vector_values=["1"])
+    cfg["canary"]["record"].pop("url_template")
+    module, state, harness = _module(tmp_path, cfg=cfg)
+    harness.responder = lambda i, u, m, d: {"status": 200,
+                                            "body": '{"data": []}'}
+    assert _run(module, monkeypatch, harness) == "done"
+    report = _report(state)
+    assert report["canaries"] == []
+    assert report["state_counts"]["proof"] == 0
+    assert any("no proof path" in item["reason"] for item in report["untested"])

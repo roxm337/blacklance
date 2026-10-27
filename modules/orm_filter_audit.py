@@ -145,15 +145,20 @@ class ORMFilterAudit(BaseModule):
 
         report = {"schema_version": 1, "run_token": run_token,
                   "surfaces": surfaces,
-                  "probes": [], "canaries": [],
+                  "probes": [], "canaries": [], "observations": [],
                   "state_counts": {"observation": 0, "candidate": 0, "proof": 0},
                   "untested": []}
 
         await self._probe_surfaces(harness, identities, surfaces, cfg,
                                    report, stop_at)
-        if canary_cfg.get("enabled") and (canary_cfg.get("record") or {}) \
-                .get("url_template"):
-            await self._run_canaries(harness, canary_cfg, run_token, report)
+        if canary_cfg.get("enabled"):
+            if (canary_cfg.get("record") or {}).get("url_template"):
+                await self._run_canaries(harness, canary_cfg, run_token, report)
+            else:
+                report["untested"].append({
+                    "surface": "canary",
+                    "reason": "canary.enabled is true but canary.record."
+                              "url_template is not set — no proof path exists"})
 
         self.state.add_evidence(self.id, "orm_filter_report",
                                 self._base_url(), report)
@@ -269,7 +274,15 @@ class ORMFilterAudit(BaseModule):
     async def _probe_surfaces(self, harness, identities, surfaces, cfg,
                               report, stop_at) -> None:
         values = [str(v) for v in (cfg.get("vector_values") or []) if str(v)]
-        if not values or not identities:
+        if not values:
+            report["untested"].append({
+                "surface": "candidate probing",
+                "reason": "vector_values is empty — no filter value was sent"})
+            return
+        if not identities:
+            report["untested"].append({
+                "surface": "candidate probing",
+                "reason": "no verified identities to attribute rows to"})
             return
         try:
             max_payloads = max(1, int(cfg.get("max_payloads", 12) or 12))
@@ -283,15 +296,26 @@ class ORMFilterAudit(BaseModule):
         payload_calls = 0
         for surface in surfaces:
             if time.monotonic() >= stop_at or self.should_stop(reserve=25):
+                report["untested"].append(
+                    {"surface": surface["url"], "reason": "time-box hit"})
                 break
             base_rows = rows_of(str((await self._fetch(
                 harness, forbidden.name, surface["url"])).get("body") or ""))
             base_markers = {m for row in base_rows
                             for m in _markers(row)}
+            candidates = 0
+            tried = 0
             for value in values:
                 if payload_calls >= max_payloads:
+                    # A surface probed against part of the value list is not a
+                    # negative result; say which values never went out.
+                    report["untested"].append({
+                        "surface": surface["url"],
+                        "reason": f"max_payloads reached after {tried} of "
+                                  f"{len(values)} value(s)"})
                     return
                 payload_calls += 1
+                tried += 1
                 probe_url = with_param(surface["url"], surface["param"], value)
                 probe_rows = rows_of(str((await self._fetch(
                     harness, forbidden.name, probe_url)).get("body") or ""))
@@ -308,6 +332,7 @@ class ORMFilterAudit(BaseModule):
                      & others) - base_markers - control_markers)
                 if not matched_other:
                     continue
+                candidates += 1
                 report["state_counts"]["candidate"] += 1
                 report["probes"].append({
                     "surface": surface["url"], "param": surface["param"],
@@ -317,6 +342,16 @@ class ORMFilterAudit(BaseModule):
                     "note": "real records only — values are never stored",
                 })
                 self._file_candidate(surface, len(matched_other))
+            if not candidates:
+                # The surface was driven and stayed clean: the only honest
+                # negative this pass can offer for it.
+                report["state_counts"]["observation"] += 1
+                report["observations"].append({
+                    "surface": surface["url"], "param": surface["param"],
+                    "vector": surface["vector"], "source": surface["source"],
+                    "identity": forbidden.name, "values_tried": tried,
+                    "state": "no_signal",
+                })
 
     @staticmethod
     async def _fetch(harness, identity: str, url: str) -> dict:
