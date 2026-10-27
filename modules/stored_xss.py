@@ -69,6 +69,10 @@ class StoredXSS(BaseModule):
     async def run(self) -> str:
         base = self.base_url
         harness = AuthHarness(self.config)
+        # Adopt sessions captured earlier in the run (e.g. the admin session
+        # auth_bypass obtained via SQLi) so stored XSS is tested authenticated,
+        # not just from config identities.
+        harness.adopt_discovered(self.state, log=self.log)
         headers = {}
         if harness.identities:
             await harness.establish_all(base)

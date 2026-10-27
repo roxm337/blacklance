@@ -355,7 +355,11 @@ MODULE_REGISTRY = {
     },
     "auth_bypass": {
         "class": AuthBypass,
-        "stage": 5,
+        # Session acquisition: runs at the front of the active phase (stage 4,
+        # order=-1) so the SQLi-captured admin session exists before every
+        # authenticated module (stage 4 and 5) adopts it via adopt_discovered.
+        "stage": 4,
+        "order": -1,
         "detectability": "high",
         "depends_on": ["tech_detection"],
         "active": True,
@@ -711,11 +715,18 @@ def get_module(module_id: str):
 
 
 def get_modules_by_stage(stage: int) -> list:
-    """Get all module IDs for a given stage."""
-    return [
-        mid for mid, m in MODULE_REGISTRY.items()
-        if m["stage"] == stage and not m.get("replaced_by")
-    ]
+    """Get all module IDs for a given stage.
+
+    Within a stage, modules keep registry (insertion) order, except that an
+    explicit `order` (default 0) can pull one earlier or push it later. This is
+    how session acquisition (auth_bypass, order<0) runs before the authenticated
+    modules that adopt its captured session, without churning the registry.
+    """
+    staged = [(mid, m) for mid, m in MODULE_REGISTRY.items()
+              if m["stage"] == stage and not m.get("replaced_by")]
+    # Stable sort: equal `order` preserves insertion order.
+    staged.sort(key=lambda kv: kv[1].get("order", 0))
+    return [mid for mid, _ in staged]
 
 
 def get_all_module_ids() -> list:

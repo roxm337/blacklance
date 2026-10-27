@@ -87,6 +87,10 @@ class CacheDeception(BaseModule):
             return "skipped"
 
         harness = AuthHarness(self.config)
+        # A session captured earlier in the run (e.g. auth_bypass's SQLi admin
+        # session) is a valid identity for deception testing — adopt it so the
+        # module does not skip when no identity was configured by hand.
+        harness.adopt_discovered(self.state, log=self.log)
         await harness.establish_all(self.base_url)
         usable = harness.usable
         if not usable:
