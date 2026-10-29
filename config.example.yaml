@@ -175,6 +175,7 @@ budget_limits:
   max_wall_clock_seconds: 0    # 0 = unlimited
   max_llm_calls: 0             # 0 = unlimited
   max_external_commands: 0     # scanner/tool process launches; 0 = unlimited
+  max_actions: 0               # agent/chain actions; 0 = unlimited
   resume: false                # standalone budget API default; CLI fresh/resume/retest overrides this
   max_concurrent_actions: 5    # throughput knob, not a cap
 

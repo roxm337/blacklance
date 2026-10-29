@@ -102,6 +102,47 @@ def test_llm_mode_runs_llm(dispatched, monkeypatch):
     assert dispatched == [("llm", None)]
 
 
+def test_omitted_max_actions_keeps_configured_budget(tmp_path, monkeypatch):
+    """argparse's old default 0 unconditionally overwrote
+    budget_limits.max_actions, silently removing the configured cap."""
+    import asyncio
+    from orchestrator import Orchestrator
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("budget_limits:\n  max_actions: 7\n")
+    seen = []
+
+    async def record(self):
+        seen.append(self)
+
+    monkeypatch.setattr(Orchestrator, "run_all", record)
+    asyncio.run(_run(monkeypatch, [
+        "orchestrator.py", "-t", "localhost:3000",
+        "-o", str(tmp_path / "out"), "-c", str(cfg)]))
+
+    assert seen and seen[0].budget.max_actions == 7
+    assert seen[0].max_actions == 7
+
+
+def test_llm_mode_with_active_runs_llm(dispatched, monkeypatch):
+    """--active is a capability flag, not a mode: it must not swallow
+    --mode llm."""
+    import asyncio
+    asyncio.run(_run(monkeypatch, _argv("--mode", "llm", "--active")))
+    assert dispatched == [("llm", None)]
+
+
+def test_active_and_llm_are_independent(tmp_path):
+    from orchestrator import Orchestrator
+    o = Orchestrator("example.com", str(tmp_path),
+                     config_path=str(tmp_path / "missing.yaml"),
+                     mode="llm", active=True)
+    assert o.mode == "llm"
+    assert o.active is True
+    assert o.config["target"]["mode"] == "llm"
+    assert o.config["target"]["active"] is True
+
+
 def test_default_pipeline_never_runs_active_modules(tmp_path, monkeypatch):
     """No flags must mean passive behavior, not merely a passive label."""
     import asyncio
