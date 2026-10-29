@@ -17,7 +17,8 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.validators import inject_param
+from core.redaction import sensitive_key
+from core.validators import inject_param, redact_for_log
 
 URL_KEYS = ("url", "test_url", "probe_url", "payload_url", "target", "endpoint")
 BODY_KEYS = ("body", "data", "payload_body", "post_data")
@@ -112,6 +113,12 @@ def build_request(finding: dict, evidence: list | None = None) -> RequestSpec:
     param = str(blob.get("param") or "").strip()
     payload = str(blob.get("payload") or "").strip()
     if url and param and payload:
+        url = inject_param(url, param, payload)
+    # Evidence may retain a session token in a query string. Strip it like
+    # every other persisted artifact, but keep a payload the finding is
+    # deliberately testing even when its parameter name looks sensitive.
+    url = redact_for_log(url)
+    if url and param and payload and sensitive_key(param):
         url = inject_param(url, param, payload)
 
     method = str(blob.get("method") or blob.get("http_method") or "").upper()

@@ -1156,9 +1156,10 @@ def test_redact_for_log_scrubs_sessions():
     from core.validators import redact_for_log
     text = ("sqlmap --cookie sess=abc123 --headers 'Authorization: Bearer bt992' "
             "Cookie: sess=abc123 api_key=supersecret ?key=shodansecret "
-            "wpscan --api-token WPVULNKEY")
+            "?access_token=oauthsecret&tab=1 wpscan --api-token WPVULNKEY")
     out = redact_for_log(text)
-    for secret in ("abc123", "bt992", "supersecret", "shodansecret", "WPVULNKEY"):
+    for secret in ("abc123", "bt992", "supersecret", "shodansecret",
+                   "oauthsecret", "WPVULNKEY"):
         assert secret not in out, out
     assert "--cookie ***" in out and "--api-token ***" in out
 

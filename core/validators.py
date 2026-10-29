@@ -246,8 +246,11 @@ _REDACT_PATTERNS = (
     # api_key=xxx, apiKey: "xxx", 'api_key': 'xxx'
     (re.compile(r"(?i)\b(api[_-]?key|api[_-]?token)\b(['\"]?\s*[:=]\s*['\"]?)([^'\"\s,}]+)"),
      r"\1\2***"),
-    # ?key=xxx& / ?api_key=xxx in echoed URLs
-    (re.compile(r"(?i)([?&](?:api[_-]?key|key|token)=)([^&\s'\"]+)"), r"\1***"),
+    # ?key=xxx& / ?access_token=xxx in echoed URLs and captured page URLs.
+    (re.compile(r"(?i)([?&](?:api[_-]?key|key|token|access_token|"
+                r"refresh_token|id_token|auth_token|session|sessionid|"
+                r"session_id|password|passwd|secret|client_secret)=)"
+                r"([^&\s'\"]+)"), r"\1***"),
 )
 
 

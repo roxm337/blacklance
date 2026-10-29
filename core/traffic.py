@@ -148,8 +148,9 @@ class TrafficCapture:
                     method=str(getattr(request, "method", "") or ""),
                     resource_type=resource_type,
                     initiator=self._initiator(request),
-                    page_url=str(getattr(request, "frame", None).url
-                                 if getattr(request, "frame", None) else ""),
+                    page_url=redact_for_log(
+                        str(getattr(request, "frame", None).url
+                            if getattr(request, "frame", None) else "")),
                     identity=dict(self._identity),
                     request_headers=redact_headers(headers),
                     request_body=body[:self.max_request_body],
@@ -191,8 +192,9 @@ class TrafficCapture:
                     url=redact_for_log(str(response.url)),
                     status=int(getattr(response, "status", 0) or 0),
                     resource_type=resource_type,
-                    page_url=str(getattr(request, "frame", None).url
-                                 if getattr(request, "frame", None) else ""),
+                    page_url=redact_for_log(
+                        str(getattr(request, "frame", None).url
+                            if getattr(request, "frame", None) else "")),
                     identity=dict(self._identity),
                     response_headers=headers,
                     response_body=redact_body(body)[:self.max_response_body],
@@ -204,16 +206,16 @@ class TrafficCapture:
 
     def _request_id(self, request) -> str:
         try:
-            return f"{request.method} {request.url}"
+            return f"{request.method} {redact_for_log(str(request.url))}"
         except Exception:
-            return str(request)
+            return redact_for_log(str(request))
 
     def _initiator(self, request) -> str:
         frame = getattr(request, "frame", None)
         if frame is not None:
             url = getattr(frame, "url", "")
             if url:
-                return str(url)
+                return redact_for_log(str(url))
         return ""
 
     # ── WebSocket capture (I7) ────────────────────────────────────
@@ -277,7 +279,7 @@ class TrafficCapture:
 
     def _page_url(self) -> str:
         try:
-            return str(getattr(self._page, "url", "") or "")
+            return redact_for_log(str(getattr(self._page, "url", "") or ""))
         except Exception:
             return ""
 

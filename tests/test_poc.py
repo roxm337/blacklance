@@ -88,6 +88,21 @@ def test_credentials_are_never_copied_into_the_poc():
             assert "SUPERSECRET" not in path.read_text()
 
 
+def test_query_credentials_are_stripped_from_pocs():
+    state = _state()
+    _verified(state, verification={
+        "method": "idor",
+        "url": "https://example.test/items?access_token=LIVESESSION&page=2",
+    })
+    paths = write_report_bundle(state, "example.test")
+
+    for path in Path(paths["pocs"]).iterdir():
+        if path.suffix in (".sh", ".py", ".md", ".json"):
+            text = path.read_text()
+            assert "LIVESESSION" not in text, path
+            assert "access_token=***" in text, path
+
+
 def test_unverified_findings_get_no_poc():
     state = _state()
     _verified(state, verified=False, confidence="FIRM")
