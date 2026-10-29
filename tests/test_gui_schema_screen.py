@@ -292,10 +292,10 @@ def test_enabling_without_impact_probe_is_warned(tmp_path):
 
 
 def test_probe_tool_labels_unavailable_and_supported(tmp_path, monkeypatch):
-    import gui.app as gui_app
+    import gui.screens.schema as schema_screen
     app, window = _window(tmp_path)
     monkeypatch.setattr(
-        gui_app, "schemathesis_available",
+        schema_screen, "schemathesis_available",
         lambda: {"available": False,
                  "reason": "schemathesis 3.19.0 < 3.21.0 (auth config unsupported)"})
     window._probe_schema_tool()
@@ -303,7 +303,7 @@ def test_probe_tool_labels_unavailable_and_supported(tmp_path, monkeypatch):
     assert "3.21.0" in window.schema_tool_label.text()
 
     monkeypatch.setattr(
-        gui_app, "schemathesis_available",
+        schema_screen, "schemathesis_available",
         lambda: {"available": True, "version": "4.32.5", "backend": "local"})
     window._probe_schema_tool()
     assert window.schema_tool_label.text() == \
@@ -315,6 +315,9 @@ def test_probe_tool_labels_unavailable_and_supported(tmp_path, monkeypatch):
 def test_run_schema_pass_is_confirmed_then_single_modules(tmp_path, monkeypatch):
     app, window = _window(tmp_path)
     (tmp_path / "config.yaml").write_text("{}", encoding="utf-8")
+    # The window was built before this isolated config existed, so it may hold
+    # the developer's local api_workflows.enabled switch. Load the empty file.
+    window._load_settings_form()
     # Modal boxes block the offscreen test run: answers come from the tap.
     monkeypatch.setattr(QMessageBox, "information",
                         staticmethod(lambda *a, **k: QMessageBox.Ok))
