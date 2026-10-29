@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import re
+import secrets
 import signal
 import shutil
 import subprocess
@@ -1777,9 +1778,9 @@ def close_interactsh_sessions() -> None:
 class PublicInteractshClient:
     """InteractshClient-compatible facade over a public session.
 
-    register_callback hands back the session domain (payloads ride in
-    distinct paths via callback_url); poll matches the full request
-    URL so parallel probes stay distinguishable. The process is shared
+    register_callback hands back a random path token; callback_url
+    combines it with the shared session domain. poll matches that token,
+    so parallel probes stay distinguishable. The process is shared
     scan-wide and reaped on interpreter exit.
     """
 
@@ -1792,6 +1793,7 @@ class PublicInteractshClient:
         self.enabled = True
         self._corr = ""
         self._offset = 0
+        self._tokens: dict[str, str] = {}
 
     async def register_callback(self, payload: str) -> str:
         import atexit as _atexit
@@ -1799,13 +1801,28 @@ class PublicInteractshClient:
         if not session.get("available"):
             self.enabled = False
             return ""
+        host = str(session.get("url", "")).strip()
+        if not host:
+            self.enabled = False
+            return ""
         _atexit.register(close_interactsh_sessions)
-        self._corr = str(session.get("url", ""))
-        self._offset = int(session.get("offset", 0))
-        return self._corr
+        # The session hostname is shared by every callback in the scan. A
+        # hostname-only needle attributes any interaction to any probe, so
+        # each registration gets a random path token as its correlation id.
+        token = secrets.token_hex(8)
+        self._tokens[token] = host
+        self._corr = token
+        self._offset = 0
+        return token
 
     def callback_url(self, corr_id: str, path: str = "/") -> str:
-        host = corr_id or self._corr
+        corr_id = corr_id or self._corr
+        token = ""
+        host = self._tokens.get(corr_id or "")
+        if host:
+            token = corr_id
+        else:
+            host = corr_id
         if not host:
             return f"http://unregistered.oob.invalid{path}"
         if "://" in host:
@@ -1814,6 +1831,8 @@ class PublicInteractshClient:
             base = f"https://{host}"
         if not path.startswith("/"):
             path = "/" + path
+        if token:
+            return f"{base}/{token}{path}"
         return f"{base}{path}"
 
     async def poll(self, corr_id: str) -> list[dict]:
@@ -1829,14 +1848,43 @@ class PublicInteractshClient:
         if not log_path:
             return []
         deadline = _time.monotonic() + self.poll_timeout
-        offset = self._offset
         while _time.monotonic() < deadline:
-            interactions, offset = _poll_interactsh_log(log_path, offset)
+            # A shared-process client may poll several callbacks. Advancing
+            # a single offset would let one poll consume another callback's
+            # interaction, so every poll rescans the append-only log and
+            # filters on the unique token.
+            interactions, _ = _poll_interactsh_log(log_path, 0)
             hits = [item for item in interactions
                     if needle and needle in json.dumps(item).lower()]
             if hits:
-                self._offset = offset
                 return hits
             await _asyncio.sleep(self.poll_interval)
-        self._offset = offset
         return []
+
+    async def verify_callback(self, corr_id: str, callback_url: str = "",
+                              poll: bool = True):
+        from core.verification_oracle import Confidence, Verdict
+        if not poll:
+            return Verdict(Confidence.TENTATIVE, 0.0,
+                           evidence={"corr_id": corr_id,
+                                     "callback_url": callback_url},
+                           reason="callback registered, no poll requested")
+        if not self.enabled or not corr_id:
+            return Verdict(Confidence.TENTATIVE, 0.0,
+                           evidence={"corr_id": corr_id,
+                                     "callback_url": callback_url,
+                                     "interactions": []},
+                           reason="OOB callback channel is not configured")
+        interactions = await self.poll(corr_id)
+        if interactions:
+            return Verdict(Confidence.CONFIRMED, 1.0,
+                           evidence={"oob": {
+                               "corr_id": corr_id,
+                               "callback_url": callback_url,
+                               "interactions": interactions}},
+                           reason=f"OOB callback received ({len(interactions)} interactions)")
+        return Verdict(Confidence.TENTATIVE, 0.0,
+                       evidence={"corr_id": corr_id,
+                                 "callback_url": callback_url,
+                                 "interactions": []},
+                       reason=f"no OOB callback within {self.poll_timeout}s")

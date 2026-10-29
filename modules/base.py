@@ -6,7 +6,7 @@ import yaml
 from pathlib import Path
 from typing import Optional
 from core.keyvault import KeyVault
-from core.verification_oracle import configure_oob
+from core.verification_oracle import configure_oob, make_oob_client
 from state.manager import StateManager
 from tools.wrappers import (bash, configure_http_session,
                            configure_request_observer, curl, dig, whois_lookup)
@@ -108,37 +108,17 @@ class BaseModule:
         return result
 
     def oob(self):
-        """Return an out-of-band callback client, or None if none is configured.
+        """Return an out-of-band callback client, or None if not configured.
 
         Modules ask here instead of reading the oracle's config themselves, so
         the "is there somewhere for a callback to land" decision lives in one
-        place. Returning None matters: `InteractshClient` will happily build a
-        `*.oob.invalid` URL, and a target that dutifully tries to resolve it
+        place. Returning None matters: an unconfigured client would build a
+        ``*.oob.invalid`` URL, and a target that dutifully tries to resolve it
         turns an unconfigured check into a silent false negative that still
         costs a request against the target.
         """
-        from core.verification_oracle import InteractshClient
         cfg = self.config.get("oob") or {}
-        if isinstance(cfg, dict) and cfg.get("enabled") is False:
-            return None
-        # Public mode: multiplexed session against the interactsh
-        # network, no self-hosted server needed. Every module keeps
-        # the same register/callback/poll interface.
-        if isinstance(cfg, dict) and str(cfg.get("mode", "")).lower() == "public":
-            from tools.external import PublicInteractshClient
-            client = PublicInteractshClient(
-                # Default is the public mesh, NOT interactsh.com (the
-                # project website — it serves no OAST traffic). An
-                # explicit server_url still wins for private meshes.
-                server=str(cfg.get("server_url")
-                           or "oast.pro,oast.live,oast.site,oast.online,"
-                              "oast.fun,oast.me"),
-                poll_interval=float(cfg.get("poll_interval", 2.0) or 2.0),
-                poll_timeout=float(cfg.get("poll_timeout", 30.0) or 30.0),
-            )
-            return client if client.enabled else None
-        client = InteractshClient(config=cfg if isinstance(cfg, dict) else {})
-        return client if client.enabled else None
+        return make_oob_client(cfg if isinstance(cfg, dict) else {})
 
     async def resolve(self, subdomain: str) -> Optional[str]:
         """Resolve subdomain to IP."""

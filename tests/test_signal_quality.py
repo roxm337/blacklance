@@ -217,6 +217,55 @@ def test_verify_composite_stable_page_does_not_confirm(monkeypatch):
     assert result.confidence == "TENTATIVE"
 
 
+def test_ssrf_oob_polls_the_registered_correlation(monkeypatch):
+    """The action registered corr-id A, injected A's URL, then called
+    verify(payload), which registered B and polled B forever."""
+    import actions.web.ssrf as ssrf_module
+    from core.verification_oracle import Confidence, Verdict
+
+    calls = {"register": 0, "verify": 0}
+
+    class FakeOOB:
+        enabled = True
+        poll_timeout = 0.1
+        poll_interval = 0
+
+        async def register_callback(self, payload):
+            calls["register"] += 1
+            return "corr-A"
+
+        def callback_url(self, corr_id, path="/"):
+            return f"http://{corr_id}.oob.test{path}"
+
+        async def verify_callback(self, corr_id, callback_url="", poll=True):
+            assert corr_id == "corr-A"
+            assert "corr-A" in callback_url
+            return Verdict(Confidence.CONFIRMED, 1.0,
+                           evidence={"oob": {"corr_id": corr_id}})
+
+        async def verify(self, *args, **kwargs):
+            calls["verify"] += 1
+            raise AssertionError("verify() would register a new correlation id")
+
+        async def poll(self, corr_id):
+            return []
+
+    async def fake_curl(url, **kwargs):
+        from urllib.parse import unquote
+        assert "corr-A.oob.test/test" in unquote(url)
+        return {"status": 200, "body": "ok"}
+
+    monkeypatch.setattr(ssrf_module, "make_oob_client", lambda: FakeOOB())
+    monkeypatch.setattr(ssrf_module, "curl", fake_curl)
+    result = asyncio.run(ssrf_module.ssrf_oob_detect(
+        _ctx("web.ssrf.oob_detect",
+             url="https://example.com/fetch?url=x", param="url")))
+
+    assert calls == {"register": 1, "verify": 0}
+    assert result.success is True
+    assert result.confidence == "CONFIRMED"
+
+
 # ── Executor attribution + self-prune ───────────────────────────
 
 class _Chain:

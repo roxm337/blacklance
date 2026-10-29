@@ -36,6 +36,32 @@ def configure_oob(config: Optional[dict] = None):
     _OOB_CONFIG = (config or {}).get("oob", {}) or {}
 
 
+def make_oob_client(oob_config: Optional[dict] = None):
+    """Build the configured OOB client, or None when OOB is off.
+
+    Surfaces used to instantiate InteractshClient directly and ignored
+    `oob.mode: public`, so an action could not use the same callback
+    channel as the modules.
+    """
+    cfg = oob_config if oob_config is not None else _OOB_CONFIG
+    if not isinstance(cfg, dict):
+        cfg = {}
+    if cfg.get("enabled") is False:
+        return None
+    if str(cfg.get("mode", "")).lower() == "public":
+        from tools.external import PublicInteractshClient
+        client = PublicInteractshClient(
+            server=str(cfg.get("server_url")
+                       or "oast.pro,oast.live,oast.site,oast.online,"
+                          "oast.fun,oast.me"),
+            poll_interval=float(cfg.get("poll_interval", 2.0) or 2.0),
+            poll_timeout=float(cfg.get("poll_timeout", 30.0) or 30.0),
+        )
+        return client if client.enabled else None
+    client = InteractshClient(config=cfg)
+    return client if client.enabled else None
+
+
 class Confidence(Enum):
     CONFIRMED = "CONFIRMED"
     FIRM = "FIRM"
@@ -332,11 +358,28 @@ class InteractshClient:
 
     async def verify(self, payload: str, poll: bool = True) -> Verdict:
         corr_id = await self.register_callback(payload)
-        callback_url = self.callback_url(corr_id)
+        return await self.verify_callback(
+            corr_id, self.callback_url(corr_id), poll=poll)
+
+    async def verify_callback(self, corr_id: str, callback_url: str = "",
+                              poll: bool = True) -> Verdict:
+        """Poll a callback that was already registered.
+
+        Callers that inject ``callback_url(corr_id)`` must not call
+        ``verify(payload)``: that registers a second, unrelated correlation
+        id and polls it forever while the real interaction sits unread.
+        """
         if not poll:
             return Verdict(Confidence.TENTATIVE, 0.0,
-                           evidence={"corr_id": corr_id, "callback_url": callback_url},
+                           evidence={"corr_id": corr_id,
+                                     "callback_url": callback_url},
                            reason="callback registered, no poll requested")
+        if not self.enabled or not corr_id:
+            return Verdict(Confidence.TENTATIVE, 0.0,
+                           evidence={"corr_id": corr_id,
+                                     "callback_url": callback_url,
+                                     "interactions": []},
+                           reason="OOB callback channel is not configured")
 
         deadline = time.time() + self.poll_timeout
         interactions = []
