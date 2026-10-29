@@ -130,6 +130,25 @@ class BaseAgent:
                           f"{self.max_risk.value} ceiling"),
                 "blocked": True,
             }
+
+        # LLM-proposed hypotheses are untrusted input. An agent must not let
+        # a model (or a poisoned asset) point a proving action at an
+        # unrelated host just because the action itself is allow-listed.
+        target_cfg = self.config.get("target", {}) if isinstance(
+            self.config, dict) else {}
+        base_url = str(target_cfg.get("raw_url")
+                       or target_cfg.get("base_url") or "").strip()
+        domain = str(target_cfg.get("domain") or "").strip()
+        if base_url and domain and not target_cfg.get("allow_out_of_scope"):
+            from core.probe_targets import confirmed_origin_ips, in_scope_url
+            origins = confirmed_origin_ips(self.state)
+            if not in_scope_url(target, base_url, domain, origins):
+                return {
+                    "success": False,
+                    "error": (f"blocked_scope: {target!r} is outside the "
+                              f"engagement scope for {domain}"),
+                    "blocked": True,
+                }
         try:
             self.budget.raise_if_exceeded()
         except BudgetExceededError as exc:

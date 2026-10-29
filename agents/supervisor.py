@@ -142,7 +142,7 @@ class SupervisorAgent(BaseAgent):
             self.bb.add_hypothesis(hyp)
 
         self.log(f"Plan built: {len(plan.get('hypotheses', []))} hypotheses, "
-                 f"{len(chain_text)} chains")
+                 f"{len(chains)} chains")
         return plan
 
     def _format_chains(self, chains: list[AttackPath]) -> str:
@@ -186,10 +186,39 @@ class SupervisorAgent(BaseAgent):
             module_ids=set(get_all_module_ids()),
         )
 
+    def _chain_target(self, chain, fallback: str) -> str:
+        if not chain.nodes:
+            return fallback
+        node = chain.nodes[-1]
+        target = self._node_target(node)
+        if node.node_type == "goal" and len(chain.nodes) >= 2:
+            target = self._node_target(chain.nodes[-2]) or target
+        return target or fallback
+
+    @staticmethod
+    def _node_target(node) -> str:
+        attrs = node.attrs or {}
+        for key in ("url", "value", "endpoint"):
+            value = str(attrs.get(key) or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+        label = str(node.label or "").strip()
+        if label.startswith(("http://", "https://")):
+            return label
+        return ""
+
+    @staticmethod
+    def _status_code(value) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def _fallback_plan(self, chains: list) -> dict:
         hyps = []
         raw_url = self.config.get("target", {}).get("raw_url", "")
         domain = self.config.get("target", {}).get("domain", "")
+        seen: set[tuple[str, str]] = set()
 
         technique_map = {
             "pivot": "cloud enumeration / SSRF",
@@ -198,18 +227,33 @@ class SupervisorAgent(BaseAgent):
             "api_discovery": "API enumeration",
         }
 
-        for c in chains[:5]:
+        for c in chains:
+            if len(hyps) >= 3:
+                break
             edge_type = c.edges[-1].edge_type if c.edges else ""
-            target_node = c.nodes[-1].label if c.nodes else ""
-            technique = technique_map.get(edge_type, edge_type)
+            if edge_type != "exploit":
+                continue
+            target = self._chain_target(c, raw_url)
+            source = c.nodes[-2] if len(c.nodes) >= 2 else None
+            attrs = source.attrs if source else {}
+            if attrs.get("private") is True or self._status_code(
+                    attrs.get("status")) >= 400:
+                continue
+            if not target:
+                continue
+            key = (edge_type, target)
+            if key in seen:
+                continue
+            seen.add(key)
+            goal = c.nodes[-1].label if c.nodes else edge_type
 
             hyps.append({
-                "title": f"Investigate {edge_type} chain from {target_node}",
+                "title": f"Investigate {edge_type} chain to {goal}",
                 "description": c.summary,
                 "likelihood": c.score,
                 "impact": c.score,
-                "target": target_node or raw_url,
-                "technique": technique,
+                "target": target,
+                "technique": technique_map.get(edge_type, edge_type),
                 "action_id": "",
                 "assigned_to": "exploitation",
             })
