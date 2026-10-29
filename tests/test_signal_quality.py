@@ -201,6 +201,57 @@ def test_verify_reproducible_identical_pair_confirms_nothing(monkeypatch):
     assert result.success is False
 
 
+def test_reproducibility_fingerprints_use_body_hash():
+    """Fingerprints carry body_hash, not body/time_ms. The old tuple
+    compared absent keys and confirmed every response, including one whose
+    body changed between reps."""
+    from core.verification_oracle import ReproducibilityChecker
+
+    bodies = iter([1001, 2002, 3003])
+
+    async def probe():
+        return {"status": 200, "body_hash": next(bodies),
+                "body_length": 11, "word_count": 2, "line_count": 1}
+
+    verdict = asyncio.run(ReproducibilityChecker().check(probe))
+
+    assert verdict.confidence.value == "FIRM"
+    assert verdict.score < 1.0
+
+
+def test_reproducibility_raw_flapping_body_does_not_confirm():
+    from core.verification_oracle import ReproducibilityChecker
+
+    bodies = iter(["same", "changed", "same"])
+
+    async def probe():
+        return {"status": 200, "body": next(bodies), "time_ms": 5}
+
+    verdict = asyncio.run(ReproducibilityChecker().check(probe))
+
+    assert verdict.confidence.value == "FIRM"
+    assert verdict.score < 1.0
+
+
+def test_verify_composite_flapping_body_is_not_confirmed(monkeypatch):
+    from core.verification_oracle import DifferentialAnalyzer
+
+    calls = {"n": 0}
+
+    async def flapping(url, **kwargs):
+        calls["n"] += 1
+        body = "first payload result" if calls["n"] <= 2 else "different"
+        return {"status": 200, "body": body, "time_ms": 5, "headers": {}}
+
+    _patch_curl(monkeypatch, flapping)
+    result = asyncio.run(
+        verify_composite(_ctx("verify.composite_oracle",
+                              url="https://example.com/?q=payload")))
+    # Differential may be FIRM, but non-reproducible output must not reach
+    # CONFIRMED. (The composite still reports FIRM when divergence is real.)
+    assert result.confidence != "CONFIRMED"
+
+
 def test_verify_composite_stable_page_does_not_confirm(monkeypatch):
     import tools.wrappers as wrappers
 
@@ -215,6 +266,55 @@ def test_verify_composite_stable_page_does_not_confirm(monkeypatch):
 
     assert result.success is False
     assert result.confidence == "TENTATIVE"
+
+
+def test_ssrf_oob_polls_the_registered_correlation(monkeypatch):
+    """The action registered corr-id A, injected A's URL, then called
+    verify(payload), which registered B and polled B forever."""
+    import actions.web.ssrf as ssrf_module
+    from core.verification_oracle import Confidence, Verdict
+
+    calls = {"register": 0, "verify": 0}
+
+    class FakeOOB:
+        enabled = True
+        poll_timeout = 0.1
+        poll_interval = 0
+
+        async def register_callback(self, payload):
+            calls["register"] += 1
+            return "corr-A"
+
+        def callback_url(self, corr_id, path="/"):
+            return f"http://{corr_id}.oob.test{path}"
+
+        async def verify_callback(self, corr_id, callback_url="", poll=True):
+            assert corr_id == "corr-A"
+            assert "corr-A" in callback_url
+            return Verdict(Confidence.CONFIRMED, 1.0,
+                           evidence={"oob": {"corr_id": corr_id}})
+
+        async def verify(self, *args, **kwargs):
+            calls["verify"] += 1
+            raise AssertionError("verify() would register a new correlation id")
+
+        async def poll(self, corr_id):
+            return []
+
+    async def fake_curl(url, **kwargs):
+        from urllib.parse import unquote
+        assert "corr-A.oob.test/test" in unquote(url)
+        return {"status": 200, "body": "ok"}
+
+    monkeypatch.setattr(ssrf_module, "make_oob_client", lambda: FakeOOB())
+    monkeypatch.setattr(ssrf_module, "curl", fake_curl)
+    result = asyncio.run(ssrf_module.ssrf_oob_detect(
+        _ctx("web.ssrf.oob_detect",
+             url="https://example.com/fetch?url=x", param="url")))
+
+    assert calls == {"register": 1, "verify": 0}
+    assert result.success is True
+    assert result.confidence == "CONFIRMED"
 
 
 # ── Executor attribution + self-prune ───────────────────────────
@@ -1559,6 +1659,40 @@ def test_social_osint_splits_confirmed_from_claimed(monkeypatch):
 
 # ── Wave D: XSS blind confirmation ──────────────────────────────
 
+def test_xss_max_points_zero_means_unlimited(monkeypatch):
+    """config.example.yaml ships max_points: 0. Treating it as a slice
+    length disabled every parameterized XSS probe on a fresh install."""
+    import modules.xss_scan as xss_module
+    from modules.xss_scan import XSSScan
+
+    seen = {}
+
+    async def fake_curl(url, **kwargs):
+        return {"status": 200, "body": "<html>static</html>"}
+
+    async def fake_dalfox(urls, timeout=600, blind=None, blind_oob=False,
+                          rate_limit=0):
+        seen["urls"] = urls
+        return {"available": True, "results": [], "exit_code": 0}
+
+    monkeypatch.setattr(xss_module, "curl", fake_curl)
+    monkeypatch.setattr(xss_module, "dalfox_scan", fake_dalfox)
+    monkeypatch.setattr(xss_module, "tool_available", lambda name: True)
+    monkeypatch.setattr(xss_module, "_playwright_available",
+                        AsyncMock(return_value=False))
+    state = _state()
+    for idx in range(2):
+        state.add_asset("parameter", f"param:p{idx}", "q",
+                        confidence="FIRM", sources=["test"],
+                        attrs={"url": f"https://example.com/{idx}"})
+    module = XSSScan(state, {"target": {"domain": "example.com"},
+                             "modules": {"xss_scan": {"max_points": 0}}})
+    monkeypatch.setattr(module, "oob", lambda: None)
+
+    assert asyncio.run(module.run()) == "done"
+    assert len(seen["urls"]) == 2
+
+
 def test_xss_blind_callback_confirms(monkeypatch):
     import modules.xss_scan as xss_module
     from modules.xss_scan import XSSScan
@@ -2166,6 +2300,30 @@ def test_probe_targets_scope_and_dedupe():
     points = iter_probe_points(state, base, "localhost")
     assert ("http://localhost:3000/api/Users/{id}", "id", "PUT") in [
         (p["url"], p["param"], p["method"]) for p in points]
+
+
+def test_confirmed_origin_ip_and_port_are_in_scope():
+    from core.probe_targets import (confirmed_origin_ips, in_scope_url,
+                                    iter_probe_points)
+    state = _state()
+    state.add_asset("ip", "ip:203.0.113.9", "203.0.113.9",
+                    confidence="CONFIRMED", sources=["test"],
+                    attrs={"origin": True})
+
+    origins = confirmed_origin_ips(state)
+    assert origins == {"203.0.113.9"}
+    assert in_scope_url("http://203.0.113.9:3001/", "https://example.com",
+                        "example.com", origins) is True
+    # An arbitrary scanned address is still a third party, not the target.
+    assert in_scope_url("http://203.0.113.10:3001/", "https://example.com",
+                        "example.com", origins) is False
+
+    state.add_asset("parameter", "q", "q", confidence="FIRM",
+                    sources=["test"],
+                    attrs={"url": "http://203.0.113.9:3001/search?q=1"})
+    points = iter_probe_points(state, "https://example.com", "example.com")
+    assert any(p["url"] == "http://203.0.113.9:3001/search?q=1"
+               and p["param"] == "q" for p in points)
 
 
 # ── Juice Shop wave: auth audit ─────────────────────────────────

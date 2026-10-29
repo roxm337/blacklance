@@ -37,6 +37,18 @@ _COMMON_AUTHORIZE = (
 _CLIENT_ID_RE = re.compile(r"client_id=([A-Za-z0-9._\-]{6,})")
 
 
+def _location_targets_marker(location: str, marker: str) -> bool:
+    location = str(location or "").strip()
+    marker = str(marker or "").strip().lower().rstrip(".")
+    if not location or not marker:
+        return False
+    if location.startswith("//"):
+        location = "https:" + location
+    parsed = urlparse(location)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return host == marker or host.endswith("." + marker)
+
+
 def parse_oidc_config(data: dict) -> dict:
     """Pull the endpoints and risk-relevant capabilities from an OIDC config."""
     if not isinstance(data, dict):
@@ -179,8 +191,9 @@ class OAuthAudit(BaseModule):
                     location = line.split(":", 1)[1].strip()
                     break
             # The bypass is proven only when the server would send the flow to
-            # our marker host — reflected verbatim in the redirect target.
-            if marker in location:
+            # our marker host, not when the marker merely appears in a query
+            # string on a same-origin redirect.
+            if _location_targets_marker(location, marker):
                 self.state.add_finding(
                     title="OAuth redirect_uri accepts attacker-controlled host",
                     severity="HIGH",

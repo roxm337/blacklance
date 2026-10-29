@@ -1,6 +1,7 @@
 """Tests for external tool parsers."""
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -893,6 +894,43 @@ def test_public_client_callback_url_shapes():
     assert client.callback_url("http://h/o", "p") == "http://h/o/p"
 
 
+def test_public_client_callbacks_are_unique_and_attributed(tmp_path, monkeypatch):
+    """Two probes share one interactsh session hostname. Polling must match
+    the per-callback token, not the hostname, and must not consume another
+    callback's interaction."""
+    log = tmp_path / "sess.jsonl"
+    log.write_text(
+        '{"full-id":"abc.s.test/token-a/test","raw-request":"GET /token-a/test"}\n'
+        '{"full-id":"abc.s.test/token-b/test","raw-request":"GET /token-b/test"}\n')
+
+    async def fake_session(server):
+        return {"available": True, "url": "abc.s.test",
+                "log": str(log), "offset": 0}
+
+    monkeypatch.setattr(external, "interactsh_session", fake_session)
+    external._PUBLIC_SESSION["https://s.test"] = {
+        "proc": None, "url": "abc.s.test", "log": str(log), "offset": 3}
+    try:
+        async def go():
+            client = external.PublicInteractshClient(server="https://s.test",
+                                                     poll_timeout=1)
+            a = await client.register_callback("one")
+            b = await client.register_callback("two")
+            assert a != b
+            assert client.callback_url(a, "/test") == \
+                f"https://abc.s.test/{a}/test"
+            assert client.callback_url(b, "/test") == \
+                f"https://abc.s.test/{b}/test"
+            log.write_text(log.read_text().replace("token-a", a)
+                                      .replace("token-b", b))
+            return a, b, await client.poll(a), await client.poll(b)
+        a, b, hits_a, hits_b = asyncio.run(go())
+        assert len(hits_a) == 1 and a in json.dumps(hits_a)
+        assert len(hits_b) == 1 and b in json.dumps(hits_b)
+    finally:
+        external._PUBLIC_SESSION.pop("https://s.test", None)
+
+
 def test_interactsh_session_reuses_live_process(monkeypatch):
     class FakeProc:
         returncode = None
@@ -1118,9 +1156,10 @@ def test_redact_for_log_scrubs_sessions():
     from core.validators import redact_for_log
     text = ("sqlmap --cookie sess=abc123 --headers 'Authorization: Bearer bt992' "
             "Cookie: sess=abc123 api_key=supersecret ?key=shodansecret "
-            "wpscan --api-token WPVULNKEY")
+            "?access_token=oauthsecret&tab=1 wpscan --api-token WPVULNKEY")
     out = redact_for_log(text)
-    for secret in ("abc123", "bt992", "supersecret", "shodansecret", "WPVULNKEY"):
+    for secret in ("abc123", "bt992", "supersecret", "shodansecret",
+                   "oauthsecret", "WPVULNKEY"):
         assert secret not in out, out
     assert "--cookie ***" in out and "--api-token ***" in out
 

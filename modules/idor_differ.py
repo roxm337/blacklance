@@ -595,6 +595,11 @@ class IdorDiffer(BaseModule):
         matrix_cfg = self._cfg().get("matrix") or {}
         if matrix_cfg.get("enabled") and harness.has_pair():
             await self._run_matrix_pass(harness, templates, ownership)
+        # Every other terminal path records completion. Without this the
+        # authenticated success path looked unfinished: resume re-ran the
+        # whole module, begin_module_run pruned its fresh findings, and
+        # mass_assignment (depends_on: idor_differ) fired at the wrong time.
+        self.state.complete_module(self.id)
         return "done"
 
     async def _run_matrix_pass(self, harness, templates, ownership) -> None:

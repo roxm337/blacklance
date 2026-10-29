@@ -453,17 +453,23 @@ def build_scan_args(
         args.extend(["--assessment", assessment_id])
     if from_assessment:
         args.extend(["--from-assessment", from_assessment])
-    # Autonomous engagement (r10xM-mode): one supervisor drives the whole
-    # recon -> exploit -> verify -> report lifecycle, so the per-module/mode
-    # selectors do not apply. --execute + --max-risk hand it the exploitation
-    # mandate; --module and --mode are deliberately omitted.
+    # Autonomous engagement (r10xM-mode): the supervisor owns exploit/verify/
+    # report, but it needs the deterministic surface first. --active runs the
+    # OSINT modules and --pentest builds the attack graph before the agents
+    # plan. --module/--mode still do not apply to the supervisor itself.
     if agent:
         args.append("--agent")
+        if active:
+            args.append("--active")
+        if pentest:
+            args.append("--pentest")
         if execute:
             args.append("--execute")
         args.extend(["--max-risk", str(max_risk)])
         if int(max_actions):
             args.extend(["--max-actions", str(int(max_actions))])
+        if pentest:
+            args.extend(["--max-chains", str(int(max_chains))])
         return args
     if active:
         args.append("--active")
@@ -475,7 +481,8 @@ def build_scan_args(
     if pentest:
         args.append("--pentest")
         args.extend(["--max-risk", str(max_risk)])
-        args.extend(["--max-actions", str(int(max_actions))])
+        if int(max_actions):
+            args.extend(["--max-actions", str(int(max_actions))])
         args.extend(["--max-chains", str(int(max_chains))])
         if execute:
             args.append("--execute")

@@ -90,13 +90,41 @@ def _same_host(candidate: str, *allowed: str) -> bool:
     return False
 
 
-def in_scope_url(url: str, base_url: str, domain: str) -> bool:
+def confirmed_origin_ips(state) -> set[str]:
+    """IPs already proven to be the target's own origin, not third parties.
+
+    Port scans and crawl results can name a CDN edge, a shared host, or an
+    unrelated service. Only an address the origin-discovery proof marked as
+    the target's own gets the same scope treatment as the engagement domain.
+    """
+    ips: set[str] = set()
+    for asset in state.get_assets_by_type("ip"):
+        attrs = asset.get("attrs", {}) or {}
+        if attrs.get("origin") is True:
+            value = str(asset.get("value") or "").strip().lower()
+            if value:
+                ips.add(value)
+    for asset in state.get_assets_by_type("origin_discovery"):
+        attrs = asset.get("attrs", {}) or {}
+        for value in attrs.get("confirmed_origins") or []:
+            value = str(value or "").strip().lower()
+            if value:
+                ips.add(value)
+    return ips
+
+
+def in_scope_url(url: str, base_url: str, domain: str,
+                 origin_ips: set[str] | None = None) -> bool:
     """Is this URL on the engagement's host, allowing siblings and ports?
 
     Recon legitimately finds alternate ports and subdomains of the target.
     Third-party CDNs, embeds, and archive noise are not the target and must
     never become active probe points: the old "any absolute URL" rule sent
     SQLMap to youtube.com and turned GitHub assets into findings.
+
+    `origin_ips` lets a confirmed origin address (with any port) be in
+    scope even when it is an IP rather than the domain. It is deliberately
+    opt-in: an arbitrary scanned IP is still out of scope.
     """
     try:
         parsed = urlparse(str(url))
@@ -108,7 +136,10 @@ def in_scope_url(url: str, base_url: str, domain: str) -> bool:
         parsed.port  # raises ValueError for a non-numeric port
     except ValueError:
         return False
-    return _same_host(str(parsed.hostname), base_url, domain)
+    host = str(parsed.hostname).strip().lower().rstrip(".")
+    if _same_host(host, base_url, domain):
+        return True
+    return bool(host and host in (origin_ips or set()))
 
 
 def iter_probe_points(state, base_url: str, domain: str,
@@ -119,6 +150,7 @@ def iter_probe_points(state, base_url: str, domain: str,
     """
     points = []
     seen = set()
+    origin_ips = confirmed_origin_ips(state)
 
     def emit(url: str, param: str, method: str, source: str,
              json_body: list | None = None):
@@ -137,7 +169,7 @@ def iter_probe_points(state, base_url: str, domain: str,
         attrs = asset.get("attrs", {}) or {}
         url = str(attrs.get("url", "") or "").strip()
         param = str(asset.get("value", "") or "").strip()
-        if not url or not param or not in_scope_url(url, base_url, domain):
+        if not url or not param or not in_scope_url(url, base_url, domain, origin_ips):
             continue
         method = str(attrs.get("method", "GET") or "GET").upper()
         emit(url, param, method, "parameter_asset")
@@ -145,7 +177,7 @@ def iter_probe_points(state, base_url: str, domain: str,
     # 2. Swagger-derived api_endpoint assets: query params plus methods.
     for asset in state.get_assets_by_type("api_endpoint"):
         url = str(asset.get("value", "") or "").strip()
-        if not url or not in_scope_url(url, base_url, domain):
+        if not url or not in_scope_url(url, base_url, domain, origin_ips):
             continue
         attrs = asset.get("attrs", {}) or {}
         methods = [m for m in (attrs.get("methods") or ["GET"])
@@ -183,7 +215,7 @@ def iter_probe_points(state, base_url: str, domain: str,
     for asset_type in ("url", "endpoint", "web_path"):
         for asset in state.get_assets_by_type(asset_type):
             url = str(asset.get("value", "") or "").strip()
-            if not url or not in_scope_url(url, base_url, domain):
+            if not url or not in_scope_url(url, base_url, domain, origin_ips):
                 continue
             try:
                 query = urlparse(url).query

@@ -8,7 +8,7 @@ from agents.base_agent import BaseAgent
 from agents.blackboard import AgentRole, Hypothesis
 from core.verification_oracle import (
     VerificationOracle, DifferentialAnalyzer, TimingOracle,
-    ReproducibilityChecker, InteractshClient,
+    ReproducibilityChecker, make_oob_client,
     Confidence, Verdict,
     _inject_param,
 )
@@ -211,7 +211,12 @@ class VerificationAgent(BaseAgent):
 
     async def _verify_ssrf(self, url: str, param: str,
                            hypothesis: Hypothesis) -> dict:
-        interactsh = InteractshClient()
+        interactsh = make_oob_client()
+        if interactsh is None:
+            hypothesis.status = "rejected"
+            return {"status": "rejected", "verdict": None, "success": False,
+                    "reason": "OOB not configured; blind SSRF untestable "
+                              "without a callback channel"}
         corr_id = await interactsh.register_callback(f"verify-{hypothesis.id}")
         oob_url = interactsh.callback_url(corr_id, "/verify")
         if not interactsh.enabled or not corr_id or "oob.invalid" in oob_url:
@@ -224,7 +229,7 @@ class VerificationAgent(BaseAgent):
         test_url = _inject_param(url, param, oob_url)
         await __import__("tools.wrappers", fromlist=["curl"]).curl(test_url)
 
-        verdict = await interactsh.verify(f"verify-{hypothesis.id}", poll=True)
+        verdict = await interactsh.verify_callback(corr_id, oob_url)
 
         if verdict.confidence.value == "CONFIRMED":
             hypothesis.status = "confirmed"

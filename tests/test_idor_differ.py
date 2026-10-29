@@ -772,6 +772,9 @@ class TestBearerIdentities:
         self._with_vault_identities(env, {"alice": "tok-alice",
                                           "bob": "tok-bob"})
         assert await env.run_module() == "done"
+        assert "idor_differ" in env.state.module["completed"], (
+            "authenticated success must mark the module complete or resume "
+            "re-runs it and prunes its findings")
 
     @served
     async def test_a_rejected_token_is_not_a_session(self, env):

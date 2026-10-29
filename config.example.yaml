@@ -20,6 +20,13 @@ target:
   domain: ""  # Set via CLI or prompt
   mode: "deep"  # passive | active | deep
 
+scope:
+  # Promote a live HTTP(S) service on an open port of a confirmed origin
+  # (e.g. 203.0.113.10:3001) to a URL target. The port is then crawled and
+  # probed like the main site, and findings there survive the scope filter.
+  # Third-party/CDN IPs are never promoted, even when the port is open.
+  include_open_ports: true
+
 paths:
   output_dir: "reports"
   wordlists: "wordlists"
@@ -168,6 +175,7 @@ budget_limits:
   max_wall_clock_seconds: 0    # 0 = unlimited
   max_llm_calls: 0             # 0 = unlimited
   max_external_commands: 0     # scanner/tool process launches; 0 = unlimited
+  max_actions: 0               # agent/chain actions; 0 = unlimited
   resume: false                # standalone budget API default; CLI fresh/resume/retest overrides this
   max_concurrent_actions: 5    # throughput knob, not a cap
 
@@ -906,7 +914,7 @@ modules:
     per_cve_seconds: 90
 
   xss_scan:
-    max_points: 0
+    max_points: 0              # 0 = every point; positive caps the pass
     browser_confirm: true
     dalfox_timeout: 600
     # Let dalfox run its own interactsh session against the public mesh.

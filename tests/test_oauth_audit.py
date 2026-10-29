@@ -67,6 +67,22 @@ def test_redirect_uri_open_is_high_finding(monkeypatch):
     assert f["severity"] == "HIGH"
 
 
+def test_relative_location_does_not_count_as_attacker_redirect():
+    from modules.oauth_audit import _location_targets_marker
+
+    assert not _location_targets_marker(
+        "/authorize/?redirect_uri=https://oauthx.example/cb", "oauthx.example")
+    assert not _location_targets_marker(
+        "https://acme.com/authorize?redirect_uri=https://oauthx.example/cb",
+        "oauthx.example")
+    assert _location_targets_marker(
+        "https://oauthx.example/cb", "oauthx.example")
+    assert _location_targets_marker(
+        "//oauthx.example/cb", "oauthx.example")
+    assert _location_targets_marker(
+        "https://acme.com.oauthx.example/cb", "oauthx.example")
+
+
 def test_no_oauth_endpoints_is_clean(monkeypatch):
     st = StateManager(str(Path(tempfile.mkdtemp()) / "acme.com"))
     st.add_asset("webapp", "webapp:https://acme.com", "https://acme.com",

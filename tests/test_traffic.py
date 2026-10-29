@@ -77,7 +77,7 @@ def test_capture_redacts_credentials_at_capture_time():
         headers={"Authorization": "Bearer sekret123", "Cookie": "session=abc",
                  "Content-Type": "application/json"},
         post_data='{"password": "hunter2", "token": "eyJhbGciOiJIUzI1NiJ9.abc.def"}',
-        frame=FakeFrame("https://x/app"))
+        frame=FakeFrame("https://x/app?access_token=page-secret&tab=1"))
     response = FakeResponse(
         "https://x/api/me", 200,
         '{"ok": true, "token": "eyJhbGciOiJIUzI1NiJ9.abc.def"}',
@@ -100,6 +100,8 @@ def test_capture_redacts_credentials_at_capture_time():
     assert "content-type" in resp_event.response_headers
     assert resp_event.parent_request_id == f"{request.method} {request.url}"
     assert req_event.identity["name"] == "user_a"
+    assert req_event.page_url == "https://x/app?access_token=***&tab=1"
+    assert "page-secret" not in json.dumps([e.to_dict() for e in capture.events])
     assert capture.requests_seen == 1
 
 

@@ -534,7 +534,8 @@ class AuthHarness:
 
     def __init__(self, config: dict | None = None):
         config = config or {}
-        auth_cfg = (config.get("auth") or {}) if isinstance(config, dict) else {}
+        raw_auth = config.get("auth") if isinstance(config, dict) else {}
+        auth_cfg = raw_auth if isinstance(raw_auth, dict) else {}
         self.raw_config = auth_cfg
         self.identities: dict[str, Identity] = {}
         self.mutations = None

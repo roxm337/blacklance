@@ -75,20 +75,19 @@ class ResponseAudit(BaseModule):
         return "done"
 
     def _targets(self) -> list:
-        from core.probe_targets import in_scope_url
         targets = []
         for asset in self.state.get_assets_by_type("api_endpoint"):
             value = str(asset.get("value", "") or "").strip()
             if value.startswith(("http://", "https://")) \
                     and value not in targets \
-                    and in_scope_url(value, self.base_url, self.domain):
+                    and self.in_scope(value):
                 targets.append(value)
         for asset in self.state.get_assets_by_type("endpoint"):
             value = str(asset.get("value", "") or "").strip()
             if value.startswith(("http://", "https://")) \
                     and value not in targets \
                     and "{id}" not in value \
-                    and in_scope_url(value, self.base_url, self.domain):
+                    and self.in_scope(value):
                 targets.append(value)
         return targets
 

@@ -51,6 +51,28 @@ def test_replay_reestablishes_identity_once():
     assert report.error == ""
 
 
+def test_unestablished_identity_is_not_replayed_anonymously():
+    class FailingIdentity(FakeIdentity):
+        async def establish(self, base_url=""):
+            self.established += 1
+            return False
+
+    class Harness(FakeHarness):
+        def __init__(self):
+            super().__init__()
+            self.identities = {"user_a": FailingIdentity("user_a")}
+
+    harness = Harness()
+    workflow = Workflow()
+    workflow.add(WorkflowStep(index=0, url="https://x/api/private",
+                              identity_ref="user_a"))
+    report = asyncio.run(replay_workflow(workflow, harness))
+
+    assert harness.calls == []
+    assert report.steps[0].result_kind == "error"
+    assert "did not establish" in report.error
+
+
 def test_anonymous_steps_use_anonymous_transport():
     harness = FakeHarness()
     workflow = Workflow()

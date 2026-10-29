@@ -2,7 +2,7 @@
 
 from actions.registry import action, ActionContext, ActionResult
 from core.validators import inject_param
-from core.verification_oracle import VerificationOracle, InteractshClient
+from core.verification_oracle import VerificationOracle, make_oob_client
 from tools.wrappers import curl
 
 
@@ -121,7 +121,11 @@ async def ssrf_oob_detect(ctx: ActionContext) -> ActionResult:
     param = ctx.params["param"]
     method = ctx.params.get("method", "GET")
 
-    interactsh = InteractshClient()
+    interactsh = make_oob_client()
+    if interactsh is None:
+        return ActionResult(False, error="OOB not configured; blind SSRF "
+                                        "untestable without a callback channel",
+                            confidence="TENTATIVE")
     corr_id = await interactsh.register_callback(f"ssrf-test-{param}")
 
     oob_url = interactsh.callback_url(corr_id, "/test")
@@ -136,8 +140,8 @@ async def ssrf_oob_detect(ctx: ActionContext) -> ActionResult:
 
     await curl(test_url, method=method, output="status")
 
-    # Poll for callback
-    verdict = await interactsh.verify(f"ssrf-test-{param}", poll=True)
+    # Poll the id we registered; verify() would register a new one.
+    verdict = await interactsh.verify_callback(corr_id, oob_url)
 
     if verdict.confidence.value == "CONFIRMED":
         return ActionResult(

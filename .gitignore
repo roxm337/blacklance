@@ -30,6 +30,8 @@ reports/
 # Stray state trees if a run is ever handed a URL as its output dir
 http:/
 https:/
+logs/
+gowitness.jsonl
 
 # ============================================================
 #  Internal development docs (kept local, not published)

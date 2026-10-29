@@ -151,11 +151,14 @@ class Orchestrator:
                  config_path: str = "config.yaml",
                  mode: str = "auto", resume_budget: bool = False,
                  run_mode: str = "fresh", assessment_id: str = None,
-                 from_assessment: str = None):
+                 from_assessment: str = None, active: bool | None = None):
         self.raw_target = target
         self.output_dir = Path(output_dir)
         self.config = self._load_config(config_path)
-        self.mode = mode  # auto | llm | module
+        # "active" is a capability flag, not a run mode. Conflating the two
+        # made `--active --mode llm` silently run deterministic modules.
+        self.active = (mode == "active") if active is None else bool(active)
+        self.mode = "auto" if mode == "active" else mode  # auto | llm | module
         self._surface_seeded = False
 
         # Extract domain from URL if target is a full URL
@@ -174,8 +177,8 @@ class Orchestrator:
         self.config["target"]["target_input"] = target
         self.config["target"]["raw_url"] = self.base_url
         self.config["target"]["scheme"] = urlparse(self.base_url).scheme
-        self.config["target"]["mode"] = mode
-        self.config["target"]["active"] = mode == "active"
+        self.config["target"]["mode"] = self.mode
+        self.config["target"]["active"] = self.active
 
         from core.assessments import AssessmentStore, AssessmentLease
         if resume_budget and run_mode != "resume":
@@ -349,7 +352,10 @@ class Orchestrator:
 
         print(f"\n{'='*60}")
         print(f"  OSINT Agent — {self.target}")
-        print(f"  Mode: {self.mode.upper()}")
+        label = self.mode.upper()
+        if self.active:
+            label += " + ACTIVE"
+        print(f"  Mode: {label}")
         print(f"  Assessment: {self.state.module.get('assessment', {}).get('assessment_id', 'legacy')}")
         print(f"  Output: {self.state.output_dir}")
         print(f"{'='*60}\n")
@@ -385,7 +391,7 @@ class Orchestrator:
 
             # Auto mode is genuinely passive. A specifically requested module
             # remains an explicit operator choice and is handled by run_module.
-            if entry.get("active") and self.mode != "active":
+            if entry.get("active") and not self.active:
                 self.state.skip_module(
                     module_id, "active module requires --active")
                 self.operations.refuse(
@@ -595,6 +601,16 @@ class Orchestrator:
         print(f"  Target: {self.target}")
         print(f"{'='*60}\n")
 
+        # --pentest can run without run_all; configure the transport here or
+        # the seeder/actions inherit an unconfigured session and limiter.
+        rl = self.config.get("rate_limits", {}).get("http", {})
+        configure_http_limiter(
+            max_concurrent=rl.get("concurrent", 5),
+            max_per_minute=rl.get("per_minute", 60),
+        )
+        configure_http_session(self.config)
+        configure_tool_backend(self.config)
+
         # Init budget
         # A graph built only from prior recon is empty on a fresh target, and
         # an empty graph reports zero findings while looking indistinguishable
@@ -768,6 +784,7 @@ class Orchestrator:
             max_per_minute=rl.get("per_minute", 60),
         )
         configure_http_session(self.config)
+        configure_tool_backend(self.config)
 
         entry = MODULE_REGISTRY.get(module_id)
         if not entry:
@@ -827,6 +844,16 @@ class Orchestrator:
                 and not getattr(self, "_surface_seeded", False)):
             self._surface_seeded = True
             await self._seed_surface()
+
+        # Module boundary is also a limiter boundary. A probe cancelled inside
+        # the previous module must never starve this one: recreating the
+        # limiter releases any slot a cancellation/timeout left behind, while
+        # the cancellation-safe RateLimiter.__aenter__ prevents the leak.
+        rl = self.config.get("rate_limits", {}).get("http", {})
+        configure_http_limiter(
+            max_concurrent=rl.get("concurrent", 5),
+            max_per_minute=rl.get("per_minute", 60),
+        )
 
         entry = MODULE_REGISTRY[module_id]
         module_class = entry["class"]
@@ -999,6 +1026,9 @@ Examples:
   # Allow agent action execution, still bounded by the risk ceiling
   python orchestrator.py -t example.com --agent --execute --max-risk MEDIUM
 
+  # Full autonomous engagement: deterministic recon + attack graph first
+  python orchestrator.py -t example.com --agent --active --pentest --execute --max-risk DESTRUCTIVE
+
   # List available modules
   python orchestrator.py -t example.com --list-modules
 
@@ -1031,9 +1061,10 @@ Examples:
                         choices=["SAFE", "LOW", "MEDIUM", "HIGH", "DESTRUCTIVE"],
                         help="Risk ceiling for executed actions (default: "
                              "DESTRUCTIVE).")
-    parser.add_argument("--max-actions", type=int, default=0,
+    parser.add_argument("--max-actions", type=int, default=None,
                         help="Cap on actions executed per engagement "
-                             "(default: 0 = unlimited)")
+                             "(default: config budget_limits.max_actions; "
+                             "explicit 0 = unlimited)")
     parser.add_argument("--max-chains", type=int, default=0,
                         help="Cap on chains executed per engagement "
                              "(default: 0 = unlimited)")
@@ -1046,8 +1077,10 @@ Examples:
     parser.add_argument("--list-assessments", action="store_true", help="List assessments for this exact origin, without scanning")
     parser.add_argument("--import-legacy", metavar="DIRECTORY", help="Copy inactive legacy results into an origin-bound assessment, then exit")
     parser.add_argument("--agent", action="store_true",
-                        help="Autonomous multi-agent engagement (plan-only exploitation "
-                             "unless --execute is supplied)")
+                        help="Autonomous multi-agent engagement. Combine with "
+                             "--active and/or --pentest to run deterministic "
+                             "recon and the attack graph first. Exploitation is "
+                             "plan-only unless --execute is supplied.")
     parser.add_argument("--phase", choices=["plan", "recon", "vuln", "exploit", "verify", "report"],
                         help="Run a single agent phase")
     parser.add_argument("--tools", action="store_true",
@@ -1147,7 +1180,9 @@ Examples:
               f"config.example.yaml to tune.\n")
         return
 
-    mode = "active" if args.active else args.mode
+    if args.config != "config.yaml" and not Path(args.config).is_file():
+        print(f"  config: file not found: {args.config} (using built-in defaults)")
+    mode = args.mode
     if (args.module in ("reporting", "risk_prioritization", "bounty_submission", "attack_planner")
             and not args.pentest and args.run_mode != "resume") or (
                 args.phase == "report" and args.run_mode != "resume"):
@@ -1155,15 +1190,18 @@ Examples:
     try:
         orchestrator = Orchestrator(
             target=args.target, output_dir=args.output, config_path=args.config,
-            mode=mode, resume_budget=bool(args.resume_budget),
+            mode=mode, active=bool(args.active),
+            resume_budget=bool(args.resume_budget),
             run_mode=args.run_mode, assessment_id=args.assessment,
             from_assessment=args.from_assessment)
     except (ValueError, OSError, RuntimeError) as exc:
         parser.error(str(exc))
     orchestrator.execute_chains = bool(args.execute)
     orchestrator.max_risk = args.max_risk
-    orchestrator.max_actions = args.max_actions
-    orchestrator.budget.configure_action_limit(args.max_actions)
+    # An omitted flag must not overwrite budget_limits.max_actions with 0.
+    if args.max_actions is not None:
+        orchestrator.budget.configure_action_limit(args.max_actions)
+    orchestrator.max_actions = orchestrator.budget.max_actions
     orchestrator.max_chains = args.max_chains
     print(f"\nAssessment: {orchestrator.assessment.id} ({args.run_mode})")
     print(f"Origin: {orchestrator.assessment_store.origin}")
@@ -1181,7 +1219,7 @@ Examples:
         "mode": mode,
         "execute": bool(args.execute),
         "max_risk": args.max_risk,
-        "max_actions": args.max_actions,
+        "max_actions": orchestrator.max_actions,
         "agent": bool(args.agent or args.phase),
     })
 
@@ -1192,13 +1230,24 @@ Examples:
     try:
         if args.agent or args.phase:
             from agents.agent_supervisor import AgentSupervisor
-            # Inject the raw target URL so agents can target specific paths
-            orchestrator.config["target"]["raw_url"] = args.target
 
-            # Seed the raw URL as an asset + parameters for attack graph
-            if "?" in args.target and "=" in args.target:
+            # Agent mode used to return before the deterministic pipeline, so
+            # --active/--pentest were silently ignored and the supervisor only
+            # saw the URL asset. Run the requested phases first: the agents
+            # then plan from real recon surface and attack-graph edges.
+            if args.agent and not args.phase:
+                if args.active:
+                    await orchestrator.run_all()
+                if args.pentest:
+                    await orchestrator.run_pentest()
+
+            # Seed the normalized target URL for agent-only runs. Using the
+            # literal --target here reintroduced scheme-less values such as
+            # "example.com", which the HTTP engine refuses to fetch.
+            target_url = orchestrator.base_url
+            if "?" in target_url and "=" in target_url:
                 from urllib.parse import urlparse, parse_qs
-                parsed = urlparse(args.target)
+                parsed = urlparse(target_url)
                 url_without_params = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
                 orchestrator.state.add_asset(
                     "url", f"url:{url_without_params}", url_without_params,
@@ -1212,7 +1261,7 @@ Examples:
                     )
             else:
                 orchestrator.state.add_asset(
-                    "url", f"url:{args.target}", args.target,
+                    "url", f"url:{target_url}", target_url,
                     confidence="CONFIRMED", sources=["user_target"],
                 )
 
@@ -1223,7 +1272,7 @@ Examples:
                 budget=orchestrator.budget,
                 execute=bool(args.execute),
                 max_risk=RiskLevel(args.max_risk),
-                max_actions=args.max_actions,
+                max_actions=orchestrator.max_actions,
             )
 
             if args.phase:
@@ -1231,15 +1280,25 @@ Examples:
                 print(f"\nPhase '{args.phase}' complete.")
             else:
                 result = await supervisor.run_full_engagement()
+                # The reporting module ran before the agents. Verification can
+                # add confirmed findings afterwards, so refresh every exported
+                # artifact rather than leave the report at the recon snapshot.
+                try:
+                    from core.reporting import write_report_bundle
+                    paths = write_report_bundle(orchestrator.state, orchestrator.target)
+                    print(f"  Report refreshed: {paths['report']}\n")
+                except Exception as exc:  # noqa: BLE001 - reporting must not void results
+                    print(f"  Report refresh failed: {exc}\n")
             return
 
         if args.pentest:
-            # Run OSINT first if not already done, then attack graph
-            if mode == "active" or args.module:
-                if args.module:
-                    await orchestrator.run_module(args.module)
-                else:
-                    await orchestrator.run_all()
+            # Run the requested surface pass first, then attack graph.
+            if args.module:
+                await orchestrator.run_module(args.module)
+            elif mode == "llm":
+                await orchestrator.run_llm()
+            elif orchestrator.active:
+                await orchestrator.run_all()
             await orchestrator.run_pentest()
         elif args.module:
             await orchestrator.run_module(args.module)
