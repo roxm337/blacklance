@@ -83,6 +83,12 @@ def test_idor_records_skip_reason_without_identities(tmp_path):
     assert reasons and reasons[-1]["reason"] == "no object endpoints to probe"
 
 
+def test_malformed_auth_config_does_not_crash_harness():
+    from core.auth_harness import AuthHarness
+    harness = AuthHarness({"auth": "not-a-mapping"})
+    assert harness.identities == {}
+
+
 def test_auth_probes_concurrently_first_success_wins(tmp_path):
     from modules.auth_audit import AuthAudit
     state = StateManager(str(tmp_path / "run"))
