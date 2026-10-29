@@ -201,6 +201,57 @@ def test_verify_reproducible_identical_pair_confirms_nothing(monkeypatch):
     assert result.success is False
 
 
+def test_reproducibility_fingerprints_use_body_hash():
+    """Fingerprints carry body_hash, not body/time_ms. The old tuple
+    compared absent keys and confirmed every response, including one whose
+    body changed between reps."""
+    from core.verification_oracle import ReproducibilityChecker
+
+    bodies = iter([1001, 2002, 3003])
+
+    async def probe():
+        return {"status": 200, "body_hash": next(bodies),
+                "body_length": 11, "word_count": 2, "line_count": 1}
+
+    verdict = asyncio.run(ReproducibilityChecker().check(probe))
+
+    assert verdict.confidence.value == "FIRM"
+    assert verdict.score < 1.0
+
+
+def test_reproducibility_raw_flapping_body_does_not_confirm():
+    from core.verification_oracle import ReproducibilityChecker
+
+    bodies = iter(["same", "changed", "same"])
+
+    async def probe():
+        return {"status": 200, "body": next(bodies), "time_ms": 5}
+
+    verdict = asyncio.run(ReproducibilityChecker().check(probe))
+
+    assert verdict.confidence.value == "FIRM"
+    assert verdict.score < 1.0
+
+
+def test_verify_composite_flapping_body_is_not_confirmed(monkeypatch):
+    from core.verification_oracle import DifferentialAnalyzer
+
+    calls = {"n": 0}
+
+    async def flapping(url, **kwargs):
+        calls["n"] += 1
+        body = "first payload result" if calls["n"] <= 2 else "different"
+        return {"status": 200, "body": body, "time_ms": 5, "headers": {}}
+
+    _patch_curl(monkeypatch, flapping)
+    result = asyncio.run(
+        verify_composite(_ctx("verify.composite_oracle",
+                              url="https://example.com/?q=payload")))
+    # Differential may be FIRM, but non-reproducible output must not reach
+    # CONFIRMED. (The composite still reports FIRM when divergence is real.)
+    assert result.confidence != "CONFIRMED"
+
+
 def test_verify_composite_stable_page_does_not_confirm(monkeypatch):
     import tools.wrappers as wrappers
 

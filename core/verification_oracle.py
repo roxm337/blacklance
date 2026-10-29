@@ -13,6 +13,7 @@ Confidence: CONFIRMED (oracle-proven, reproducible) / FIRM / TENTATIVE
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import statistics
@@ -239,20 +240,42 @@ class ReproducibilityChecker:
         self.min_reps = min_reps
         self.required_match = required_match
 
+    @staticmethod
+    def _signature(result: dict) -> tuple:
+        """Stable identity for a probe response.
+
+        Callers pass either a raw curl result (body/status/time_ms) or a
+        DifferentialAnalyzer fingerprint (body_hash/body_length). Comparing
+        the wrong pair of keys made every rep look identical: ``body`` and
+        ``time_ms`` are absent from fingerprints, so the tuple collapsed to
+        ``(200, "", 0)``. Timing is deliberately excluded — a stable page
+        with 100ms jitter is still the same page.
+        """
+        status = result.get("status", 0)
+        if "body_hash" in result:
+            return (status, result.get("body_hash"), result.get("body_length"))
+        body = result.get("body", "") or ""
+        digest = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
+        return (status, digest, len(body))
+
     async def check(self, probe_fn: Callable, **kwargs) -> Verdict:
         results = []
-        for i in range(self.min_reps):
+        for _ in range(self.min_reps):
             result = await probe_fn(**kwargs)
             results.append(result)
 
         if not results:
             return Verdict(Confidence.TENTATIVE, 0.0, reason="no results")
 
-        # Compare fingerprints
-        fingerprints = [
-            (r.get("status", 0), r.get("body", "")[:200], r.get("time_ms", 0) // 100)
-            for r in results
-        ]
+        if all(int(r.get("status", 0) or 0) == 0 for r in results):
+            return Verdict(
+                Confidence.TENTATIVE, 0.0,
+                evidence={"reproducibility": {"reps": self.min_reps,
+                                               "match_rate": 0.0}},
+                reason="all probes failed at the transport layer",
+            )
+
+        fingerprints = [self._signature(r) for r in results]
         matches = sum(
             1 for i in range(1, len(fingerprints))
             if fingerprints[i] == fingerprints[0]
@@ -398,7 +421,9 @@ class InteractshClient:
             await asyncio.sleep(self.poll_interval)
 
         return Verdict(Confidence.TENTATIVE, 0.0,
-                       evidence={"corr_id": corr_id, "callback_url": callback_url, "interactions": []},
+                       evidence={"corr_id": corr_id,
+                                 "callback_url": callback_url,
+                                 "interactions": []},
                        reason=f"no OOB callback within {self.poll_timeout}s")
 
     async def _api_request(self, method: str, url: str, payload: Optional[dict] = None):
