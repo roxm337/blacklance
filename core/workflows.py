@@ -161,10 +161,21 @@ async def replay_workflow(workflow: Workflow, harness, *,
 
         identity = step.identity_ref
         if identity not in ("anonymous", "") and identity not in established:
-            try:
-                await harness.identities[identity].establish(base_url)
-            except (KeyError, Exception):
-                pass
+            identity_obj = harness.identities.get(identity)
+            verified = False
+            if identity_obj is not None:
+                try:
+                    verified = bool(await identity_obj.establish(base_url))
+                except Exception as exc:  # noqa: BLE001 - report, never replay blind
+                    report.error = f"identity {identity!r} failed: {exc}"
+            if not verified:
+                detail = report.error or (
+                    f"identity {identity!r} did not establish an authenticated session")
+                report.steps.append(StepOutcome(
+                    index=step.index, url=url, status=0, ok=False,
+                    result_kind="error", detail=detail))
+                report.error = detail
+                continue
             established.add(identity)
 
         mut_id = None
