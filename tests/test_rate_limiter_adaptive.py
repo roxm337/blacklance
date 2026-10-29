@@ -64,6 +64,31 @@ def test_consecutive_throttles_grow_then_reset():
 
 # ── Deadline-bounded waiting ─────────────────────────────────────────
 
+def test_cancelled_cooldown_wait_does_not_leak_a_slot():
+    """A probe cancelled during backoff must release its concurrency slot.
+
+    auth_audit cancels outstanding probes; when cancellation landed after the
+    semaphore was acquired but during a cooldown sleep, the slot was lost and
+    later modules stalled at their deadline after one recorded request.
+    """
+    rl = RateLimiter(max_concurrent=1, max_per_minute=10000)
+    rl._cooldown_until = time.monotonic() + 60
+
+    async def scenario():
+        task = asyncio.create_task(rl.__aenter__())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        rl._cooldown_until = 0
+        await asyncio.wait_for(rl.__aenter__(), timeout=1.0)
+        await rl.__aexit__(None, None, None)
+
+    asyncio.run(scenario())
+
+
 def test_cooldown_never_sleeps_past_deadline():
     rl = RateLimiter(max_concurrent=1, max_per_minute=10000)
     rl.note_response(429, retry_after="30")   # would sleep 30s

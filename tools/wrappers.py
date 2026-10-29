@@ -168,20 +168,28 @@ class RateLimiter:
 
     async def __aenter__(self):
         await self._semaphore.acquire()
-        async with self._lock:
-            now = time.monotonic()
-            # Adaptive backoff: the target asked us to slow down.
-            if self._cooldown_until > now:
-                await self._sleep_bounded(self._cooldown_until - now)
+        try:
+            async with self._lock:
                 now = time.monotonic()
-            self._timestamps = [t for t in self._timestamps if now - t < 60]
-            if len(self._timestamps) >= self._max_per_minute:
-                wait = self._timestamps[0] + 60 - now
-                if wait > 0:
-                    await self._sleep_bounded(wait)
-                now = time.monotonic()
+                # Adaptive backoff: the target asked us to slow down.
+                if self._cooldown_until > now:
+                    await self._sleep_bounded(self._cooldown_until - now)
+                    now = time.monotonic()
                 self._timestamps = [t for t in self._timestamps if now - t < 60]
-            self._timestamps.append(now)
+                if len(self._timestamps) >= self._max_per_minute:
+                    wait = self._timestamps[0] + 60 - now
+                    if wait > 0:
+                        await self._sleep_bounded(wait)
+                    now = time.monotonic()
+                    self._timestamps = [t for t in self._timestamps if now - t < 60]
+                self._timestamps.append(now)
+        except BaseException:
+            # Cancellation while waiting on the cooldown/rate window must not
+            # strand a concurrency slot: modules cancel probe tasks routinely,
+            # and a leaked slot starves every later request until the module
+            # deadline (the 30-minute "hang" this used to look like).
+            self._semaphore.release()
+            raise
         return self
 
     async def __aexit__(self, *args):
