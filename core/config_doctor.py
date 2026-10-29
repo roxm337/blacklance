@@ -113,7 +113,7 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
     ("modules.content_discovery.kiterunner.connections", 3,
      "parallel connections per host (1 for live scopes)"),
     ("modules.xss_scan.max_points", 0,
-     "injection points probed per run"),
+     "injection points probed per run (0 = unlimited)"),
     ("modules.xss_scan.browser_confirm", True,
      "confirm reflections with warriors headless browser"),
     ("modules.xss_scan.dalfox_timeout", 600,

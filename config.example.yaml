@@ -914,7 +914,7 @@ modules:
     per_cve_seconds: 90
 
   xss_scan:
-    max_points: 0
+    max_points: 0              # 0 = every point; positive caps the pass
     browser_confirm: true
     dalfox_timeout: 600
     # Let dalfox run its own interactsh session against the public mesh.

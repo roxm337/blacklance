@@ -30,7 +30,11 @@ class XSSScan(BaseModule):
         cfg = self.config.get("modules", {}).get(self.id, {})
         if not isinstance(cfg, dict):
             cfg = {}
-        max_points = int(cfg.get("max_points", 80))
+        try:
+            max_points = int(cfg.get("max_points", 0) or 0)
+        except (TypeError, ValueError):
+            max_points = 0
+        selected_points = points if max_points <= 0 else points[:max_points]
         browser_enabled = bool(cfg.get("browser_confirm", True))
         browser_available = browser_enabled and await _playwright_available()
 
@@ -42,7 +46,7 @@ class XSSScan(BaseModule):
             return "skipped"
 
         internal_findings = []
-        for point in points[:max_points]:
+        for point in selected_points:
             finding = await self._test_reflected_xss(point, browser_available)
             if finding:
                 internal_findings.append(finding)
@@ -71,7 +75,7 @@ class XSSScan(BaseModule):
                 except Exception as exc:
                     self.log(f"  OOB registration failed, blind pass skipped: {exc}")
             result = await dalfox_scan(
-                [point["url"] for point in points[:max_points]],
+                [point["url"] for point in selected_points],
                 timeout=int(cfg.get("dalfox_timeout", 600)),
                 blind=blind_url,
                 # Dalfox runs its own interactsh session against the public
@@ -91,7 +95,7 @@ class XSSScan(BaseModule):
             "xss_scan",
             self.domain,
             {
-                "targets": points[:max_points],
+                "targets": selected_points,
                 "internal_findings": internal_findings,
                 "dalfox_findings": dalfox_findings,
                 "browser_confirm": browser_available,

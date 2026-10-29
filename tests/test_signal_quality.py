@@ -1659,6 +1659,40 @@ def test_social_osint_splits_confirmed_from_claimed(monkeypatch):
 
 # ── Wave D: XSS blind confirmation ──────────────────────────────
 
+def test_xss_max_points_zero_means_unlimited(monkeypatch):
+    """config.example.yaml ships max_points: 0. Treating it as a slice
+    length disabled every parameterized XSS probe on a fresh install."""
+    import modules.xss_scan as xss_module
+    from modules.xss_scan import XSSScan
+
+    seen = {}
+
+    async def fake_curl(url, **kwargs):
+        return {"status": 200, "body": "<html>static</html>"}
+
+    async def fake_dalfox(urls, timeout=600, blind=None, blind_oob=False,
+                          rate_limit=0):
+        seen["urls"] = urls
+        return {"available": True, "results": [], "exit_code": 0}
+
+    monkeypatch.setattr(xss_module, "curl", fake_curl)
+    monkeypatch.setattr(xss_module, "dalfox_scan", fake_dalfox)
+    monkeypatch.setattr(xss_module, "tool_available", lambda name: True)
+    monkeypatch.setattr(xss_module, "_playwright_available",
+                        AsyncMock(return_value=False))
+    state = _state()
+    for idx in range(2):
+        state.add_asset("parameter", f"param:p{idx}", "q",
+                        confidence="FIRM", sources=["test"],
+                        attrs={"url": f"https://example.com/{idx}"})
+    module = XSSScan(state, {"target": {"domain": "example.com"},
+                             "modules": {"xss_scan": {"max_points": 0}}})
+    monkeypatch.setattr(module, "oob", lambda: None)
+
+    assert asyncio.run(module.run()) == "done"
+    assert len(seen["urls"]) == 2
+
+
 def test_xss_blind_callback_confirms(monkeypatch):
     import modules.xss_scan as xss_module
     from modules.xss_scan import XSSScan
