@@ -523,6 +523,10 @@ def test_build_scan_args_pentest_flags():
     args = build_scan_args("e.com", "/o", "/c", pentest=False, execute=True, max_risk="HIGH")
     assert "--execute" not in args and "--max-risk" not in args and "--pentest" not in args
 
+    default = build_scan_args("e.com", "/o", "/c", pentest=True)
+    assert "--max-actions" not in default, (
+        "0 must defer to the configured budget cap, not force unlimited")
+
     args = build_scan_args(
         "e.com", "/o", "/c",
         pentest=True, execute=True, max_risk="HIGH",
@@ -1247,24 +1251,61 @@ def test_text_to_list_keeps_commas_inside_values():
 
 # ── r10xM-mode ──────────────────────────────────────────────────────────
 
-def test_build_scan_args_agent_mode():
-    # r10xM emits --agent + --execute + --max-risk, and drops the per-module
-    # and per-mode selectors (the supervisor owns the whole lifecycle).
+def test_build_scan_args_agent_mode_runs_surface_first():
+    # r10xM keeps the supervisor, but must hand it deterministic recon and an
+    # attack graph first. --module/--mode still do not apply to the supervisor.
     args = build_scan_args(
         "e.com", "/o", "/c",
-        agent=True, execute=True, max_risk="DESTRUCTIVE",
-        max_actions=5,
-        # these must be ignored in agent mode:
-        mode="LLM", module="xss_scanner", pentest=True, max_chains=9,
+        agent=True, active=True, pentest=True, execute=True,
+        max_risk="DESTRUCTIVE", max_actions=5, max_chains=9,
+        mode="LLM", module="xss_scanner",
     )
     assert "--agent" in args
+    assert "--active" in args
+    assert "--pentest" in args
     assert "--execute" in args
     assert args[args.index("--max-risk") + 1] == "DESTRUCTIVE"
     assert args[args.index("--max-actions") + 1] == "5"
+    assert args[args.index("--max-chains") + 1] == "9"
     assert "--module" not in args
     assert "--mode" not in args
-    assert "--pentest" not in args
-    assert "--max-chains" not in args
+
+
+def test_build_scan_args_agent_plan_only_stays_lean():
+    args = build_scan_args("e.com", "/o", "/c", agent=True)
+    assert "--agent" in args
+    for flag in ("--active", "--pentest", "--execute", "--max-actions",
+                 "--max-chains", "--module", "--mode"):
+        assert flag not in args
+
+
+def test_start_r10xm_scan_wires_full_pipeline(tmp_path, monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    captured = {}
+
+    monkeypatch.setattr(window, "_write_r10xm_config",
+                        lambda: tmp_path / R10XM_CONFIG_NAME)
+    monkeypatch.setattr(window, "_lifecycle_selection",
+                        lambda for_action=False: {"run_mode": "fresh"})
+    monkeypatch.setattr(window, "_start_process",
+                        lambda args: captured.setdefault("args", args))
+    window.target_input.setText("example.com")
+    window.max_actions_spin.setValue(4)
+    window.max_chains_spin.setValue(7)
+
+    window._start_r10xm_scan("example.com")
+
+    args = captured["args"]
+    assert "--agent" in args
+    assert "--active" in args
+    assert "--pentest" in args
+    assert "--execute" in args
+    assert args[args.index("--max-actions") + 1] == "4"
+    assert args[args.index("--max-chains") + 1] == "7"
+
+    window.close()
+    app.processEvents()
 
 
 def test_r10xm_config_overlay_maxes_access():

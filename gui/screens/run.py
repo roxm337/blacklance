@@ -171,6 +171,9 @@ class RunScreenMixin:
         self.max_actions_spin = QSpinBox()
         self.max_actions_spin.setRange(0, 1000)
         self.max_actions_spin.setValue(0)
+        self.max_actions_spin.setToolTip(
+            "Cap on executed actions. 0 = use the configured budget cap."
+        )
         self.max_chains_spin = QSpinBox()
         self.max_chains_spin.setRange(0, 1000)
         self.max_chains_spin.setValue(0)
@@ -418,9 +421,12 @@ class RunScreenMixin:
             output_dir=self.output_dir,
             config_path=config_path,
             agent=True,
+            active=True,
+            pentest=True,
             execute=True,
             max_risk="DESTRUCTIVE",
             max_actions=self.max_actions_spin.value(),
+            max_chains=self.max_chains_spin.value(),
             **lifecycle,
         )
         self.log_output.appendPlainText(
