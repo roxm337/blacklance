@@ -805,6 +805,84 @@ def test_direct_http_port_empty_body_files_nothing():
         _run(module._fingerprint_http_port("203.0.113.9", 3001))
     assert state.findings["findings"] == []
 
+def test_port_scan_promotes_live_origin_port_to_url_target(monkeypatch):
+    import modules.port_scan_module as port_module
+    from modules.port_scan_module import PortScan
+
+    async def fake_naabu(target, ports="top-1000", timeout=180):
+        return [{"port": 3001}]
+
+    async def fake_run_command(args, timeout=120, stdin_data=""):
+        return {"stdout": "3001/tcp open  node    Node.js Express\n",
+                "stderr": "", "exit_code": 0, "error": None}
+
+    async def fake_curl(url, **kwargs):
+        return {"status": 200,
+                "body": "<html><title>Admin Dashboard</title></html>",
+                "headers": "Server: Express"}
+
+    monkeypatch.setattr(port_module, "naabu_scan", fake_naabu)
+    monkeypatch.setattr(port_module, "run_command", fake_run_command)
+    monkeypatch.setattr("tools.wrappers.curl", fake_curl)
+    state = _state()
+    state.add_asset("ip", "ip:203.0.113.9", "203.0.113.9",
+                    confidence="CONFIRMED", sources=["test"],
+                    attrs={"origin": True})
+    config = _config()
+    config["scope"] = {"include_open_ports": True}
+    module = PortScan(state, config)
+
+    assert _run(module.run()) == "done"
+    urls = state.get_assets_by_type("url")
+    assert len(urls) == 1
+    url = urls[0]["value"]
+    assert url == "http://203.0.113.9:3001/"
+    assert urls[0]["attrs"]["direct_port"] is True
+    assert module.in_scope(url) is True
+    assert any(f["title"] == "Direct HTTP Service on Port 3001"
+               for f in state.findings["findings"])
+
+
+def test_port_scan_does_not_promote_non_origin_or_disabled_ports(monkeypatch):
+    import modules.port_scan_module as port_module
+    from modules.port_scan_module import PortScan
+
+    async def fake_naabu(target, ports="top-1000", timeout=180):
+        return [{"port": 3001}]
+
+    async def fake_run_command(args, timeout=120, stdin_data=""):
+        return {"stdout": "3001/tcp open  node    Node.js Express\n",
+                "stderr": "", "exit_code": 0, "error": None}
+
+    async def fake_curl(url, **kwargs):
+        return {"status": 200,
+                "body": "<html><title>CDN edge</title></html>",
+                "headers": ""}
+
+    monkeypatch.setattr(port_module, "naabu_scan", fake_naabu)
+    monkeypatch.setattr(port_module, "run_command", fake_run_command)
+    monkeypatch.setattr("tools.wrappers.curl", fake_curl)
+
+    # A scanned address without origin proof is not the engagement target.
+    state = _state()
+    state.add_asset("ip", "ip:203.0.113.9", "203.0.113.9",
+                    confidence="CONFIRMED", sources=["test"], attrs={})
+    config = _config()
+    config["scope"] = {"include_open_ports": True}
+    assert _run(PortScan(state, config).run()) == "done"
+    assert state.get_assets_by_type("url") == []
+
+    # The option can disable promotion even on a confirmed origin.
+    state = _state()
+    state.add_asset("ip", "ip:203.0.113.9", "203.0.113.9",
+                    confidence="CONFIRMED", sources=["test"],
+                    attrs={"origin": True})
+    config = _config()
+    config["scope"] = {"include_open_ports": False}
+    assert _run(PortScan(state, config).run()) == "done"
+    assert state.get_assets_by_type("url") == []
+
+
 def test_verified_low_on_webapp_stays_low_without_intel():
     from core.prioritization import prioritize_findings
     findings = [{

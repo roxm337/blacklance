@@ -23,7 +23,6 @@ from urllib.parse import urljoin, urlparse
 
 from core.auth_harness import AuthHarness
 from core.noise_filters import is_vendor_js
-from core.probe_targets import in_scope_url
 from modules.base import BaseModule
 from modules.js_analysis import extract_dom_sinks
 
@@ -159,7 +158,7 @@ class BrowserCrawl(BaseModule):
 
         http_urls = [url for url in sorted(discovered)
                      if _is_http(url)
-                     and in_scope_url(url, self.base_url, self.domain)]
+                     and self.in_scope(url)]
 
         # I1: persist the redacted traffic capture and anchor it in the
         # evidence chain. Capture is opt-in; without it this is a no-op.
@@ -179,7 +178,7 @@ class BrowserCrawl(BaseModule):
             self.state.add_edge(f"domain:{self.domain}", f"{asset_type}:{url}", "DISCOVERED_VIA")
 
         js_urls = {url for url in js_urls
-                   if in_scope_url(url, self.base_url, self.domain)}
+                   if self.in_scope(url)}
         for js_url in sorted(js_urls)[:200]:
             self.state.add_asset(
                 "js_file",
@@ -191,7 +190,7 @@ class BrowserCrawl(BaseModule):
             )
 
         source_maps = {url for url in source_maps
-                       if in_scope_url(url, self.base_url, self.domain)}
+                       if self.in_scope(url)}
         for map_url in sorted(source_maps)[:100]:
             self.state.add_asset(
                 "source_map",
@@ -364,7 +363,7 @@ class BrowserCrawl(BaseModule):
             for asset in self.state.get_assets_by_type(asset_type):
                 value = str(asset.get("value", "")).strip()
                 if (_is_http(value) and value not in targets
-                        and in_scope_url(value, self.base_url, self.domain)):
+                        and self.in_scope(value)):
                     targets.append(value)
         return targets
 

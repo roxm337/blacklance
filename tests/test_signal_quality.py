@@ -2268,6 +2268,30 @@ def test_probe_targets_scope_and_dedupe():
         (p["url"], p["param"], p["method"]) for p in points]
 
 
+def test_confirmed_origin_ip_and_port_are_in_scope():
+    from core.probe_targets import (confirmed_origin_ips, in_scope_url,
+                                    iter_probe_points)
+    state = _state()
+    state.add_asset("ip", "ip:203.0.113.9", "203.0.113.9",
+                    confidence="CONFIRMED", sources=["test"],
+                    attrs={"origin": True})
+
+    origins = confirmed_origin_ips(state)
+    assert origins == {"203.0.113.9"}
+    assert in_scope_url("http://203.0.113.9:3001/", "https://example.com",
+                        "example.com", origins) is True
+    # An arbitrary scanned address is still a third party, not the target.
+    assert in_scope_url("http://203.0.113.10:3001/", "https://example.com",
+                        "example.com", origins) is False
+
+    state.add_asset("parameter", "q", "q", confidence="FIRM",
+                    sources=["test"],
+                    attrs={"url": "http://203.0.113.9:3001/search?q=1"})
+    points = iter_probe_points(state, "https://example.com", "example.com")
+    assert any(p["url"] == "http://203.0.113.9:3001/search?q=1"
+               and p["param"] == "q" for p in points)
+
+
 # ── Juice Shop wave: auth audit ─────────────────────────────────
 
 def _auth_state(monkeypatch):

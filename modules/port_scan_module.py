@@ -190,8 +190,13 @@ class PortScan(BaseModule):
 
                 if port in HIGH_RISK_PORT_FINDINGS:
                     await self._report_port(target_ip, port, service, version)
-                elif _looks_http(port, service, version):
-                    await self._fingerprint_http_port(target_ip, port)
+                if _looks_http(port, service, version):
+                    # A risky HTTP port already has its exposure finding;
+                    # still fingerprint it so the app becomes a URL target,
+                    # but do not file a second INFO duplicate.
+                    await self._fingerprint_http_port(
+                        target_ip, port,
+                        file_finding=port not in HIGH_RISK_PORT_FINDINGS)
 
         self.state.complete_module(self.id)
         return "done"
@@ -233,7 +238,27 @@ class PortScan(BaseModule):
                           "url": f"{target_ip}:{port}"} if proven else {},
         )
 
-    async def _fingerprint_http_port(self, target_ip: str, port: int) -> None:
+    def _include_open_ports(self) -> bool:
+        scope = self.config.get("scope") or {}
+        if not isinstance(scope, dict):
+            return True
+        return scope.get("include_open_ports", True) is not False
+
+    def _is_direct_port_target(self, target_ip: str) -> bool:
+        """Only the target's own origin may become a direct-port URL target.
+
+        Scanning a CDN edge address and then treating its :443/:8080 as the
+        engagement would test a third party. `confirmed_origin_ips` is the
+        same proof gate the report uses; a target supplied as a literal IP
+        is its own origin.
+        """
+        from core.probe_targets import confirmed_origin_ips
+        if target_ip.strip().lower() in confirmed_origin_ips(self.state):
+            return True
+        return self.domain.strip().lower() == target_ip.strip().lower()
+
+    async def _fingerprint_http_port(self, target_ip: str, port: int,
+                                     file_finding: bool = True) -> None:
         """One bounded GET on an off-table HTTP port: what app answers?
 
         The table covers known-dangerous services; everything else was
@@ -243,6 +268,11 @@ class PortScan(BaseModule):
         site means a different app, which is the lead. No status gate:
         a 401 JSON API and a 200 dashboard are both answers worth
         recording; an empty body is not.
+
+        When `scope.include_open_ports` is on and the address is a confirmed
+        origin, the live URL is also promoted to a `url` asset so crawlers,
+        JS analysis, and auth probes test the service behind the port instead
+        of stopping at the finding.
         """
         from tools.wrappers import curl as _curl
         for scheme in ("http", "https"):
@@ -266,6 +296,31 @@ class PortScan(BaseModule):
                     break
             if not title and not body.startswith(("{", "[")):
                 continue
+            if self._include_open_ports() and self._is_direct_port_target(
+                    target_ip):
+                self.state.add_asset(
+                    "url",
+                    f"url:{url}",
+                    url,
+                    confidence="CONFIRMED",
+                    sources=["port scan"],
+                    attrs={
+                        "url": url,
+                        "ip": target_ip,
+                        "port": port,
+                        "scheme": scheme,
+                        "direct_port": True,
+                        "title": title,
+                        "server": server,
+                    },
+                )
+                self.state.add_edge(
+                    f"ip:{target_ip}",
+                    f"url:{url}",
+                    "SERVES_HTTP",
+                )
+            if not file_finding:
+                return
             self.state.add_finding(
                 title=f"Direct HTTP Service on Port {port}",
                 severity="INFO",

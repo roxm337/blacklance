@@ -240,8 +240,7 @@ class ParameterDiscovery(BaseModule):
 
     def _in_scope(self, url: str) -> bool:
         """Engagement-host containment, not "any absolute URL"."""
-        from core.probe_targets import in_scope_url
-        return in_scope_url(url, self.base_url, self.domain)
+        return self.in_scope(url)
 
     async def _seed_reflection_params(self) -> list[dict]:
         """Probe live pages for reflection under common parameter names.

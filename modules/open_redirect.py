@@ -302,8 +302,7 @@ class OpenRedirectScan(BaseModule):
             url = self._absolute(str(candidate))
             if not url:
                 continue
-            from core.probe_targets import in_scope_url
-            if not in_scope_url(url, self._base_url(), self.domain):
+            if not self.in_scope(url):
                 continue
             for param in params:
                 if (url, param) not in targets:
@@ -327,11 +326,10 @@ class OpenRedirectScan(BaseModule):
 
     def _discovered(self) -> list:
         found = []
-        from core.probe_targets import in_scope_url
         for asset in self.state.get_assets_by_type("url"):
             value = str(asset.get("value", "")).strip()
             if (value.startswith(("http://", "https://"))
-                    and in_scope_url(value, self._base_url(), self.domain)):
+                    and self.in_scope(value)):
                 found.append(value.split("?")[0])
         return found
 

@@ -35,6 +35,8 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
      "process-count ceiling for each external scanner container"),
     ("module_timeout", 300,
      "wall-clock ceiling per module; exceeded modules record timeout"),
+    ("scope.include_open_ports", True,
+     "promote live HTTP services on confirmed origin ports to URL targets"),
     ("budget_limits.max_requests", 0,
      "total HTTP-request cap for agent actions (0 = unlimited)"),
     ("budget_limits.max_wall_clock_seconds", 0,

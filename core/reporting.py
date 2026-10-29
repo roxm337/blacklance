@@ -21,8 +21,29 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
 SEVERITY_RANK = {severity: rank for rank, severity in enumerate(SEVERITIES)}
 
 
-def _finding_on_target(finding: dict, target: str) -> bool:
+def _confirmed_origin_ips(state: Any) -> set[str]:
+    """IPs already proven to be the target's own origin, not third parties."""
+    ips: set[str] = set()
+    for asset in state.get_assets_by_type("ip"):
+        attrs = asset.get("attrs", {}) or {}
+        if attrs.get("origin") is True:
+            value = str(asset.get("value") or "").strip().lower()
+            if value:
+                ips.add(value)
+    for asset in state.get_assets_by_type("origin_discovery"):
+        attrs = asset.get("attrs", {}) or {}
+        for value in attrs.get("confirmed_origins") or []:
+            value = str(value or "").strip().lower()
+            if value:
+                ips.add(value)
+    return ips
+
+
+def _finding_on_target(finding: dict, target: str,
+                       origin_ips: set[str] | None = None) -> bool:
     """True unless every URL the finding names is off the engagement host."""
+    from urllib.parse import urlparse
+
     from core.probe_targets import in_scope_url
     target_text = str(target or "").strip()
     if not target_text:
@@ -39,7 +60,16 @@ def _finding_on_target(finding: dict, target: str) -> bool:
         urls.append(str(verification["url"]))
     if not urls:
         return True
-    return any(in_scope_url(url, base, target_text) for url in urls)
+    if any(in_scope_url(url, base, target_text) for url in urls):
+        return True
+    for url in urls:
+        try:
+            host = (urlparse(url).hostname or "").lower().rstrip(".")
+        except ValueError:
+            host = ""
+        if host and host in (origin_ips or set()):
+            return True
+    return False
 
 
 def build_report_bundle(state: Any, target: str) -> dict:
@@ -49,8 +79,9 @@ def build_report_bundle(state: Any, target: str) -> dict:
     # A finding whose only URLs are on somebody else's host is contamination,
     # not a target result. Keep findings without URL assets (posture/TLS/email)
     # because their scope is the engagement itself.
+    origin_ips = _confirmed_origin_ips(state)
     findings = [item for item in findings_all
-                if _finding_on_target(item, target)]
+                if _finding_on_target(item, target, origin_ips)]
     filtered = len(findings_all) - len(findings)
     assets = list(state.assets.get("nodes", []))
     edges = list(state.assets.get("edges", []))

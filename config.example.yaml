@@ -20,6 +20,13 @@ target:
   domain: ""  # Set via CLI or prompt
   mode: "deep"  # passive | active | deep
 
+scope:
+  # Promote a live HTTP(S) service on an open port of a confirmed origin
+  # (e.g. 203.0.113.10:3001) to a URL target. The port is then crawled and
+  # probed like the main site, and findings there survive the scope filter.
+  # Third-party/CDN IPs are never promoted, even when the port is open.
+  include_open_ports: true
+
 paths:
   output_dir: "reports"
   wordlists: "wordlists"

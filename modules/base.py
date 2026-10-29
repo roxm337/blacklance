@@ -67,6 +67,12 @@ class BaseModule:
         scheme = str(target.get("scheme") or "").strip().rstrip(":")
         return f"{scheme or 'https'}://{self.domain}".rstrip("/")
 
+    def in_scope(self, url: str) -> bool:
+        """Target-host containment, including confirmed origin IPs/ports."""
+        from core.probe_targets import confirmed_origin_ips, in_scope_url
+        return in_scope_url(url, self.base_url, self.domain,
+                            confirmed_origin_ips(self.state))
+
     async def run(self) -> str:
         """Run the module. Returns 'done' or 'skipped'.
 

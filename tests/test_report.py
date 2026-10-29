@@ -114,3 +114,26 @@ def test_report_filters_out_of_target_findings_everywhere():
     sarif = json.loads(Path(paths["sarif"]).read_text())
     messages = [r["message"]["text"] for r in sarif["runs"][0]["results"]]
     assert all("third-party" not in m for m in messages)
+
+
+def test_report_keeps_findings_on_confirmed_origin_ip():
+    from core.reporting import build_report_bundle
+
+    tmpdir = Path(tempfile.mkdtemp())
+    state = StateManager(str(tmpdir / "run" / "example.com"))
+    state.add_asset("ip", "ip:203.0.113.10", "203.0.113.10",
+                    confidence="CONFIRMED", attrs={"origin": True})
+    state.add_finding(
+        title="Backend Login Rate Limit Bypass", severity="MEDIUM",
+        confidence="CONFIRMED", category="Broken Authentication",
+        description="Direct origin bypasses the front-door limiter.",
+        asset_keys=["url:http://203.0.113.10:3000/api/auth/login"],
+        verified=True,
+        verification={"method": "ratelimit_differential",
+                      "url": "http://203.0.113.10:3000/api/auth/login"},
+    )
+
+    bundle = build_report_bundle(state, "example.com")
+    assert [f["title"] for f in bundle["findings"]] == [
+        "Backend Login Rate Limit Bypass"]
+    assert bundle["summary"]["out_of_target_filtered"] == 0

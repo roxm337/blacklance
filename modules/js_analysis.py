@@ -104,12 +104,6 @@ PUBLIC_BY_DESIGN = {
 }
 
 
-def _in_scope_url(url: str, base_url: str, domain: str) -> bool:
-    """Keep discovered scripts on the engagement host, not vendor CDNs."""
-    from core.probe_targets import in_scope_url
-    return in_scope_url(url, base_url, domain)
-
-
 def _looks_javascript(url: str) -> bool:
     """Script-shaped URLs: .js/.mjs paths, or versioned .js queries."""
     from urllib.parse import urlparse
@@ -493,7 +487,7 @@ class JSAnalysis(BaseModule):
 
         target_js = [
             url for url in js_urls
-            if _in_scope_url(url, self.base_url, self.domain)
+            if self.in_scope(url)
             and _looks_javascript(url)
         ][:50]  # Limit to 50 files
 
