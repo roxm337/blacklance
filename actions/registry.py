@@ -65,6 +65,11 @@ class ActionResult:
     confidence: str = "TENTATIVE"  # TENTATIVE | FIRM | CONFIRMED
     evidence: dict = field(default_factory=dict)
     elapsed_ms: float = 0.0
+    # Typed values an action hands to the next leg of a causal chain (a forged
+    # token, a cracked secret). Deliberately NOT part of `data`/`evidence`:
+    # those are serialized into findings and reports, and a live session must
+    # never be persisted there. Only the chain executor reads this channel.
+    bindings: dict = field(default_factory=dict)
 
 
 class ActionRegistry:
