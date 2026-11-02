@@ -60,7 +60,9 @@ def _static_asset() -> AttackNode:
 def test_a_parameterised_url_gets_a_probe_proposed():
     g = _graph(_search_url())
     edges = g.propose_test_edges(risk_ceiling="MEDIUM")
-    assert len(edges) == 5, "every probe family runs on the surface"
+    from core.action_routing import PROBE_ACTIONS
+    assert len(edges) == len(PROBE_ACTIONS), \
+        "every probe family runs on the surface"
     assert edges[0].action_id, "a proposed edge must name the action that runs it"
     assert edges[0].edge_type == "exploit"
 
@@ -103,7 +105,7 @@ def test_both_spellings_of_a_parameter_do_not_produce_two_probes():
     g = _graph(_search_url(), _param_node())
     edges = g.propose_test_edges(risk_ceiling="MEDIUM")
     targets = {e.target_id for e in edges}
-    assert len(targets) == 2  # one goal per node, three probes each
+    assert len(targets) == 2  # one goal per node; every probe family runs
     assert all(len(e.action_id.split(".")) >= 3 for e in edges)
 
 
@@ -144,8 +146,12 @@ def test_the_plan_records_the_ceiling_it_used():
 def test_an_unknown_ceiling_falls_back_to_low_and_says_so():
     g = _graph(_search_url())
     edges = g.propose_test_edges(risk_ceiling="NONSENSE")
-    assert {e.action_id for e in edges} == {
-        "web.redirect.probe", "web.ssrf.oob_detect"}, \
+    from actions.registry import ActionRegistry, RiskLevel
+    from core.action_routing import PROBE_ACTIONS
+    low = {a for a in PROBE_ACTIONS
+           if ActionRegistry.get(a) and
+           ActionRegistry.get(a)[0].risk is RiskLevel.LOW}
+    assert {e.action_id for e in edges} == low, \
         "unknown ceiling behaves as LOW: only LOW probes"
     assert g.probe_plan["risk_ceiling"] == "NONSENSE"
     assert g.probe_plan["surfaces_considered"] == 1

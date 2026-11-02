@@ -10,6 +10,8 @@ from typing import Optional
 
 from state.manager import StateManager
 
+from core.action_routing import PROBE_ACTIONS, action_for_category
+
 CONFIDENCE_ORDER = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
 
 
@@ -152,16 +154,59 @@ class AttackGraph:
         self._infer_exploitation_goals()
         self._infer_configured_chains()
 
-    # Category -> the goal it can reach and the registered action that proves
-    # the second leg. Deliberately narrow: a chain is only proposed when a
-    # proving action exists and the finding points at a surface that action can
-    # be armed against. Everything else stays a claim instead of a chain.
+    # Category -> (goal, label, proving action, edge type). First match wins,
+    # so the specific token always precedes anything it contains. These are
+    # the transitions with an impact beyond "the class is present": SSRF and
+    # XXE reach a credential store, SSTI reaches code execution, file
+    # inclusion reaches a secret, an authorization bypass reaches an admin
+    # surface. Categories outside this table are armed generically below.
     EXPLOITATION_GOALS = (
         ("ssrf", "goal:cloud_metadata", "Cloud metadata credentials",
-         "web.ssrf.cloud_metadata"),
+         "web.ssrf.cloud_metadata", "pivot"),
         ("xxe", "goal:cloud_metadata", "Cloud metadata credentials",
-         "web.ssrf.cloud_metadata"),
+         "web.ssrf.cloud_metadata", "pivot"),
+        ("ssti", "goal:code_execution", "Template code execution",
+         "web.ssti.detect", "exploit"),
+        ("template injection", "goal:code_execution", "Template code execution",
+         "web.ssti.detect", "exploit"),
+        ("traversal", "goal:sensitive_file", "Sensitive file disclosure",
+         "web.lfi.detect", "extract"),
+        ("file inclusion", "goal:sensitive_file", "Sensitive file disclosure",
+         "web.lfi.detect", "extract"),
+        ("lfi", "goal:sensitive_file", "Sensitive file disclosure",
+         "web.lfi.detect", "extract"),
+        ("nosql", "goal:database_bypass", "NoSQL operator injection",
+         "web.nosql.detect", "exploit"),
+        ("authorization", "goal:admin_access", "Authorization bypass",
+         "auth.bypass.probe", "escalate"),
+        ("access control", "goal:admin_access", "Authorization bypass",
+         "auth.bypass.probe", "escalate"),
+        ("auth bypass", "goal:admin_access", "Authorization bypass",
+         "auth.bypass.probe", "escalate"),
+        ("authentication bypass", "goal:admin_access", "Authorization bypass",
+         "auth.bypass.probe", "escalate"),
+        ("privilege escalation", "goal:admin_access", "Authorization bypass",
+         "auth.bypass.probe", "escalate"),
     )
+
+    # Action family -> edge type for the generic "prove this finding" arm.
+    # `extract` and `escalate` matter beyond bookkeeping: the executor records
+    # an acquired identity only on access edges once a token is usable, and
+    # the causal layer carries bindings along the declared edge type.
+    GOAL_EDGE_TYPES = (
+        ("web.ssrf", "pivot"),
+        ("web.lfi", "extract"),
+        ("auth.bypass", "escalate"),
+        ("auth.", "authenticate"),
+        ("web.", "exploit"),
+    )
+
+    @classmethod
+    def _edge_type_for_action(cls, action_id: str) -> str:
+        for prefix, edge_type in cls.GOAL_EDGE_TYPES:
+            if action_id.startswith(prefix):
+                return edge_type
+        return "exploit"
 
     def _finding_surface(self, finding: dict) -> tuple[str, str, str]:
         """The `(node_id, url, param)` a finding can actually be actioned at.
@@ -245,31 +290,70 @@ class AttackGraph:
         return node_id, url, param
 
     def _infer_exploitation_goals(self):
-        """Turn a finding into an exploit chain to the impact that follows."""
-        seen: set[tuple[str, str]] = set()
+        """Turn a finding into a chain to the impact that follows.
+
+        Two tiers, one mechanism. The curated table names transitions whose
+        payoff is more than "the class is present" (SSRF/XXE -> metadata,
+        SSTI -> code execution, file inclusion -> a secret, authz bypass ->
+        admin access). Every other category falls back to the shared routing
+        table: the category names a proving action, that action gets an edge
+        to a `goal:proven:<action>` node, and the executor confirms it on the
+        surface the finding actually points at rather than leaving a detected
+        class with no way to become a proven one.
+        """
+        from actions.registry import ActionRegistry
+
+        seen: set[tuple[str, str, str]] = set()
         for finding in self.state.findings.get("findings", []):
             category = str(finding.get("category", "")).lower()
+            if not category:
+                continue
             match = next(
                 (entry for entry in self.EXPLOITATION_GOALS
                  if entry[0] in category), None)
-            if match is None:
+            if match is not None:
+                _, goal_id, label, action_id, edge_type = match
+            else:
+                action_id = action_for_category(category)
+                if not action_id:
+                    continue
+                goal_id = f"goal:proven:{action_id}"
+                label = f"Proven: {finding.get('category') or action_id}"
+                edge_type = self._edge_type_for_action(action_id)
+
+            entry = ActionRegistry.get(action_id)
+            if entry is None:
+                # An arm nobody implements is not a chain; propose_test_edges
+                # reports the gap instead of running an unrelated probe.
                 continue
-            _, goal_id, label, action_id = match
+            meta = entry[0]
+
+            # Create the goal even when the finding has no testable surface.
+            # The node records that the category was seen and what payoff was
+            # proposed; the absence of an edge is the honest part, and it is
+            # what lets an operator see coverage limits.
             if goal_id not in self.nodes:
                 self.nodes[goal_id] = AttackNode(
                     id=goal_id, label=label, node_type="goal",
                     confidence="TENTATIVE",
                 )
+
             key, url, param = self._finding_surface(finding)
-            if not url or not param:
+            if not key or not url:
                 continue
-            pair = (key, goal_id)
+            # Each action declares what it needs. Auth bypass needs only the
+            # protected URL; requiring a parameter for it (as the old fixed
+            # check did) silently dropped every authorization finding.
+            if "param" in (meta.requires or []) and not param:
+                continue
+
+            pair = (key, goal_id, action_id)
             if pair in seen:
                 continue
             seen.add(pair)
             self.edges.append(AttackEdge(
                 source_id=key, target_id=goal_id,
-                edge_type="pivot", action_id=action_id,
+                edge_type=edge_type, action_id=action_id,
                 likelihood=0.6, impact=0.9,
                 attrs={"via": str(finding.get("id", "")),
                        "category": category},
@@ -439,13 +523,10 @@ class AttackGraph:
     # executor runs it, and a clean result is recorded as a clean result
     # rather than as silence.
 
-    PROBE_ACTIONS: list[str] = [
-        "web.sqli.detect",
-        "web.sqli.blind_detect",
-        "web.xss.reflected",
-        "web.redirect.probe",
-        "web.ssrf.oob_detect",
-    ]
+    # Blind probes per testable surface, from the shared routing table so the
+    # planner and the executor cannot disagree about what the pipeline can
+    # prove. (Bound at module import; see core.action_routing.)
+    PROBE_ACTIONS: list[str] = list(PROBE_ACTIONS)
 
     def propose_test_edges(self, max_edges: int = 0,
                            risk_ceiling: str = "DESTRUCTIVE") -> list[AttackEdge]:

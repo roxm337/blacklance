@@ -149,6 +149,27 @@ chains:
   # An unregistered action is reported as unarmable, never swapped for an
   # unrelated probe.
   edges: []
+  # Causal chain execution (R9). When enabled, the chain executor runs each
+  # chain in path order instead of as independent reason-ranked probes: it
+  # threads a credential one leg produces (a forged/detected JWT, a session,
+  # a cloud key) into the next leg that needs it, and blocks an edge whose
+  # prerequisite never ran or never proved ("precondition unproven") rather
+  # than firing a probe it cannot aim. Independent chains stay independent.
+  # Off by default; the flat probe path is unchanged when disabled.
+  causal:
+    enabled: false
+    # Branch mode (R9 "branch outcomes"): treat the whole chain set as one DAG
+    # over shared nodes instead of isolated linear paths. A shared prefix runs
+    # once; a credential proven on it propagates to every branch below; a
+    # failed prerequisite blocks only that node's descendants, leaving sibling
+    # branches free. Implies `enabled`. Off by default.
+    branch: false
+  # Reproducibility gate. When true, any action that produces a candidate is
+  # re-run once with identical params before its edge is promoted; the second
+  # run must confirm at the same confidence or better. Catches a flapping
+  # target, a cached 200 and a one-shot WAF glitch at the cost of one extra
+  # request per proving action. Off by default.
+  verify: false
 rate_limits:
   default:
     concurrent: 5
@@ -165,6 +186,25 @@ rate_limits:
 
 detectability:
   default: "high"  # low | medium | high
+
+# OPSEC posture (gap #4). How *loud* a run may be, over the detectability
+# label every module declares. Empty/absent = permissive: no ceiling, an
+# unlimited noise budget and no pacing, i.e. the default pipeline behaviour.
+# Enforced at the module gate (`_run_module`), which every entry point funnels
+# through — pipeline, `--module`, the LLM loop and auto-run dependencies — so a
+# ceiling cannot be bypassed by starting a module a different way. Refusals are
+# recorded as `opsec_gated` in the operations ledger, never silently dropped.
+opsec:
+  # max_detectability: medium   # refuse modules louder than this (low|medium|high)
+  # budget: 0                   # weighted noise budget across the run; 0 = unlimited
+  # weights:                    # per-level cost charged against the budget
+  #   low: 1
+  #   medium: 3
+  #   high: 8
+  # pacing:                     # bounded random delay before each module
+  #   min_ms: 0
+  #   max_ms: 0                 # 0 = no pacing
+  #   seed: null                # set an int for reproducible delays
 
 # Per-engagement resource caps shared by pipeline, pentest, and agent modes. Set any value
 # to 0 to disable that cap.
