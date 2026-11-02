@@ -135,10 +135,12 @@ async def detect_jwt(ctx: ActionContext) -> ActionResult:
             tokens.update(found)
 
     decoded_tokens = []
+    full_tokens = []
     for token in tokens:
         header = decode_jwt_header(token)
         payload = decode_jwt_payload(token)
         if header and payload:
+            full_tokens.append(token)
             decoded_tokens.append({
                 "token": token[:80] + "...",
                 "header": header,
@@ -149,6 +151,10 @@ async def detect_jwt(ctx: ActionContext) -> ActionResult:
         return ActionResult(
             success=True,
             confidence="CONFIRMED",
+            # The full token travels on the ActionResult's binding channel,
+            # never in `data`: findings serialize data, and a replayable
+            # session must not be written to a report.
+            bindings={"token": full_tokens[0]},
             data={"tokens": decoded_tokens},
             evidence={"jwt": {"url": url, "tokens_found": len(decoded_tokens)}},
         )
@@ -217,6 +223,7 @@ async def jwt_alg_confusion(ctx: ActionContext) -> ActionResult:
         return ActionResult(
             success=True,
             confidence="CONFIRMED",
+            bindings={"token": forged},
             data={"original_alg": alg, "technique": "alg_confusion",
                   "url": url},
             evidence={"jwt_alg_confusion": evidence},
@@ -280,6 +287,7 @@ async def jwt_kid_injection(ctx: ActionContext) -> ActionResult:
             return ActionResult(
                 success=True,
                 confidence="CONFIRMED",
+                bindings={"token": forged},
                 data={"original_kid": kid, "forged_kid": traversal,
                       "technique": "kid_injection", "url": url},
                 evidence={"jwt_kid": evidence},
@@ -345,6 +353,9 @@ async def jwt_none_alg(ctx: ActionContext) -> ActionResult:
         return ActionResult(
             success=True,
             confidence="CONFIRMED",
+            # The accepted alg=none token IS the forged session: bind it so a
+            # downstream replay leg can act as that identity.
+            bindings={"token": none_token},
             data={"technique": "none_alg", "url": url},
             evidence={"jwt_none_alg": evidence},
         )
@@ -407,6 +418,10 @@ async def jwt_weak_secret_crack(ctx: ActionContext) -> ActionResult:
             return ActionResult(
                 success=True,
                 confidence="CONFIRMED",
+                # The cracked secret is the reusable value a downstream leg
+                # can sign with; `signing_input` (header.payload) is evidence,
+                # not a token, so it stays out of the binding channel.
+                bindings={"credential": secret},
                 data={
                     "secret": secret,
                     "token": signing_input,
@@ -427,6 +442,7 @@ async def jwt_weak_secret_crack(ctx: ActionContext) -> ActionResult:
                 return ActionResult(
                     success=True,
                     confidence="CONFIRMED",
+                    bindings={"credential": salted},
                     data={"secret": salted, "technique": "weak_secret_crack"},
                     evidence={"jwt_cracked": {"secret": salted}},
                 )

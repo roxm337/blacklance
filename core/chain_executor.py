@@ -43,10 +43,23 @@ from urllib.parse import parse_qsl, urlparse
 
 from actions.registry import ActionRegistry, RiskLevel
 from core.attack_graph import AttackEdge
-from core.validators import inject_param
+from core.chain_bindings import (
+    BINDABLE_PARAMS,
+    BindingContext,
+    apply_bindings,
+    extract_outputs,
+)
+from core.validators import inject_param, redact_secret
 
 RISK_ORDER = [RiskLevel.SAFE, RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH,
               RiskLevel.DESTRUCTIVE]
+
+# Edge types whose semantics are "gain or move access", as opposed to merely
+# observing. Only a proven leg on one of these that hands back a reusable
+# session has actually moved the engagement to a new identity — detecting a
+# token in a response (an `exploit`/`extract` leg) has not. Gap #3 records an
+# adoptable identity only for these.
+_ACCESS_EDGES = frozenset({"authenticate", "escalate", "pivot"})
 
 
 def risk_allows(action_risk: str, ceiling: RiskLevel) -> bool:
@@ -75,55 +88,22 @@ def _reason_rank(reason: str) -> int:
     return 2
 
 
-# Which action can prove which kind of edge. Ordered by preference: the first
-# registered action that exists, is under the ceiling, and whose required
-# params we can actually satisfy wins.
+# Which action can prove which graph transition. The table lives in
+# `core.action_routing` because the attack planner needs the same answers:
+# keeping two copies is how a module detected a class the executor could not
+# name an action for. Re-exported here for callers that already import them
+# from this module.
 #
-# Note verify.differential is deliberately not first for `extract`: it needs
-# both baseline_url and test_url, which the graph does not supply, so listing
-# it first made every extract edge fail on a missing param.
-#
-# Note `extract` is deliberately EMPTY: re-fetching a reachable URL proves
-# reachability, not vulnerability (verify.reproducible's CONFIRMED-on-200
-# filed seventeen junk findings that way). Extract edges with a vuln
-# category still resolve through CATEGORY_ACTIONS below; the rest are
-# recorded as unarmable instead of spending budget on re-reads.
-EDGE_ACTIONS: dict[str, list[str]] = {
-    "exploit": [
-        "web.sqli.detect",
-        "web.sqli.blind_detect",
-        "web.xss.reflected",
-        "web.redirect.probe",
-    ],
-    "pivot": [
-        "web.ssrf.oob_detect",
-        "web.ssrf.cloud_metadata",
-    ],
-    "extract": [],
-    "authenticate": [
-        "auth.jwt.none_alg",
-        "auth.jwt.detect",
-    ],
-}
-
-# Edge type to the vuln-node category that selects a specific action. The graph
-# tags vuln nodes with the finding category, so this turns "a SQL finding" into
-# "run web.sqli.detect against the URL that produced it".
-CATEGORY_ACTIONS: list[tuple[str, str]] = [
-    ("sql", "web.sqli.detect"),
-    ("injection", "web.sqli.detect"),
-    ("xss", "web.xss.reflected"),
-    ("cross-site", "web.xss.reflected"),
-    ("script", "web.xss.reflected"),
-    ("redirect", "web.redirect.probe"),
-    ("ssrf", "web.ssrf.oob_detect"),
-    ("server-side request", "web.ssrf.oob_detect"),
-    ("cloud", "web.ssrf.cloud_metadata"),
-    ("metadata", "web.ssrf.cloud_metadata"),
-    ("jwt", "auth.jwt.detect"),
-    ("token", "auth.jwt.detect"),
-    ("auth", "auth.jwt.detect"),
-]
+# Note `extract` is no longer empty: the causal binding layer can carry a
+# credential out of an SSRF metadata read or a file-disclosure leg, and the
+# old empty list meant the thread had a producer type and no producer. The
+# actions named there return a real secret, not a reachability re-fetch —
+# `verify.reproducible` is still deliberately absent, because a stable 200 is
+# not a vulnerability.
+from core.action_routing import (  # noqa: E402  (kept next to its use)
+    CATEGORY_ACTIONS,
+    EDGE_ACTIONS,
+)
 
 
 @dataclass
@@ -135,6 +115,41 @@ class PlannedEdge:
     url: str
     reason: str = ""
     params: dict = field(default_factory=dict)
+
+
+@dataclass
+class _SyntheticChain:
+    """A one-edge chain view over a shared node map, for DAG-mode planning.
+
+    `_causal_steps`, `_select_action` and `_build_params` all read a chain's
+    `.nodes` to arm an edge. In branch mode the nodes come from the merged DAG,
+    not a single path, so this wraps that node map with the single edge being
+    classified.
+    """
+    nodes: dict
+    edges: list
+    summary: str = ""
+
+
+@dataclass
+class CausalStep:
+    """One edge of a causal chain, classified for in-order execution.
+
+    `armed` runs as planned. `deferred` is armable except for a bindable
+    param (a token/credential) it expects an upstream leg to produce, so it is
+    held until that binding exists — or blocked as a failed precondition if it
+    never does. `unarmable` names an edge no registered action can prove, kept
+    visible so coverage is not overstated.
+    """
+    edge: AttackEdge
+    status: str                      # armed | deferred | unarmable
+    action_id: str = ""
+    reason: str = ""
+    risk: str = ""
+    planned: Optional[PlannedEdge] = None
+    params: dict = field(default_factory=dict)
+    needs: set = field(default_factory=set)
+    detail: str = ""
 
 
 @dataclass
@@ -176,7 +191,8 @@ class ChainExecutor:
                  budget=None, audit=None, operations=None,
                  max_risk: RiskLevel = RiskLevel.DESTRUCTIVE,
                  max_actions: int = 0,
-                 module_id: str = "chain_executor"):
+                 module_id: str = "chain_executor",
+                 causal: Optional[bool] = None):
         self.state = state
         self.config = config or {}
         self.budget = budget
@@ -186,6 +202,31 @@ class ChainExecutor:
         self.max_actions = max(0, int(max_actions))
         self.module_id = module_id or "chain_executor"
         self._used = 0
+        # Causal execution (R9) runs each chain in path order, threading the
+        # credentials one leg produces into the next and blocking an edge whose
+        # prerequisite never proved. Off by default — the flat probe path is
+        # what the existing suite pins — and opt-in via `chains.causal.enabled`
+        # or an explicit constructor flag.
+        _causal_cfg = (self.config.get("chains") or {}).get("causal", {}) or {}
+        if causal is None:
+            causal = bool(_causal_cfg.get("enabled", False))
+        self.causal = bool(causal)
+        # Branch mode (R9 "branch outcomes"): instead of running each chain as
+        # an isolated linear path, treat the whole chain set as one DAG over
+        # shared nodes. A node reached by any proven parent runs its outgoing
+        # edges once; a credential proven on a shared prefix propagates to
+        # every branch below it; a failed prerequisite blocks only that node's
+        # descendants, leaving sibling branches free. Opt-in via
+        # `chains.causal.branch`; implies causal.
+        self.branch = bool(_causal_cfg.get("branch", False))
+        if self.branch:
+            self.causal = True
+        # Reproducibility gate (R9 verification): an action that confirms a
+        # candidate is re-run once, and promotion requires the second run to
+        # confirm at the same confidence or better. Opt-in — it doubles the
+        # requests of every proving action — but when on, a flapping target
+        # cannot be filed as a vulnerability on the strength of one 200.
+        self.verify = bool((self.config.get("chains") or {}).get("verify", False))
         # Edges we recognised but could not arm, so the operator can see that
         # coverage was limited instead of assuming the run was exhaustive.
         self.unarmable: list[EdgeOutcome] = []
@@ -254,6 +295,360 @@ class ChainExecutor:
                 edge=edge, action_id=action_id, risk=str(risk),
                 url=params["url"], reason=reason, params=params))
         return planned
+
+    # ── causal planning & execution (R9) ───────────────────────────
+
+    def _causal_steps(self, chain) -> list["CausalStep"]:
+        """Classify a chain's edges, in path order, for causal execution.
+
+        Same candidate selection and arming as `plan()`, but it keeps the
+        edge order (a chain reads source-to-goal, not by suspicion rank) and
+        adds a third verdict: an edge missing only a *bindable* param — a
+        token or credential an earlier leg is expected to produce — is
+        `deferred` rather than dropped as unarmable. Deferral is what lets a
+        detect→forge pair work: forge is unarmable on its own and armable
+        once detect hands back the token.
+        """
+        steps: list[CausalStep] = []
+        for edge in chain.edges:
+            candidates = self._select_action(edge, chain)
+            if not candidates:
+                if edge.action_id and not ActionRegistry.get(edge.action_id):
+                    steps.append(CausalStep(
+                        edge=edge, status="unarmable", action_id=edge.action_id,
+                        detail=(f"declared action '{edge.action_id}' is not "
+                                "registered in this build")))
+                elif edge.edge_type in EDGE_ACTIONS:
+                    steps.append(CausalStep(
+                        edge=edge, status="unarmable",
+                        detail=f"no proving action registered for "
+                               f"'{edge.edge_type}' edges"))
+                # Structural edges (affected_by, api_discovery) prove nothing
+                # and need no action: they carry reachability, not a probe.
+                continue
+
+            chosen = None
+            deferred = None
+            first_failure = None
+            for action_id, reason in candidates:
+                entry = ActionRegistry.get(action_id)
+                if not entry:
+                    continue
+                meta, _ = entry
+                params, missing = self._build_params(edge, chain, meta)
+                if not missing and params.get("url"):
+                    chosen = (action_id, reason, meta, params)
+                    break
+                # Armable but for a credential the graph cannot carry: hold it
+                # for a binding from an upstream leg. `url` must already be
+                # known — a deferred edge still needs a target to aim at. Stop
+                # here rather than falling through: this is the highest-priority
+                # candidate (a declared chain action outranks a generic probe),
+                # so substituting an unrelated edge-type probe would run a
+                # different test than the chain intended.
+                missing_set = set(missing)
+                bindable = {m for m in missing_set if m in BINDABLE_PARAMS}
+                if (params.get("url") and missing_set
+                        and missing_set == bindable):
+                    deferred = (action_id, reason, meta, params, bindable)
+                    break
+                if first_failure is None:
+                    first_failure = (action_id, reason, missing or ["url"])
+
+            if chosen is not None:
+                action_id, reason, meta, params = chosen
+                risk = str(getattr(meta.risk, "value", meta.risk))
+                steps.append(CausalStep(
+                    edge=edge, status="armed", action_id=action_id,
+                    reason=reason, risk=risk,
+                    planned=PlannedEdge(
+                        edge=edge, action_id=action_id, risk=risk,
+                        url=params["url"], reason=reason, params=params)))
+            elif deferred is not None:
+                action_id, reason, meta, params, needs = deferred
+                risk = str(getattr(meta.risk, "value", meta.risk))
+                steps.append(CausalStep(
+                    edge=edge, status="deferred", action_id=action_id,
+                    reason=reason, risk=risk, params=params, needs=needs))
+            else:
+                action_id, reason, missing = first_failure
+                steps.append(CausalStep(
+                    edge=edge, status="unarmable", action_id=action_id,
+                    detail=reason + " — cannot supply " + ", ".join(missing)))
+        return steps
+
+    async def _execute_chain_causal(self, chain, report: ExecutionReport) -> None:
+        """Run one chain in path order, threading bindings between legs.
+
+        The binding context is per chain: a credential one leg obtains arms
+        only this chain's later legs, never an unrelated path. A `deferred`
+        edge whose binding never materialises is reported as a failed
+        precondition — not run — which is the half of the R9 gate that keeps
+        the executor from firing a probe it cannot actually aim.
+        """
+        ctx = BindingContext()
+        for step in self._causal_steps(chain):
+            if step.status == "unarmable":
+                self.unarmable.append(EdgeOutcome(
+                    edge=step.edge, action_id=step.action_id,
+                    status="no_action", detail=step.detail))
+                continue
+
+            if self.max_actions and self._used >= self.max_actions:
+                report.skipped.append(EdgeOutcome(
+                    edge=step.edge, action_id=step.action_id,
+                    status="skipped", detail="action budget exhausted"))
+                continue
+
+            if step.status == "deferred":
+                filled, unmet = apply_bindings(step.params, step.needs, ctx)
+                if unmet:
+                    report.skipped.append(EdgeOutcome(
+                        edge=step.edge, action_id=step.action_id,
+                        status="skipped",
+                        detail=("precondition unproven: needs "
+                                + ", ".join(sorted(unmet))
+                                + " from an upstream leg that did not run "
+                                "or did not prove")))
+                    continue
+                planned = PlannedEdge(
+                    edge=step.edge, action_id=step.action_id, risk=step.risk,
+                    url=filled["url"], reason=step.reason, params=filled)
+            else:
+                planned = step.planned
+
+            outcome = await self._run_one(planned, binding_ctx=ctx)
+            if outcome.status == "ran":
+                report.ran.append(outcome)
+                # Access-state propagation (gap #3): a proven leg on an
+                # access-gaining edge has moved the engagement to a new
+                # identity. Record it as an `identity_credential` so the
+                # existing `adopt_discovered` path lets later authenticated
+                # modules re-probe the surface AS that identity — web-native
+                # horizontal/vertical privilege movement, not a single-request
+                # dead end.
+                #
+                # The credential may have been produced by this leg *or* by an
+                # upstream detect leg and threaded in; gating on "this action
+                # produced it" made the canonical detect→forge chain record
+                # nothing, because first-writer-wins leaves the source on the
+                # detector. What matters is that the access leg proved and a
+                # usable token exists at that point.
+                if (outcome.confidence == "CONFIRMED"
+                        and planned.edge.edge_type in _ACCESS_EDGES):
+                    token = self._usable_token(ctx.get("token"),
+                                               planned.params.get("token"))
+                    if token:
+                        self._record_acquired_identity(planned, token)
+            elif outcome.status == "blocked_risk":
+                report.blocked.append(outcome)
+            else:
+                report.skipped.append(outcome)
+
+    @staticmethod
+    def _usable_token(*candidates) -> str:
+        """First candidate usable for authenticated replay, else "".
+
+        Rejects empty strings, cookie-jar keys (not a header value) and
+        redacted previews (`...`) — a preview cannot be replayed, and storing
+        it as an identity makes every later authenticated probe fail while the
+        report claims an identity was adopted.
+        """
+        for candidate in candidates:
+            token = str(candidate or "").strip()
+            if token and not token.startswith("cookie:") \
+                    and not token.endswith(("...", "…")):
+                return token
+        return ""
+
+    def _record_acquired_identity(self, planned: PlannedEdge, token: str) -> None:
+        """Persist a session a causal leg obtained or used as an identity.
+
+        Matches the `identity_credential` shape `auth_audit`/`auth_bypass`
+        write, so no new consumer is needed: `AuthHarness.adopt_discovered`
+        already turns these into live identities, and ~15 authenticated
+        modules call it. The token is stored whole because authenticated
+        replay must send it, and redacted (`token_preview`) everywhere it is
+        displayed — the same discipline the detectors already follow.
+        """
+        token = self._usable_token(token)
+        if not token:
+            return
+        technique = planned.action_id
+        self.state.add_asset(
+            "identity_credential",
+            f"identity:{technique}:{planned.url}",
+            technique,
+            confidence="CONFIRMED",
+            sources=[self.module_id],
+            attrs={
+                "endpoint": planned.url,
+                "technique": technique,
+                "role": "",
+                "acquired_via": planned.edge.edge_type,
+                "token": token,
+                "token_preview": redact_secret(token),
+            },
+        )
+
+    # ── DAG / branch execution (R9 branch outcomes) ────────────────
+
+    @staticmethod
+    def _merge_nodes(chains) -> dict:
+        """Union of every chain's nodes, keyed by id, for DAG planning.
+
+        Chains that share a prefix name the same node ids, so the union is the
+        DAG's vertex set. First definition of an id wins; duplicates across
+        chains are the same node by construction.
+        """
+        merged: dict = {}
+        for chain in chains:
+            nodes = getattr(chain, "nodes", None)
+            items = (nodes.values() if isinstance(nodes, dict)
+                     else (nodes or []))
+            for node in items:
+                nid = getattr(node, "id", None)
+                if nid and nid not in merged:
+                    merged[nid] = node
+        return merged
+
+    async def _execute_dag(self, chains, report: ExecutionReport) -> None:
+        """Execute the whole chain set as one DAG over shared nodes.
+
+        Reachability, not path membership, decides what runs: a root (a node no
+        edge targets) starts reached; any edge whose source is reached runs
+        once; a leg that proves marks its target reached and hands its
+        credential context down the branch. A leg that fails — or an edge whose
+        source is never reached — leaves its target unreached, so only that
+        node's descendants are blocked while sibling branches proceed. This is
+        the "branch outcomes / independent branches" half of R9.
+        """
+        node_map = self._merge_nodes(chains)
+        edges: list[AttackEdge] = []
+        seen: set = set()
+        targets: set = set()
+        for chain in chains:
+            for edge in getattr(chain, "edges", []) or []:
+                key = (edge.source_id, edge.target_id, edge.edge_type,
+                       edge.action_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(edge)
+                targets.add(edge.target_id)
+
+        node_ctx: dict[str, BindingContext] = {}
+        reached: set = set()
+        for nid in node_map:
+            if nid not in targets:
+                reached.add(nid)
+                node_ctx[nid] = BindingContext()
+        # A node present only as an edge endpoint (never declared in any
+        # chain.nodes) is still a valid root if nothing targets it.
+        for edge in edges:
+            if edge.source_id not in targets and edge.source_id not in reached:
+                reached.add(edge.source_id)
+                node_ctx[edge.source_id] = BindingContext()
+
+        processed: set = set()
+        progress = True
+        while progress:
+            progress = False
+            for edge in edges:
+                key = (edge.source_id, edge.target_id, edge.edge_type,
+                       edge.action_id)
+                if key in processed or edge.source_id not in reached:
+                    continue
+                processed.add(key)
+                progress = True
+                await self._run_dag_edge(
+                    edge, node_map,
+                    node_ctx.get(edge.source_id) or BindingContext(),
+                    node_ctx, reached, report)
+
+        # Anything still unprocessed had a source that no proven leg reached.
+        for edge in edges:
+            key = (edge.source_id, edge.target_id, edge.edge_type,
+                   edge.action_id)
+            if key not in processed:
+                report.skipped.append(EdgeOutcome(
+                    edge=edge, action_id=edge.action_id or "",
+                    status="skipped",
+                    detail=("precondition unproven: source node "
+                            f"'{edge.source_id}' was never reached by a "
+                            "proven leg")))
+
+    async def _run_dag_edge(self, edge: AttackEdge, node_map: dict,
+                            source_ctx: BindingContext,
+                            node_ctx: dict, reached: set,
+                            report: ExecutionReport) -> None:
+        """Run (or pass through) one DAG edge, propagating reachability + ctx."""
+
+        def _reach(target_id: str, ctx: BindingContext) -> None:
+            if target_id in node_ctx:
+                for btype, value in ctx.values.items():
+                    node_ctx[target_id].put(btype, value,
+                                            ctx.sources.get(btype, ""))
+            else:
+                node_ctx[target_id] = ctx
+            reached.add(target_id)
+
+        steps = self._causal_steps(_SyntheticChain(node_map, [edge]))
+        if not steps:
+            # Structural edge (affected_by, api_discovery): no probe, pure
+            # reachability — the target is reachable because the source is.
+            _reach(edge.target_id, source_ctx.clone())
+            return
+
+        step = steps[0]
+        if step.status == "unarmable":
+            self.unarmable.append(EdgeOutcome(
+                edge=step.edge, action_id=step.action_id,
+                status="no_action", detail=step.detail))
+            return
+
+        if self.max_actions and self._used >= self.max_actions:
+            report.skipped.append(EdgeOutcome(
+                edge=step.edge, action_id=step.action_id,
+                status="skipped", detail="action budget exhausted"))
+            return
+
+        branch_ctx = source_ctx.clone()
+        if step.status == "deferred":
+            filled, unmet = apply_bindings(step.params, step.needs, branch_ctx)
+            if unmet:
+                report.skipped.append(EdgeOutcome(
+                    edge=step.edge, action_id=step.action_id,
+                    status="skipped",
+                    detail=("precondition unproven: needs "
+                            + ", ".join(sorted(unmet))
+                            + " from an upstream leg that did not run "
+                            "or did not prove")))
+                return
+            planned = PlannedEdge(
+                edge=step.edge, action_id=step.action_id, risk=step.risk,
+                url=filled["url"], reason=step.reason, params=filled)
+        else:
+            planned = step.planned
+
+        outcome = await self._run_one(planned, binding_ctx=branch_ctx)
+        if outcome.status == "ran":
+            report.ran.append(outcome)
+            if outcome.confidence == "CONFIRMED":
+                # Same rule as the linear path: the access leg moved the
+                # engagement, whether it minted the credential or consumed one
+                # the shared prefix produced.
+                if planned.edge.edge_type in _ACCESS_EDGES:
+                    token = self._usable_token(branch_ctx.get("token"),
+                                               planned.params.get("token"))
+                    if token:
+                        self._record_acquired_identity(planned, token)
+                # Only a proven transition propagates reachability down branch.
+                _reach(edge.target_id, branch_ctx)
+        elif outcome.status == "blocked_risk":
+            report.blocked.append(outcome)
+        else:
+            report.skipped.append(outcome)
 
     def _build_params(self, edge: AttackEdge, chain, meta):
         """Work out the arguments an action needs, from what the graph knows.
@@ -371,8 +766,8 @@ class ChainExecutor:
             if ActionRegistry.get(edge.action_id):
                 candidates.append((edge.action_id, "declared on edge"))
             # An unregistered declared action no longer kills the edge: fall
-            # through to the category/edge candidates so the surface is still
-            # tested instead of reported as unarmable.
+            # through to the candidate lists so the surface is still tested
+            # instead of reported as unarmable.
 
         target = self._node(edge.target_id, chain)
         category = ""
@@ -424,33 +819,48 @@ class ChainExecutor:
         self.state.prune_module_findings(self.module_id)
         self.state.module["current"] = self.module_id
         try:
-            for chain in pending:
-                # Vuln-driven edges (declared action, category match) run
-                # before generic probes: without this ordering one probe
-                # family (open redirects on every surface) spends the
-                # whole budget while the SQLi that matters never runs.
-                planned_edges = sorted(
-                    self.plan(chain),
-                    key=lambda item: _reason_rank(item.reason))
-                for planned in planned_edges:
-                    if self.max_actions and self._used >= self.max_actions:
-                        report.skipped.append(EdgeOutcome(
-                            edge=planned.edge, action_id=planned.action_id,
-                            status="skipped", detail="action budget exhausted"))
+            if self.branch:
+                # One DAG over all chains: shared prefixes run once, bindings
+                # propagate down each branch, and a failed prerequisite blocks
+                # only its descendants.
+                await self._execute_dag(pending, report)
+            else:
+                for chain in pending:
+                    if self.causal:
+                        # Each chain is an ordered path; run it in order,
+                        # threading bindings and honouring preconditions.
+                        # Chains stay independent of one another, so a dead leg
+                        # here never blocks the next chain.
+                        await self._execute_chain_causal(chain, report)
                         continue
-                    outcome = await self._run_one(planned)
-                    if outcome.status == "ran":
-                        report.ran.append(outcome)
-                    elif outcome.status == "blocked_risk":
-                        report.blocked.append(outcome)
-                    else:
-                        report.skipped.append(outcome)
+                    # Vuln-driven edges (declared action, category match) run
+                    # before generic probes: without this ordering one probe
+                    # family (open redirects on every surface) spends the
+                    # whole budget while the SQLi that matters never runs.
+                    planned_edges = sorted(
+                        self.plan(chain),
+                        key=lambda item: _reason_rank(item.reason))
+                    for planned in planned_edges:
+                        if self.max_actions and self._used >= self.max_actions:
+                            report.skipped.append(EdgeOutcome(
+                                edge=planned.edge, action_id=planned.action_id,
+                                status="skipped",
+                                detail="action budget exhausted"))
+                            continue
+                        outcome = await self._run_one(planned)
+                        if outcome.status == "ran":
+                            report.ran.append(outcome)
+                        elif outcome.status == "blocked_risk":
+                            report.blocked.append(outcome)
+                        else:
+                            report.skipped.append(outcome)
         finally:
             self.state.module["current"] = previous_current
         report.unarmable = list(self.unarmable)
         return report
 
-    async def _run_one(self, planned: PlannedEdge) -> EdgeOutcome:
+    async def _run_one(self, planned: PlannedEdge,
+                       binding_ctx: Optional[BindingContext] = None) -> EdgeOutcome:
         if not risk_allows(planned.risk, self.max_risk):
             if self.operations is not None:
                 self.operations.refuse(
@@ -526,6 +936,27 @@ class ChainExecutor:
                 confidence=getattr(result, "confidence", ""),
             )
 
+        # Reproducibility gate: a candidate that confirms once and not twice
+        # is a flapping target, not a finding. Re-run the same action with the
+        # same params and require the second verdict to hold. Off by default.
+        if self.verify and not await self._reconfirms(planned, result):
+            return EdgeOutcome(
+                edge=planned.edge, action_id=planned.action_id,
+                status="skipped",
+                detail=("not reproducible: the proving action did not confirm "
+                        "again on a clean re-run"),
+                confidence=getattr(result, "confidence", ""),
+            )
+
+        # A successful leg may hand the next one a credential the thin graph
+        # could never carry — a forged JWT, a session, a cloud key. Capture it
+        # here, where the raw result is in scope, so a downstream `deferred`
+        # edge can arm against it. Only populated in causal mode (binding_ctx
+        # is None otherwise), so the flat path is byte-for-byte unchanged.
+        if binding_ctx is not None:
+            for btype, value in extract_outputs(planned.action_id, result).items():
+                binding_ctx.put(btype, value, source=planned.action_id)
+
         if ctx.meta is not None and ctx.meta.result_kind == "observation":
             self.state.add_asset(
                 "observation", f"observation:{planned.action_id}:{planned.url}",
@@ -535,6 +966,57 @@ class ChainExecutor:
                                status="ran", confidence=result.confidence,
                                detail="observation recorded; no vulnerability proven")
         return self._promote(planned, result)
+
+    async def _reconfirms(self, planned: PlannedEdge, first) -> bool:
+        """Does the same action confirm again, at the same confidence?
+
+        A one-shot success can be a cache, a rate-limit burst, a WAF glitch or
+        a random 200; promoting it is how a clean target acquires a finding.
+        Candidate-producing actions are re-run once with byte-identical params
+        and must reproduce their own verdict. Actions that only observe are
+        not re-run — a stable 200 proves reachability, which is not a claim
+        that needs confirming.
+        """
+        from actions.registry import ActionContext
+
+        entry = ActionRegistry.get(planned.action_id)
+        meta = entry[0] if entry else None
+        if meta is None or meta.produces not in {"Finding", "VulnCandidate"}:
+            return True
+        if self.budget is not None and not self.budget.check():
+            # Verification is a request too. No budget means no second look;
+            # keep the finding rather than dropping it for lack of funds.
+            return True
+
+        ctx = ActionContext(
+            action_id=planned.action_id,
+            params=dict(planned.params),
+            target=planned.url,
+        )
+        ctx.meta = meta
+        if self.audit is not None:
+            ctx.audit = self.audit
+        if self.operations is not None:
+            ctx.operations = self.operations
+        if self.budget is not None:
+            try:
+                consume = getattr(self.budget, "consume_action", None)
+                if consume:
+                    consume()
+                else:
+                    self.budget.record_action()
+            except Exception:
+                return True
+        try:
+            second = await ActionRegistry.execute(planned.action_id, ctx)
+        except Exception:
+            return False
+        self._used += 1
+        if not getattr(second, "success", False):
+            return False
+        rank = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
+        return (rank.get(str(getattr(second, "confidence", "")).upper(), 0)
+                >= rank.get(str(getattr(first, "confidence", "")).upper(), 0))
 
     def _promote(self, planned: PlannedEdge, result) -> EdgeOutcome:
         """Turn a successful action into a verified finding.

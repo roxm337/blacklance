@@ -232,6 +232,12 @@ class Orchestrator:
             self.config,
             checkpoint_path=self.state.state_dir / "budget.json",
         )
+        # OPSEC posture (gap #4): a detectability ceiling + weighted noise
+        # budget + optional pacing, read from `opsec:`. Permissive by default
+        # (no ceiling, unlimited budget, no pacing), so a run without the
+        # config block behaves exactly as before.
+        from core.opsec import OpsecPolicy
+        self.opsec = OpsecPolicy(self.config)
         recovered = self.state.recover_interrupted_runs() if self.run_mode == "resume" else []
         if recovered:
             self.state.save()
@@ -398,6 +404,12 @@ class Orchestrator:
                     {"kind": "module", "id": module_id}, "active_gated",
                     "active module requires --active", target=self._safe_base_url())
                 continue
+
+            # The OPSEC gate lives in `_run_module`, not here: the pipeline
+            # loop is only one of four ways a module starts, and a ceiling
+            # enforced at one caller but not `--module`, the LLM loop or an
+            # auto-run dependency is not a ceiling. Admission also charges the
+            # noise budget, so it must happen where the module actually runs.
 
             # Check dependencies
             deps = entry.get("depends_on", [])
@@ -822,6 +834,42 @@ class Orchestrator:
         except Exception:
             return ""
 
+    def _opsec_posture(self):
+        """The run's OPSEC policy, created lazily for partially built instances.
+
+        Every real Orchestrator gets one in `_initialize_assessment_runtime`;
+        this fallback keeps lightweight test doubles and resumed executors
+        working without silently disabling the gate.
+        """
+        policy = getattr(self, "opsec", None)
+        if policy is None:
+            from core.opsec import OpsecPolicy
+            policy = OpsecPolicy(getattr(self, "config", {}) or {})
+            self.opsec = policy
+        return policy
+
+    def _opsec_admit(self, module_id: str, entry: dict) -> bool:
+        """Admit one module under the detectability ceiling / noise budget.
+
+        Called from `_run_module`, the single funnel for the pipeline, the
+        explicit `--module` path, the LLM loop and auto-run dependencies, so
+        the posture is charged where the module actually runs. A refusal is
+        recorded as `opsec_gated` and the caller moves on; under the default
+        (permissive) policy this is a no-op and costs nothing.
+        """
+        if entry is None:
+            return True
+        decision = self._opsec_posture().admit(
+            entry.get("detectability", "high"))
+        if decision.allowed:
+            return True
+        self.state.skip_module(module_id, decision.reason)
+        self.operations.refuse(
+            {"kind": "module", "id": module_id}, "opsec_gated",
+            decision.reason, target=self._safe_base_url())
+        print(f"  ⏭ {module_id}: {decision.reason}")
+        return False
+
     async def _run_module(self, module_id: str):
         """Internal: instantiate and run a module."""
         self._require_open()
@@ -837,6 +885,16 @@ class Orchestrator:
                 state_dir = Path(tempfile.mkdtemp(prefix="osint-ops-"))
             self.operations = OperationsLedger(
                 Path(state_dir) / "operations.jsonl")
+
+        # OPSEC gate, before any work (including the surface seeder): refuse a
+        # module louder than the ceiling or once the noise budget is spent, and
+        # pace the run before the operation starts. Placing it here covers every
+        # entry point — pipeline, --module, LLM RUN_MODULE, auto-run deps — and
+        # charges only modules that are actually going to run.
+        if not self._opsec_admit(module_id, MODULE_REGISTRY.get(module_id)):
+            return
+        await self._opsec_posture().pace()
+
         # Seed once per process, whichever entry point got us here. `--module`
         # skips `run_all`, so without this a single-module invocation never
         # sees the object references the seeder derives from the bundle.
