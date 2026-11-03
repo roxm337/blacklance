@@ -3875,3 +3875,39 @@ def test_request_observer_counts_wire_requests_once():
     finally:
         wrappers.configure_request_observer(None)
     assert state.module["stats"]["total_requests"] - before == 2
+
+
+def test_verify_composite_attaches_timing_only_with_a_distinct_baseline(monkeypatch):
+    """The description promised timing; the body never ran it. Timing is
+    supporting evidence — it may not lift a stable page to CONFIRMED."""
+    timing_calls = {"n": 0}
+
+    async def stable(url, **kwargs):
+        if "baseline" in url:
+            timing_calls["n"] += 1
+        return {"status": 200, "body": "hello world",
+                "time_ms": 5, "headers": {}}
+
+    _patch_curl(monkeypatch, stable)
+    result = asyncio.run(
+        verify_composite(_ctx(
+            "verify.composite_oracle",
+            url="https://example.com/?q=payload",
+            baseline_url="https://example.com/?baseline=1")))
+
+    assert "timing" in result.evidence
+    assert result.confidence == "TENTATIVE"
+    assert timing_calls["n"] > 0  # TimingOracle.measure actually ran
+
+
+def test_verify_composite_skips_timing_without_a_baseline(monkeypatch):
+    async def stable(url, **kwargs):
+        return {"status": 200, "body": "hello world",
+                "time_ms": 5, "headers": {}}
+
+    _patch_curl(monkeypatch, stable)
+    result = asyncio.run(
+        verify_composite(_ctx("verify.composite_oracle",
+                              url="https://example.com/?q=payload")))
+
+    assert "timing" not in result.evidence

@@ -268,3 +268,50 @@ def test_invalid_web_target_is_not_executed(tmp_path, monkeypatch):
     assert result["status"] == "unsupported"
     assert "manual review" in result["error"]
     assert called is False
+
+
+def test_fallback_plan_carries_the_edge_action_the_planner_chose(tmp_path):
+    """The graph names the action that proves each edge. Dropping it forced
+    the exploitation agent to re-derive a technique from the edge type and
+    guess again, which is how an SSTI chain ended up testing for SQLi."""
+    state = StateManager(str(tmp_path / "run"))
+    agent = SupervisorAgent(
+        state,
+        {"target": {"domain": "example.com",
+                    "raw_url": "https://example.com/search?q=1"}},
+        object(),
+    )
+    source = AttackNode(
+        id="url:https://example.com/search?q=1",
+        label="https://example.com/search?q=1", node_type="url",
+        attrs={"url": "https://example.com/search?q=1", "status": 200},
+    )
+    goal = AttackNode(id="goal:rce", label="Remote code execution",
+                      node_type="goal")
+    chain = AttackPath(
+        nodes=[source, goal],
+        edges=[AttackEdge(source.id, goal.id, "exploit",
+                          action_id="web.ssti.detect")],
+        score=0.6, summary="search --[exploit]--> RCE",
+    )
+
+    plan = agent._fallback_plan([chain])
+
+    assert plan["hypotheses"][0]["action_id"] == "web.ssti.detect"
+
+
+def test_fallback_plan_path_hints_name_actions(tmp_path):
+    state = StateManager(str(tmp_path / "run"))
+    agent = SupervisorAgent(
+        state,
+        {"target": {"domain": "example.com",
+                    "raw_url": "https://example.com/lfi/ssti?file=1"}},
+        object(),
+    )
+
+    plan = agent._fallback_plan([])
+    by_technique = {h["technique"]: h["action_id"]
+                    for h in plan["hypotheses"]}
+
+    assert by_technique["LFI"] == "web.lfi.detect"
+    assert by_technique["SSTI"] == "web.ssti.detect"

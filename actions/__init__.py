@@ -8,7 +8,7 @@ operator-selected ceiling immediately before execution.
 
 Usage:
     @action(
-        id="web.sqli.test",
+        id="web.sqli.detect",
         risk="MEDIUM",
         detectability="high",
         requires=["url", "param"],

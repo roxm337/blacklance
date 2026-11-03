@@ -10,7 +10,11 @@ from typing import Optional
 
 from state.manager import StateManager
 
-from core.action_routing import PROBE_ACTIONS, action_for_category
+from core.action_routing import (
+    PROBE_ACTIONS,
+    action_for_category,
+    normalize_category,
+)
 
 CONFIDENCE_ORDER = {"TENTATIVE": 0, "FIRM": 1, "CONFIRMED": 2}
 
@@ -306,11 +310,12 @@ class AttackGraph:
         seen: set[tuple[str, str, str]] = set()
         for finding in self.state.findings.get("findings", []):
             category = str(finding.get("category", "")).lower()
-            if not category:
+            normalized = normalize_category(category)
+            if not normalized:
                 continue
             match = next(
                 (entry for entry in self.EXPLOITATION_GOALS
-                 if entry[0] in category), None)
+                 if normalize_category(entry[0]) in normalized), None)
             if match is not None:
                 _, goal_id, label, action_id, edge_type = match
             else:

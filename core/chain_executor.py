@@ -101,8 +101,8 @@ def _reason_rank(reason: str) -> int:
 # `verify.reproducible` is still deliberately absent, because a stable 200 is
 # not a vulnerability.
 from core.action_routing import (  # noqa: E402  (kept next to its use)
-    CATEGORY_ACTIONS,
     EDGE_ACTIONS,
+    action_for_category,
 )
 
 
@@ -775,10 +775,11 @@ class ChainExecutor:
             category = str((target.attrs or {}).get("category", "")).lower()
 
         if category:
-            for token, action_id in CATEGORY_ACTIONS:
-                if token in category and ActionRegistry.get(action_id):
-                    candidates.append((action_id, f"vuln category '{category}'"))
-                    break
+            # Normalizes hyphens/underscores, so "broken-access-control" and
+            # "Broken Access Control" route alike.
+            action_id = action_for_category(category)
+            if action_id and ActionRegistry.get(action_id):
+                candidates.append((action_id, f"vuln category '{category}'"))
 
         for action_id in EDGE_ACTIONS.get(edge.edge_type, []):
             if ActionRegistry.get(action_id):

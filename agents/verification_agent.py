@@ -14,6 +14,35 @@ from core.verification_oracle import (
 )
 
 
+def action_for_technique(technique: str) -> str:
+    """The action that re-proves a hypothesis from its technique string.
+
+    Called only when the hypothesis carries no registered action id. Ordering
+    mirrors `core.action_routing`: NoSQL before SQL, SSTI before the generic
+    template word, and authorization before the "auth" substring it contains.
+    """
+    text = str(technique or "").lower()
+    if "nosql" in text:
+        return "web.nosql.detect"
+    if "sqli" in text or "sql" in text:
+        return "web.sqli.detect"
+    if "xss" in text:
+        return "web.xss.reflected"
+    if "ssrf" in text:
+        return "web.ssrf.oob_detect"
+    if "ssti" in text or "template" in text:
+        return "web.ssti.detect"
+    if ("lfi" in text or "traversal" in text
+            or "file inclusion" in text):
+        return "web.lfi.detect"
+    if "redirect" in text:
+        return "web.redirect.probe"
+    if ("auth" in text or "access control" in text
+            or "authorization" in text):
+        return "auth.bypass.probe"
+    return "verify.composite_oracle"
+
+
 class VerificationAgent(BaseAgent):
     role = AgentRole.VERIFICATION
 
@@ -66,14 +95,7 @@ class VerificationAgent(BaseAgent):
         action_id = hypothesis.action_id
         if not action_id or action_id == "manual_review" \
                 or ActionRegistry.get(action_id) is None:
-            if "sqli" in technique:
-                action_id = "web.sqli.detect"
-            elif "xss" in technique:
-                action_id = "web.xss.reflected"
-            elif "ssrf" in technique:
-                action_id = "web.ssrf.oob_detect"
-            else:
-                action_id = "verify.composite_oracle"
+            action_id = action_for_technique(technique)
 
         params = dict(hypothesis.params or {})
         params.setdefault("url", url)

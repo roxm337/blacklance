@@ -202,6 +202,21 @@ async def verify_composite(ctx: ActionContext) -> ActionResult:
         lambda: oracle.differential.test(url, method=method)
     )
 
+    # Timing, when (and only when) there are two distinct endpoints to
+    # compare. It is recorded as supporting evidence, never as a confidence
+    # source: a slow response is a lead for blind injection, not proof, and
+    # treating latency as proof is how a cold cache becomes a finding.
+    timing_evidence = None
+    if baseline_url and baseline_url != url:
+        try:
+            timing_base = await oracle.timing.measure(baseline_url,
+                                                      method=method)
+            timing_test = await oracle.timing.measure(url, method=method)
+            timing_verdict = oracle.timing.compare(timing_base, timing_test)
+            timing_evidence = timing_verdict.evidence.get("timing")
+        except Exception:
+            timing_evidence = None
+
     # Composite scoring. Reproducibility strengthens a divergence that
     # already exists; on its own it confirms nothing — a stable page is
     # not a vulnerability, and treating it as one is how static assets
@@ -222,14 +237,17 @@ async def verify_composite(ctx: ActionContext) -> ActionResult:
 
     composite_score = max(scores) if scores else 0.0
 
+    evidence = {
+        "differential": diff_verdict.evidence,
+        "reproducibility": repro_verdict.evidence,
+    }
+    if timing_evidence:
+        evidence["timing"] = timing_evidence
     return ActionResult(
         success=confidence in ("FIRM", "CONFIRMED"),
         confidence=confidence,
         data={"composite_score": composite_score},
-        evidence={
-            "differential": diff_verdict.evidence,
-            "reproducibility": repro_verdict.evidence,
-        },
+        evidence=evidence,
         error="" if confidence in ("FIRM", "CONFIRMED") else (
             f"no stable divergence: {diff_verdict.reason}; {repro_verdict.reason}"
         ),

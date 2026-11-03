@@ -46,6 +46,7 @@ class AgentMessage:
     msg_type: str  # task_assigned | result | hypothesis | request_info | plan_update
     payload: dict = field(default_factory=dict)
     timestamp: float = 0.0
+    acknowledged_at: float = 0.0  # 0 = pending; set once by ack()
 
 
 class Blackboard:
@@ -101,9 +102,22 @@ class Blackboard:
             filtered = [m for m in filtered if m.msg_type == msg_type]
         return filtered
 
-    def ack(self, msg: AgentMessage):
-        """Mark a message as processed."""
-        pass  # kept simple; could be extended with ack tracking
+    def ack(self, msg: AgentMessage) -> bool:
+        """Mark a message processed; idempotent.
+
+        Returns True only on the first acknowledgement. Tracking is what lets
+        a supervisor distinguish "no reply yet" from "reply consumed" without
+        keeping a second set of ids beside the message list.
+        """
+        if msg.acknowledged_at:
+            return False
+        msg.acknowledged_at = time.time()
+        return True
+
+    def pending(self, target: AgentRole,
+                msg_type: Optional[str] = None) -> list[AgentMessage]:
+        """Messages for `target` that no reader has acknowledged yet."""
+        return [m for m in self.read(target, msg_type) if not m.acknowledged_at]
 
     # ── Plan management ───────────────────────────────────────────
 
@@ -129,7 +143,8 @@ class Blackboard:
             "messages": [
                 {"source": m.source.value, "target": m.target.value,
                  "type": m.msg_type, "payload": m.payload,
-                 "timestamp": m.timestamp}
+                 "timestamp": m.timestamp,
+                 "acknowledged_at": m.acknowledged_at}
                 for m in self.messages[-100:]  # keep last 100
             ],
             "current_plan": self.current_plan,
@@ -137,6 +152,8 @@ class Blackboard:
             "stats": {
                 "total_hypotheses": len(self.hypotheses),
                 "total_messages": len(self.messages),
+                "unacknowledged": len([m for m in self.messages
+                                       if not m.acknowledged_at]),
                 "confirmed": len([h for h in self.hypotheses if h.status == "confirmed"]),
                 "rejected": len([h for h in self.hypotheses if h.status == "rejected"]),
             },

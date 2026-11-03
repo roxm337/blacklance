@@ -168,3 +168,14 @@ def test_shipped_configs_warn_only_on_informative_defaults():
             bad = [w for w in unexpected
                    if "unknown key" in w or "retired namespace" in w]
             assert bad == [], (path.name, bad)
+
+
+def test_opt_in_switches_are_known_keys():
+    """chains.verify and the opsec block must be visible to --check-config;
+    a silent key is a switch the operator cannot see is off."""
+    known = {dotted for dotted, _default, _why in KNOWN_KEYS}
+    for dotted in ("chains.verify", "chains.causal.enabled",
+                   "chains.causal.branch", "budget_limits.max_actions",
+                   "opsec.max_detectability", "opsec.budget",
+                   "opsec.pacing.seed"):
+        assert dotted in known

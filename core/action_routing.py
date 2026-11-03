@@ -20,6 +20,8 @@ it runs a SQLi oracle against an SSTI finding and reports the target clean.
 
 from __future__ import annotations
 
+import re
+
 # Edge type -> candidate actions, best first. These are the generic arms used
 # when an edge does not declare one. `extract` used to be empty, which is why
 # no causal chain could ever carry a credential out of an SSRF or LFI: the
@@ -63,6 +65,12 @@ CATEGORY_ACTIONS: list[tuple[str, str]] = [
     ("metadata", "web.ssrf.cloud_metadata"),
     # Specific classes before the generic word they contain.
     ("nosql", "web.nosql.detect"),
+    # ORM filter leaks (Sequelize/Mongoose/Prisma `$ne`/`$gt` shapes) are
+    # operator injection against a document mapper; the NoSQL oracle is the
+    # registered prover. "orm filter"/"orm leak" rather than "orm", which is
+    # inside "information".
+    ("orm filter", "web.nosql.detect"),
+    ("orm leak", "web.nosql.detect"),
     ("ssti", "web.ssti.detect"),
     ("template injection", "web.ssti.detect"),
     ("template", "web.ssti.detect"),
@@ -76,6 +84,11 @@ CATEGORY_ACTIONS: list[tuple[str, str]] = [
     ("auth bypass", "auth.bypass.probe"),
     ("authentication bypass", "auth.bypass.probe"),
     ("privilege escalation", "auth.bypass.probe"),
+    # GraphQL before the generic "api"/"injection" tokens: introspection is
+    # the only proving action that needs a GraphQL endpoint rather than any
+    # parameter-bearing URL.
+    ("graphql", "api.graphql.introspect"),
+    ("introspection", "api.graphql.introspect"),
     ("sql", "web.sqli.detect"),
     ("injection", "web.sqli.detect"),
     ("xss", "web.xss.reflected"),
@@ -103,6 +116,25 @@ PROBE_ACTIONS: list[str] = [
 ]
 
 
+def normalize_category(value: str) -> str:
+    """Fold a category to the form the routing table is written in.
+
+    Categories are free text written by many modules: "Broken Access Control",
+    "broken-access-control" and "broken_access_control" are the same class,
+    but a raw substring match only sees the first. Normalizing separators is
+    what keeps a hyphenated finding from reporting "no proving action".
+    """
+    return re.sub(r"[-_]+", " ", str(value or "").lower()).strip()
+
+
+# Pre-normalized at import so every lookup pays one substitution, not one per
+# token.
+_NORMALIZED_CATEGORY_ACTIONS: tuple[tuple[str, str], ...] = tuple(
+    (normalize_category(token), action_id)
+    for token, action_id in CATEGORY_ACTIONS
+)
+
+
 def action_for_category(category: str) -> str:
     """The action that proves a finding of this category, or "".
 
@@ -110,10 +142,10 @@ def action_for_category(category: str) -> str:
     caller decides how to report an unregistered arm, and silently returning
     "" would hide a routing table that names an action nobody implements.
     """
-    text = str(category or "").strip().lower()
+    text = normalize_category(category)
     if not text:
         return ""
-    for token, action_id in CATEGORY_ACTIONS:
+    for token, action_id in _NORMALIZED_CATEGORY_ACTIONS:
         if token in text:
             return action_id
     return ""

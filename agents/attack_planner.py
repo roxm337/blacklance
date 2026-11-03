@@ -273,6 +273,10 @@ _ACTION_FOR_CATEGORY = (
     # Injection" both contain "injection", and "authorization" contains
     # "auth". A wrong first match names a proof that tests the wrong bug.
     ("nosql", "web.nosql.detect", "LOW"),
+    ("graphql", "api.graphql.introspect", "LOW"),
+    ("introspection", "api.graphql.introspect", "LOW"),
+    ("orm filter", "web.nosql.detect", "LOW"),
+    ("orm leak", "web.nosql.detect", "LOW"),
     ("ssti", "web.ssti.detect", "LOW"),
     ("template", "web.ssti.detect", "LOW"),
     ("traversal", "web.lfi.detect", "LOW"),
@@ -301,10 +305,15 @@ _ACTION_FOR_CATEGORY = (
 
 def _action_for_category(category: str) -> tuple:
     """(action_id, ceiling) proving this category, or ("", "") when the
-    library has no safe proof for it."""
-    lowered = str(category or "").lower()
+    library has no safe proof for it.
+
+    Separators are folded first, so a hypothesis phrased "broken-access-control"
+    routes the same as "Broken Access Control".
+    """
+    from core.action_routing import normalize_category
+    lowered = normalize_category(category)
     for token, action_id, ceiling in _ACTION_FOR_CATEGORY:
-        if token in lowered:
+        if normalize_category(token) in lowered:
             return action_id, ceiling
     return "", ""
 

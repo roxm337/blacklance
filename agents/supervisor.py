@@ -246,6 +246,7 @@ class SupervisorAgent(BaseAgent):
                 continue
             seen.add(key)
             goal = c.nodes[-1].label if c.nodes else edge_type
+            last_edge = c.edges[-1] if c.edges else None
 
             hyps.append({
                 "title": f"Investigate {edge_type} chain to {goal}",
@@ -254,7 +255,10 @@ class SupervisorAgent(BaseAgent):
                 "impact": c.score,
                 "target": target,
                 "technique": technique_map.get(edge_type, edge_type),
-                "action_id": "",
+                # The planner already named the action that proves this edge;
+                # dropping it here made the exploitation agent re-guess from
+                # the technique string.
+                "action_id": getattr(last_edge, "action_id", "") or "",
                 "assigned_to": "exploitation",
             })
 
@@ -272,13 +276,15 @@ class SupervisorAgent(BaseAgent):
             if "sqli" in path_lower or "sql" in path_lower:
                 technique_hints.append(("SQLi", "web.sqli.detect"))
             if "lfi" in path_lower or "file" in path_lower:
-                technique_hints.append(("LFI", ""))
+                technique_hints.append(("LFI", "web.lfi.detect"))
             if "ssrf" in path_lower:
                 technique_hints.append(("SSRF", "web.ssrf.cloud_metadata"))
-            if "ssti" in path_lower:
-                technique_hints.append(("SSTI", ""))
+            if "ssti" in path_lower or "template" in path_lower:
+                technique_hints.append(("SSTI", "web.ssti.detect"))
             if "redirect" in path_lower or "open" in path_lower:
-                technique_hints.append(("Open Redirect", ""))
+                technique_hints.append(("Open Redirect", "web.redirect.probe"))
+            if "nosql" in path_lower or "mongo" in path_lower:
+                technique_hints.append(("NoSQL", "web.nosql.detect"))
 
             for vuln_type, action_id in technique_hints:
                 hyps.append({

@@ -195,16 +195,19 @@ detectability:
 # ceiling cannot be bypassed by starting a module a different way. Refusals are
 # recorded as `opsec_gated` in the operations ledger, never silently dropped.
 opsec:
-  # max_detectability: medium   # refuse modules louder than this (low|medium|high)
-  # budget: 0                   # weighted noise budget across the run; 0 = unlimited
-  # weights:                    # per-level cost charged against the budget
-  #   low: 1
-  #   medium: 3
-  #   high: 8
-  # pacing:                     # bounded random delay before each module
-  #   min_ms: 0
-  #   max_ms: 0                 # 0 = no pacing
-  #   seed: null                # set an int for reproducible delays
+  # Permissive by default: no ceiling, unlimited noise, no pacing. Set a
+  # ceiling/budget to sweep a monitored target quietly and stop before the
+  # run becomes conspicuous; refusals are recorded as opsec_gated.
+  max_detectability: null       # low|medium|high; empty = accept every module
+  budget: 0                     # weighted noise budget across the run; 0 = unlimited
+  weights:                      # per-level cost charged against the budget
+    low: 1
+    medium: 3
+    high: 8
+  pacing:                       # bounded random delay before each module
+    min_ms: 0
+    max_ms: 0                   # 0 = no pacing
+    seed: null                  # set an int for reproducible delays
 
 # Per-engagement resource caps shared by pipeline, pentest, and agent modes. Set any value
 # to 0 to disable that cap.
