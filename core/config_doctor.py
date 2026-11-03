@@ -61,6 +61,8 @@ KNOWN_KEYS: tuple[tuple[str, object, str], ...] = (
      "run chains in path order and thread a proven token/credential forward"),
     ("chains.causal.branch", False,
      "execute the whole chain set as one DAG over shared nodes"),
+    ("chains.allow_high_risk", False,
+     "escalate to sqlmap/dalfox after a cheap oracle misses; HIGH risk"),
     ("chains.verify", False,
      "re-run candidate-producing actions before promotion; doubles their requests"),
     ("opsec.max_detectability", None,

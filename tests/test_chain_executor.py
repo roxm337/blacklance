@@ -739,3 +739,88 @@ def test_pentest_refreshes_the_report_after_a_proven_action(tmp_path):
          patch("core.reporting.write_report_bundle") as write:
         asyncio_run(o._execute_chains([]))
     write.assert_not_called()
+
+
+# --- HIGH-risk escalation is opt-in and still ceiling-gated ----------------
+
+def _replace(action_id, risk, success, confidence="CONFIRMED", requires=("url",)):
+    """Swap a real action for a fake one, restoring through the fixture."""
+    calls = []
+
+    async def fn(ctx):
+        calls.append(ctx)
+        from actions.registry import ActionResult
+        return ActionResult(
+            success=success, confidence=confidence,
+            evidence={"impact": "escalated"} if success else {},
+            data={"ran": action_id} if success else None,
+            error="" if success else "no confirmation",
+        )
+
+    ActionRegistry._actions[action_id] = (
+        ActionMeta(id=action_id, risk=RiskLevel(risk), detectability="high",
+                   description="fake", category="test",
+                   requires=list(requires), produces="Finding"),
+        fn,
+    )
+    return calls
+
+
+def test_higher_risk_tool_escalates_after_a_fast_oracle_miss():
+    fast = _replace("web.sqli.detect", "MEDIUM", success=False)
+    heavy = _replace("web.sqli.sqlmap", "HIGH", success=True,
+                     requires=("url",))
+    state = _state()
+    ex = ChainExecutor(state, {"chains": {"allow_high_risk": True}},
+                       max_risk=RiskLevel.HIGH)
+    report = asyncio_run(ex.execute([
+        _chain(action_id="web.sqli.detect",
+               url="https://example.test/s?q=1")]))
+
+    assert len(fast) == 1
+    assert len(heavy) == 1
+    assert heavy[0].params["url"] == "https://example.test/s?q=1"
+    assert report.proven == 1
+    titles = [f["title"] for f in _findings(state)]
+    assert any("web.sqli.sqlmap" in title for title in titles), \
+        "the finding must be attributed to the action that proved it"
+    assert not any("web.sqli.detect on" in title for title in titles)
+
+
+def test_escalation_is_off_by_default():
+    fast = _replace("web.sqli.detect", "MEDIUM", success=False)
+    heavy = _replace("web.sqli.sqlmap", "HIGH", success=True)
+    state = _state()
+    ex = ChainExecutor(state, {}, max_risk=RiskLevel.HIGH)
+    report = asyncio_run(ex.execute([
+        _chain(action_id="web.sqli.detect")]))
+
+    assert len(fast) == 1
+    assert heavy == []
+    assert report.proven == 0
+    assert _findings(state) == []
+
+
+def test_escalation_respects_the_risk_ceiling():
+    _replace("web.sqli.detect", "MEDIUM", success=False)
+    heavy = _replace("web.sqli.sqlmap", "HIGH", success=True)
+    state = _state()
+    ex = ChainExecutor(state, {"chains": {"allow_high_risk": True}},
+                       max_risk=RiskLevel.MEDIUM)
+    asyncio_run(ex.execute([_chain(action_id="web.sqli.detect")]))
+
+    assert heavy == [], "a HIGH action ran under a MEDIUM ceiling"
+
+
+def test_xss_escalation_passes_the_url_list_dalfox_needs():
+    _replace("web.xss.reflected", "MEDIUM", success=False)
+    heavy = _replace("web.xss.dalfox", "HIGH", success=True,
+                     requires=("urls",))
+    state = _state()
+    ex = ChainExecutor(state, {"chains": {"allow_high_risk": True}},
+                       max_risk=RiskLevel.HIGH)
+    asyncio_run(ex.execute([
+        _chain(action_id="web.xss.reflected",
+               url="https://example.test/s?q=1")]))
+
+    assert heavy and heavy[0].params["urls"] == ["https://example.test/s?q=1"]

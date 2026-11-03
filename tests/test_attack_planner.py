@@ -38,3 +38,20 @@ def test_attack_planner_prompt_renders_json_schema_without_format_error():
 
     assert '"executive_focus": "one concise paragraph"' in prompt
     assert '"target": "example.com"' in prompt
+
+
+def test_planner_routes_new_categories_and_skips_observations():
+    from agents.attack_planner import _action_for_category
+
+    assert _action_for_category("TLS Configuration") == \
+        ("network.tls.cert", "SAFE")
+    assert _action_for_category("XXE") == ("web.xxe.detect", "MEDIUM")
+    assert _action_for_category("CRLF Injection") == \
+        ("web.crlf.detect", "MEDIUM")
+    assert _action_for_category("Cloud Exposure") == \
+        ("cloud.bucket.list", "SAFE")
+    assert _action_for_category("Hardening Deficiency") == \
+        ("recon.security_headers", "SAFE")
+    # Observations are reported, not armed.
+    assert _action_for_category("Information Disclosure") == ("", "")
+    assert _action_for_category("Client-Side Path Traversal") == ("", "")

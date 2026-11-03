@@ -22,6 +22,17 @@ def action_for_technique(technique: str) -> str:
     template word, and authorization before the "auth" substring it contains.
     """
     text = str(technique or "").lower()
+    if "xxe" in text or "xml external" in text or "xml entity" in text:
+        return "web.xxe.detect"
+    if "crlf" in text or "response splitting" in text:
+        return "web.crlf.detect"
+    if "tls" in text or "ssl" in text or "certificate" in text:
+        return "network.tls.cert"
+    if "bucket" in text or "cloud storage" in text or "cloud exposure" in text:
+        return "cloud.bucket.list"
+    if "header" in text and ("security" in text or "missing" in text
+                             or "hardening" in text):
+        return "recon.security_headers"
     if "nosql" in text:
         return "web.nosql.detect"
     if "sqli" in text or "sql" in text:

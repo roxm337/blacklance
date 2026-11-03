@@ -272,6 +272,8 @@ _ACTION_FOR_CATEGORY = (
     # Specific classes first: "NoSQL injection" and "Server-Side Template
     # Injection" both contain "injection", and "authorization" contains
     # "auth". A wrong first match names a proof that tests the wrong bug.
+    # Observations have no prover; naming one would test something else.
+    # (Checked through core.action_routing.is_observation.)
     ("nosql", "web.nosql.detect", "LOW"),
     ("graphql", "api.graphql.introspect", "LOW"),
     ("introspection", "api.graphql.introspect", "LOW"),
@@ -287,6 +289,16 @@ _ACTION_FOR_CATEGORY = (
     ("auth bypass", "auth.bypass.probe", "MEDIUM"),
     ("authentication bypass", "auth.bypass.probe", "MEDIUM"),
     ("privilege escalation", "auth.bypass.probe", "MEDIUM"),
+    ("xxe", "web.xxe.detect", "MEDIUM"),
+    ("xml external", "web.xxe.detect", "MEDIUM"),
+    ("crlf", "web.crlf.detect", "MEDIUM"),
+    ("response splitting", "web.crlf.detect", "MEDIUM"),
+    ("tls", "network.tls.cert", "SAFE"),
+    ("ssl", "network.tls.cert", "SAFE"),
+    ("certificate", "network.tls.cert", "SAFE"),
+    ("hardening", "recon.security_headers", "SAFE"),
+    ("security misconfiguration", "recon.security_headers", "SAFE"),
+    ("missing header", "recon.security_headers", "SAFE"),
     ("sql", "web.sqli.detect", "MEDIUM"),
     ("injection", "web.sqli.detect", "MEDIUM"),
     ("xss", "web.xss.reflected", "MEDIUM"),
@@ -295,9 +307,12 @@ _ACTION_FOR_CATEGORY = (
     ("redirect", "web.redirect.probe", "LOW"),
     ("ssrf", "web.ssrf.oob_detect", "LOW"),
     ("server-side request", "web.ssrf.oob_detect", "LOW"),
-    ("cloud", "web.ssrf.cloud_metadata", "MEDIUM"),
+    ("cloud metadata", "web.ssrf.cloud_metadata", "MEDIUM"),
+    ("cloud exposure", "cloud.bucket.list", "SAFE"),
+    ("cloud storage", "cloud.bucket.list", "SAFE"),
     ("metadata", "web.ssrf.cloud_metadata", "MEDIUM"),
-    ("bucket", "web.ssrf.cloud_metadata", "MEDIUM"),
+    ("bucket", "cloud.bucket.list", "SAFE"),
+    ("cloud", "web.ssrf.cloud_metadata", "MEDIUM"),
     ("jwt", "auth.jwt.detect", "SAFE"),
     ("token", "auth.jwt.detect", "SAFE"),
     ("credential", "auth.jwt.detect", "SAFE"),
@@ -310,7 +325,9 @@ def _action_for_category(category: str) -> tuple:
     Separators are folded first, so a hypothesis phrased "broken-access-control"
     routes the same as "Broken Access Control".
     """
-    from core.action_routing import normalize_category
+    from core.action_routing import is_observation, normalize_category
+    if is_observation(category):
+        return "", ""
     lowered = normalize_category(category)
     for token, action_id, ceiling in _ACTION_FOR_CATEGORY:
         if normalize_category(token) in lowered:

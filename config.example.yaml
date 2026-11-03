@@ -170,6 +170,11 @@ chains:
   # target, a cached 200 and a one-shot WAF glitch at the cost of one extra
   # request per proving action. Off by default.
   verify: false
+  # Escalation to a HIGH-risk tool (sqlmap/dalfox) after a cheap oracle fails
+  # to confirm. The fast check saying "no" is not proof the target is safe,
+  # but these tools are slow and loud, so this stays off until asked for. The
+  # risk ceiling still applies to the escalated action. Off by default.
+  allow_high_risk: false
 rate_limits:
   default:
     concurrent: 5

@@ -17,7 +17,10 @@ import json
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 from actions.registry import action, ActionContext, ActionResult
-from core.validators import extract_secrets, inject_param
+from actions.web.http_util import (body as _body, dedupe_param as _dedupe,
+                                   session_headers as _session_headers,
+                                   status as _status)
+from core.validators import extract_secrets
 from tools.wrappers import curl
 
 # A baseline value that cannot collide with real data. If the page already
@@ -67,18 +70,6 @@ _BINDABLE_SECRETS = {
 }
 
 
-def _dedupe(url: str, param: str, value: str) -> str:
-    """Replace every existing value of `param` (inject_param appends)."""
-    if f"{{{param}}}" in url:
-        # Path placeholder: substitution is already exact there.
-        return inject_param(url, param, value)
-    parsed = urlparse(url)
-    kept = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True)
-            if k != param]
-    kept.append((param, value))
-    return parsed._replace(query=urlencode(kept, doseq=True)).geturl()
-
-
 def _with_query_bracket(url: str, param: str, operator: str,
                         value: str) -> str:
     """Build `param[$op]=value` without collapsing the brackets.
@@ -115,21 +106,6 @@ def _row_count(body: str):
         if parsed and not any(isinstance(v, (dict, list)) for v in parsed.values()):
             return len(parsed)
     return None
-
-
-def _status(raw: dict) -> int:
-    return int(raw.get("status") or 0)
-
-
-def _body(raw: dict) -> str:
-    return str(raw.get("body") or "")
-
-
-def _session_headers(ctx: ActionContext) -> dict:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; bhs-probe)"}
-    if isinstance(ctx.params.get("headers"), dict):
-        headers.update(ctx.params["headers"])
-    return headers
 
 
 @action(

@@ -51,6 +51,16 @@ from core.chain_bindings import (
 )
 from core.validators import inject_param, redact_secret
 
+# A fast oracle can only say "not proven", never "proven safe". When the
+# cheap arm fails and the operator has opted in, these heavier, noisier tools
+# get one shot at the same target. Kept out of the default routing table
+# because they are HIGH risk and slow; the risk ceiling still gates them.
+HIGH_RISK_ALTERNATES: dict[str, tuple[str, ...]] = {
+    "web.sqli.detect": ("web.sqli.sqlmap",),
+    "web.sqli.blind_detect": ("web.sqli.sqlmap",),
+    "web.xss.reflected": ("web.xss.dalfox",),
+}
+
 RISK_ORDER = [RiskLevel.SAFE, RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH,
               RiskLevel.DESTRUCTIVE]
 
@@ -227,6 +237,11 @@ class ChainExecutor:
         # requests of every proving action — but when on, a flapping target
         # cannot be filed as a vulnerability on the strength of one 200.
         self.verify = bool((self.config.get("chains") or {}).get("verify", False))
+        # Escalation to a HIGH-risk tool after the cheap oracle fails. Off by
+        # default: sqlmap/dalfox are slow and loud, and "the fast check said
+        # no" is not a reason to fire them without the operator asking.
+        self.allow_high_risk = bool(
+            (self.config.get("chains") or {}).get("allow_high_risk", False))
         # Edges we recognised but could not arm, so the operator can see that
         # coverage was limited instead of assuming the run was exhaustive.
         self.unarmable: list[EdgeOutcome] = []
@@ -930,12 +945,16 @@ class ChainExecutor:
         self._used += 1
 
         if not getattr(result, "success", False):
-            return EdgeOutcome(
-                edge=planned.edge, action_id=planned.action_id,
-                status="skipped",
-                detail=getattr(result, "error", "") or "action did not confirm",
-                confidence=getattr(result, "confidence", ""),
-            )
+            escalated = await self._escalate(planned, result)
+            if escalated is None:
+                return EdgeOutcome(
+                    edge=planned.edge, action_id=planned.action_id,
+                    status="skipped",
+                    detail=(getattr(result, "error", "")
+                            or "action did not confirm"),
+                    confidence=getattr(result, "confidence", ""),
+                )
+            planned, result = escalated
 
         # Reproducibility gate: a candidate that confirms once and not twice
         # is a flapping target, not a finding. Re-run the same action with the
@@ -967,6 +986,70 @@ class ChainExecutor:
                                status="ran", confidence=result.confidence,
                                detail="observation recorded; no vulnerability proven")
         return self._promote(planned, result)
+
+    async def _escalate(self, planned: PlannedEdge, first):
+        """Retry a definitive failure with a HIGH-risk tool, when allowed.
+
+        Returns (new_planned, result) on success, else None. The finding is
+        attributed to the action that actually proved it, so a sqlmap
+        confirmation is never filed under `web.sqli.detect`.
+        """
+        if not self.allow_high_risk:
+            return None
+        if getattr(first, "confidence", "") == "BLOCKED":
+            return None
+        for alt_id in HIGH_RISK_ALTERNATES.get(planned.action_id, ()):
+            entry = ActionRegistry.get(alt_id)
+            if entry is None:
+                continue
+            meta = entry[0]
+            if not risk_allows(meta.risk.value, self.max_risk):
+                continue
+            if self.budget is not None and not self.budget.check():
+                return None
+            params = self._alternate_params(alt_id, planned)
+            if params is None:
+                continue
+            if self.budget is not None:
+                try:
+                    consume = getattr(self.budget, "consume_action", None)
+                    if consume:
+                        consume()
+                    else:
+                        self.budget.record_action()
+                except Exception:
+                    return None
+            from actions.registry import ActionContext
+            ctx = ActionContext(action_id=alt_id, params=params,
+                                target=planned.url, meta=meta)
+            if self.audit is not None:
+                ctx.audit = self.audit
+            if self.operations is not None:
+                ctx.operations = self.operations
+            try:
+                result = await ActionRegistry.execute(alt_id, ctx)
+            except Exception:
+                continue
+            self._used += 1
+            if getattr(result, "success", False):
+                return (PlannedEdge(
+                    edge=planned.edge, action_id=alt_id,
+                    risk=meta.risk.value, url=planned.url,
+                    reason=f"{planned.reason}; escalated after a clean fast-oracle miss",
+                    params=params), result)
+        return None
+
+    @staticmethod
+    def _alternate_params(action_id: str, planned: PlannedEdge):
+        """Parameters the escalation tool needs, from what the edge carries."""
+        if action_id == "web.xss.dalfox":
+            url = str(planned.url or planned.params.get("url") or "")
+            return {"urls": [url]} if url else None
+        if action_id == "web.sqli.sqlmap":
+            url = str(planned.params.get("url") or planned.url or "")
+            return {"url": url} if url else None
+        params = dict(planned.params)
+        return params or None
 
     async def _reconfirms(self, planned: PlannedEdge, first) -> bool:
         """Does the same action confirm again, at the same confidence?
@@ -1121,8 +1204,30 @@ def _category_for(action_id: str) -> str:
         return "Cross-Site Scripting"
     if "ssrf" in action_id:
         return "SSRF"
+    if "ssti" in action_id:
+        return "SSTI"
+    if "lfi" in action_id:
+        return "Path Traversal"
+    if "nosql" in action_id:
+        return "NoSQL Injection"
+    if "xxe" in action_id:
+        return "XXE"
+    if "crlf" in action_id:
+        return "CRLF Injection"
+    if "bypass" in action_id:
+        return "Authorization Bypass"
     if "jwt" in action_id or "auth" in action_id:
         return "Authentication Bypass"
+    if "redirect" in action_id:
+        return "Open Redirect"
+    if "graphql" in action_id:
+        return "API Security"
+    if "tls" in action_id:
+        return "TLS Configuration"
+    if "bucket" in action_id:
+        return "Cloud Exposure"
+    if "header" in action_id:
+        return "Hardening Deficiency"
     return "Exploitation"
 
 
@@ -1134,6 +1239,18 @@ def _remediation_for(action_id: str) -> str:
         "web.ssrf.cloud_metadata": "Block link-local metadata addresses at the egress proxy and require IMDSv2.",
         "auth.jwt.detect": "Pin the algorithm, validate the issuer and audience, and reject `none`.",
         "web.xss.reflected": "Contextually encode output; the payload executed in the response.",
+        "web.ssti.detect": "Do not render user input through the template engine; use constant templates and pass values as data.",
+        "web.lfi.detect": "Resolve user paths against a fixed allowlist; never concatenate input into a filesystem path.",
+        "web.nosql.detect": "Cast parameters to scalars and reject object/operator shapes before building the query.",
+        "web.xxe.detect": "Disable external entity resolution and DTDs in the XML parser.",
+        "web.crlf.detect": "Encode CR/LF in any value written to a response header, and reject them in request parameters.",
+        "auth.bypass.probe": "Authorize every request server-side from the session, not from client-supplied headers or paths.",
+        "auth.jwt.none_alg": "Pin the accepted algorithm and reject `none`.",
+        "web.redirect.probe": "Allowlist redirect destinations and reject absolute off-site values.",
+        "api.graphql.introspect": "Disable introspection outside development, or restrict it to authenticated operators.",
+        "network.tls.cert": "Renew the certificate, present one matching the hostname, and disable TLS 1.0/1.1.",
+        "cloud.bucket.list": "Block public access on the bucket and remove anonymous list/read ACLs.",
+        "recon.security_headers": "Send HSTS, CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy and Permissions-Policy.",
     }.get(action_id, "Review the confirmed behaviour and remediate the root cause.")
 
 

@@ -24,6 +24,11 @@ from agents.verification_agent import action_for_technique
     ("open redirect", "web.redirect.probe"),
     ("broken access control", "auth.bypass.probe"),
     ("authorization bypass", "auth.bypass.probe"),
+    ("XXE via SAML", "web.xxe.detect"),
+    ("CRLF injection", "web.crlf.detect"),
+    ("expired TLS certificate", "network.tls.cert"),
+    ("anonymous bucket listing", "cloud.bucket.list"),
+    ("missing security headers", "recon.security_headers"),
     ("jwt weakness", "verify.composite_oracle"),
     ("", "verify.composite_oracle"),
 ])

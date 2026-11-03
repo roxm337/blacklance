@@ -1,6 +1,3 @@
-"""Recon actions — reserved namespace, no actions registered yet.
+"""Recon actions — live re-reads that prove a hardening observation."""
 
-Gap-filling probes are modules (stage 1-2), not actions: they run from the
-pipeline rather than from a finding or a chain leg. Keep the import so the
-namespace keeps its intended shape.
-"""
+from . import headers  # noqa: F401  (registers recon.security_headers)

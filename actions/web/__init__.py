@@ -1,3 +1,3 @@
 """Web application attack actions — injection, XSS, SSRF, etc."""
 
-from . import sqli, xss, ssrf, redirect, injection
+from . import sqli, xss, ssrf, redirect, injection, xxe, crlf

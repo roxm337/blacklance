@@ -63,6 +63,12 @@ CATEGORY_ACTIONS: list[tuple[str, str]] = [
     ("server-side request", "web.ssrf.oob_detect"),
     ("cloud metadata", "web.ssrf.cloud_metadata"),
     ("metadata", "web.ssrf.cloud_metadata"),
+    # Anonymous bucket listing is the prover for an exposed bucket; the SSRF
+    # metadata action is for a *server* that can reach one, so it must not
+    # claim a bucket finding.
+    ("cloud exposure", "cloud.bucket.list"),
+    ("cloud storage", "cloud.bucket.list"),
+    ("bucket", "cloud.bucket.list"),
     # Specific classes before the generic word they contain.
     ("nosql", "web.nosql.detect"),
     # ORM filter leaks (Sequelize/Mongoose/Prisma `$ne`/`$gt` shapes) are
@@ -89,6 +95,21 @@ CATEGORY_ACTIONS: list[tuple[str, str]] = [
     # parameter-bearing URL.
     ("graphql", "api.graphql.introspect"),
     ("introspection", "api.graphql.introspect"),
+    # XML entity expansion and CRLF both live inside "injection"; neither is
+    # a SQL bug, and arming the SQLi oracle for them proves the wrong thing.
+    ("xxe", "web.xxe.detect"),
+    ("xml external", "web.xxe.detect"),
+    ("xml entity", "web.xxe.detect"),
+    ("crlf", "web.crlf.detect"),
+    ("response splitting", "web.crlf.detect"),
+    ("header injection", "web.crlf.detect"),
+    # Transport and hardening observations re-prove against the live endpoint.
+    ("tls", "network.tls.cert"),
+    ("ssl", "network.tls.cert"),
+    ("certificate", "network.tls.cert"),
+    ("hardening", "recon.security_headers"),
+    ("security misconfiguration", "recon.security_headers"),
+    ("missing header", "recon.security_headers"),
     ("sql", "web.sqli.detect"),
     ("injection", "web.sqli.detect"),
     ("xss", "web.xss.reflected"),
@@ -116,6 +137,47 @@ PROBE_ACTIONS: list[str] = [
 ]
 
 
+# Categories that describe an observation rather than a bug with a single
+# oracle: a leaked key, a CVE, a piece of attack-surface context, a
+# client-side-only weakness. They are reported, not armed — an action that
+# cannot prove them would either waste a run or, worse, confirm something
+# adjacent and call it proof.
+OBSERVATION_TOKENS: tuple[str, ...] = (
+    "client side",
+    "prototype pollution",
+    "information disclosure",
+    "sensitive data exposure",
+    "source exposure",
+    "credential exposure",
+    "attack surface",
+    "threat intelligence",
+    "exploit intelligence",
+    "vulnerability scan",
+    "vulnerability validation",
+    "known vulnerability",
+    "known exploited",
+    "email security",
+    "identity osint",
+    "mobile attack surface",
+    "parameter discovery",
+    "content discovery",
+    "dns exposure",
+    "network exposure",
+    "api schema conformance",
+    "api state machine",
+    "ai red team",
+    "ai conversation",
+    "exposed ai endpoint",
+    "llm system prompt",
+    "llm prompt",
+    "defense mechanism",
+    "defense gap",
+    "cdn bypass",
+    "web cache deception",
+    "http request smuggling",
+    "file upload",
+)
+
 def normalize_category(value: str) -> str:
     """Fold a category to the form the routing table is written in.
 
@@ -134,6 +196,21 @@ _NORMALIZED_CATEGORY_ACTIONS: tuple[tuple[str, str], ...] = tuple(
     for token, action_id in CATEGORY_ACTIONS
 )
 
+_NORMALIZED_OBSERVATIONS: tuple[str, ...] = tuple(
+    normalize_category(token) for token in OBSERVATION_TOKENS
+)
+
+
+def is_observation(category: str) -> bool:
+    """True when the category describes a reportable observation, not a bug.
+
+    Callers use this to explain the absence of a proving action instead of
+    treating it as a routing failure.
+    """
+    text = normalize_category(category)
+    return bool(text) and any(token in text
+                              for token in _NORMALIZED_OBSERVATIONS)
+
 
 def action_for_category(category: str) -> str:
     """The action that proves a finding of this category, or "".
@@ -141,9 +218,10 @@ def action_for_category(category: str) -> str:
     Returns an action id even if the current build does not register it: the
     caller decides how to report an unregistered arm, and silently returning
     "" would hide a routing table that names an action nobody implements.
+    Observation categories return "" deliberately — see `is_observation`.
     """
     text = normalize_category(category)
-    if not text:
+    if not text or is_observation(text):
         return ""
     for token, action_id in _NORMALIZED_CATEGORY_ACTIONS:
         if token in text:

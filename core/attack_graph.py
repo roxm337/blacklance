@@ -13,6 +13,7 @@ from state.manager import StateManager
 from core.action_routing import (
     PROBE_ACTIONS,
     action_for_category,
+    is_observation,
     normalize_category,
 )
 
@@ -167,8 +168,10 @@ class AttackGraph:
     EXPLOITATION_GOALS = (
         ("ssrf", "goal:cloud_metadata", "Cloud metadata credentials",
          "web.ssrf.cloud_metadata", "pivot"),
-        ("xxe", "goal:cloud_metadata", "Cloud metadata credentials",
-         "web.ssrf.cloud_metadata", "pivot"),
+        # XXE's payoff is a file read, not an SSRF metadata request: aiming
+        # the SSRF action at an XML endpoint tests a different bug.
+        ("xxe", "goal:sensitive_file", "External entity file disclosure",
+         "web.xxe.detect", "extract"),
         ("ssti", "goal:code_execution", "Template code execution",
          "web.ssti.detect", "exploit"),
         ("template injection", "goal:code_execution", "Template code execution",
@@ -311,7 +314,10 @@ class AttackGraph:
         for finding in self.state.findings.get("findings", []):
             category = str(finding.get("category", "")).lower()
             normalized = normalize_category(category)
-            if not normalized:
+            if not normalized or is_observation(category):
+                # A client-side-only class or an intel note has no server-side
+                # prover; matching a curated token inside it ("traversal")
+                # would aim a server oracle at the wrong finding.
                 continue
             match = next(
                 (entry for entry in self.EXPLOITATION_GOALS
@@ -320,6 +326,13 @@ class AttackGraph:
                 _, goal_id, label, action_id, edge_type = match
             else:
                 action_id = action_for_category(category)
+                if not action_id:
+                    # Some modules file several classes under one broad
+                    # category ("API Security" covers GraphQL introspection,
+                    # batching and Swagger exposure). The title still names the
+                    # class, so consult it before giving up on a prover.
+                    action_id = action_for_category(
+                        str(finding.get("title", "")))
                 if not action_id:
                     continue
                 goal_id = f"goal:proven:{action_id}"

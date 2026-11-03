@@ -187,6 +187,10 @@ class CloudEnum(BaseModule):
                     ),
                     verified=True,
                     verification={
+                        # The full URL is what lets the graph aim
+                        # `cloud.bucket.list` at this bucket later; a bucket
+                        # asset key alone is not a testable surface.
+                        "url": url,
                         "method": ("sensitive_object_readable_unauthenticated"
                                    if severity == "CRITICAL"
                                    else "public_bucket_listing_unauthenticated"),

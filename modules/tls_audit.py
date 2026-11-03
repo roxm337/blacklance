@@ -104,7 +104,7 @@ class TLSAudit(BaseModule):
                 asset_keys=[f"domain:{host}"],
                 verified=True,
                 verification={"method": "cert_notafter_parse",
-                              "url": f"{host}:{port}"},
+                              "url": f"https://{host}:{port}/"},
             )
         elif days_left is not None and days_left <= 30:
             self.state.add_finding(
@@ -118,7 +118,7 @@ class TLSAudit(BaseModule):
                 asset_keys=[f"domain:{host}"],
                 verified=True,
                 verification={"method": "cert_notafter_parse",
-                              "url": f"{host}:{port}"},
+                              "url": f"https://{host}:{port}/"},
             )
 
         # 3. Weak protocol check
@@ -144,7 +144,7 @@ class TLSAudit(BaseModule):
                     asset_keys=[f"domain:{host}"],
                     verified=True,
                     verification={"method": "tls_handshake_offer",
-                                  "url": f"{host}:{port}"},
+                                  "url": f"https://{host}:{port}/"},
                 )
 
         # 4. Weak cipher check: constrain the offered ciphers to weak-only
@@ -165,7 +165,7 @@ class TLSAudit(BaseModule):
                 asset_keys=[f"domain:{host}"],
                 verified=True,
                 verification={"method": "weak_cipher_negotiation",
-                              "url": f"{host}:{port}"},
+                              "url": f"https://{host}:{port}/"},
             )
 
         # 4b. Nmap TLS script corroboration: named vulnerabilities beat
@@ -199,7 +199,7 @@ class TLSAudit(BaseModule):
                     remediation="Add 'preload' to HSTS header and submit to hstspreload.org.",
                     verified=True,
                     verification={"method": "hsts_header_observed",
-                                  "url": f"{host}:{port}"},
+                                  "url": f"https://{host}:{port}/"},
                 )
             max_age_match = re.search(r"max-age=(\d+)", hsts_header.lower())
             if max_age_match:
@@ -216,7 +216,7 @@ class TLSAudit(BaseModule):
                         remediation="Increase HSTS max-age to at least 31536000 (1 year).",
                         verified=True,
                         verification={"method": "hsts_header_observed",
-                                      "url": f"{host}:{port}"},
+                                      "url": f"https://{host}:{port}/"},
                     )
 
         # 6. TLS 1.3 support check: hygiene note, not a LOW.
@@ -231,7 +231,7 @@ class TLSAudit(BaseModule):
                 remediation="Enable TLS 1.3 support for improved security and performance.",
                 verified=True,
                 verification={"method": "tls_handshake_offer",
-                              "url": f"{host}:{port}"},
+                              "url": f"https://{host}:{port}/"},
             )
 
         # 7. Certificate SANs: in-scope names become subdomain leads, and
@@ -311,7 +311,7 @@ class TLSAudit(BaseModule):
                 asset_keys=[f"domain:{host}"],
                 verified=True,
                 verification={"method": "nmap_tls_script_vulnerable",
-                              "url": f"{host}:{port}"},
+                              "url": f"https://{host}:{port}/"},
             )
         grade = ""
         for line in stdout.splitlines():
@@ -347,7 +347,7 @@ class TLSAudit(BaseModule):
             asset_keys=[f"domain:{host}"],
             verified=True,
             verification={"method": "nmap_tls_script_vulnerable",
-                          "url": f"{host}"},
+                          "url": f"https://{host}/"},
         )
 
     async def _negotiated_weak_cipher(self, host: str, port: int) -> str:
