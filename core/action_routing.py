@@ -36,6 +36,8 @@ EDGE_ACTIONS: dict[str, list[str]] = {
         "web.ssti.detect",
         "web.nosql.detect",
         "web.lfi.detect",
+        "web.cmd_injection",
+        "web.deserialize.detect",
     ],
     "pivot": [
         "web.ssrf.oob_detect",
@@ -44,6 +46,7 @@ EDGE_ACTIONS: dict[str, list[str]] = {
     "extract": [
         "web.ssrf.cloud_metadata",
         "web.lfi.detect",
+        "web.lfi.read",
     ],
     "authenticate": [
         "auth.jwt.none_alg",
@@ -77,6 +80,17 @@ CATEGORY_ACTIONS: list[tuple[str, str]] = [
     # inside "information".
     ("orm filter", "web.nosql.detect"),
     ("orm leak", "web.nosql.detect"),
+    # Code execution classes: each names a sink that runs input, so the
+    # prover must be the one that observes a computed value, not a parser
+    # that merely complains.
+    ("pickle", "web.deserialize.pickle_rce"),
+    ("deserialization", "web.deserialize.detect"),
+    ("deserialize", "web.deserialize.detect"),
+    ("command injection", "web.cmd_injection"),
+    ("os command", "web.cmd_injection"),
+    ("shell injection", "web.cmd_injection"),
+    ("request smuggling", "web.smuggling.detect"),
+    ("desync", "web.smuggling.detect"),
     ("ssti", "web.ssti.detect"),
     ("template injection", "web.ssti.detect"),
     ("template", "web.ssti.detect"),
@@ -174,7 +188,6 @@ OBSERVATION_TOKENS: tuple[str, ...] = (
     "defense gap",
     "cdn bypass",
     "web cache deception",
-    "http request smuggling",
     "file upload",
 )
 

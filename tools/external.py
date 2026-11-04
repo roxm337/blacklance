@@ -1147,6 +1147,114 @@ async def sqlmap_scan(url: str, timeout: int = 900,
     }
 
 
+def parse_sqlmap_enumeration(text: str) -> dict:
+    """Metadata sqlmap printed in `--banner/--current-user/--dbs` mode.
+
+    Only lines that label a value are parsed. sqlmap's log is full of prose
+    ("testing connection", "resuming back-end DBMS") and a substring match
+    turns every one of them into a fake extracted value.
+    """
+    out = {
+        "dbms": "", "banner": "", "current_user": "", "current_database": "",
+        "is_dba": None, "databases": [], "tables": [],
+    }
+    in_databases = False
+    in_tables = False
+    for line in (text or "").splitlines():
+        # Strip only a log prefix ("[12:34:56]" / "[INFO]"), never the
+        # database bullet "[*]", which is data.
+        clean = re.sub(r"^\[(?:\d{2}:\d{2}:\d{2}|[A-Z]+)\]\s*", "",
+                       line.strip())
+        low = clean.lower()
+        if "back-end dbms is" in low or "back-end dbms:" in low:
+            out["dbms"] = clean.split(":", 1)[-1].strip() if ":" in clean \
+                else clean.split(" is", 1)[-1].strip()
+            continue
+        for key, field in (("banner:", "banner"),
+                           ("current user:", "current_user"),
+                           ("current database:", "current_database")):
+            if low.startswith(key):
+                out[field] = clean.split(":", 1)[1].strip().strip("'\"")
+                break
+        if low.startswith("current user is dba:"):
+            out["is_dba"] = "true" in low
+        if low.startswith("available databases"):
+            in_databases = True
+            in_tables = False
+            continue
+        if low.startswith("[*]") and in_databases:
+            name = clean[3:].strip()
+            if name:
+                out["databases"].append(name)
+            continue
+        if re.match(r"^\[\d+\s+tables?\]", low):
+            in_tables = True
+            in_databases = False
+            continue
+        if in_tables and clean.startswith("|"):
+            cells = [cell.strip() for cell in clean.strip("|").split("|")]
+            name = cells[0] if cells else ""
+            if name and set(name) != {"-"} and name.lower() != "table":
+                out["tables"].append(name)
+    return out
+
+
+async def sqlmap_enumerate(url: str, timeout: int = 900,
+                           cookie: str = "", headers: str = "",
+                           database: str = "", tables: bool = False,
+                           level: int = 1, risk: int = 1) -> dict:
+    """Prove database access without dumping rows.
+
+    `--banner/--current-user/--current-db/--dbs/--is-dba` answers what the
+    injection is worth: which DBMS, which account, which schema, and whether
+    that account is an administrator. Row dumping is a separate, deliberate
+    decision; this never triggers it.
+    """
+    if not tool_available("sqlmap"):
+        return {"available": False, "error": "missing"}
+    try:
+        level = max(1, min(5, int(level)))
+        risk = max(1, min(3, int(risk)))
+    except (TypeError, ValueError):
+        level, risk = 1, 1
+
+    args = [
+        "sqlmap", "-u", url,
+        "--batch", "--threads", "1", "--flush-session",
+        "--level", str(level), "--risk", str(risk),
+        "--banner", "--current-user", "--current-db", "--is-dba", "--dbs",
+    ]
+    if cookie:
+        args += ["--cookie", cookie]
+    if headers:
+        args += ["--headers", headers]
+    result = await run_command(args, timeout=timeout)
+    parsed = parse_sqlmap_enumeration(result["stdout"])
+    parsed.update({
+        "available": True,
+        "exit_code": result["exit_code"],
+        "stdout": redact_for_log(result["stdout"][:12000]),
+        "stderr": redact_for_log(result["stderr"][:4000]),
+        "error": result.get("error"),
+    })
+
+    schema = database or parsed.get("current_database") or ""
+    if tables and schema:
+        table_args = [
+            "sqlmap", "-u", url, "--batch", "--threads", "1",
+            "--flush-session", "-D", schema, "--tables",
+        ]
+        if cookie:
+            table_args += ["--cookie", cookie]
+        if headers:
+            table_args += ["--headers", headers]
+        table_result = await run_command(table_args, timeout=timeout)
+        parsed["tables"] = parse_sqlmap_enumeration(
+            table_result["stdout"]).get("tables", [])
+        parsed["tables_database"] = schema
+    return parsed
+
+
 def parse_corsy_json(text: str) -> List[dict]:
     try:
         data = json.loads(text or "[]")

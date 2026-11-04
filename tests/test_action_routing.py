@@ -39,6 +39,11 @@ from core.action_routing import (action_for_category, is_observation,
     ("HTTP Response Splitting", "web.crlf.detect"),
     ("Cloud Exposure", "cloud.bucket.list"),
     ("Public bucket listing", "cloud.bucket.list"),
+    ("HTTP Request Smuggling", "web.smuggling.detect"),
+    ("CL.TE desync", "web.smuggling.detect"),
+    ("OS Command Injection", "web.cmd_injection"),
+    ("Insecure Deserialization", "web.deserialize.detect"),
+    ("Pickle deserialization", "web.deserialize.pickle_rce"),
 ])
 def test_category_routes_to_prover(category, expected):
     assert action_for_category(category) == expected
@@ -51,7 +56,6 @@ def test_category_routes_to_prover(category, expected):
     "Email Security",
     "Client-Side Path Traversal",
     "File Upload",
-    "HTTP Request Smuggling",
     "Credential Exposure",
     "Web Cache Deception",
     "",
@@ -76,7 +80,6 @@ def test_normalize_folds_separators_and_case():
     "Client-Side Path Traversal",
     "Known Exploited Vulnerability",
     "File Upload",
-    "HTTP Request Smuggling",
     "Web Cache Deception",
 ])
 def test_observation_categories_are_labelled(category):

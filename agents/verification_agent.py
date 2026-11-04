@@ -33,6 +33,15 @@ def action_for_technique(technique: str) -> str:
     if "header" in text and ("security" in text or "missing" in text
                              or "hardening" in text):
         return "recon.security_headers"
+    if "deserial" in text or "pickle" in text:
+        return ("web.deserialize.pickle_rce"
+                if "pickle" in text or "rce" in text
+                else "web.deserialize.detect")
+    if ("command injection" in text or "cmd injection" in text
+            or "os command" in text or "shell injection" in text):
+        return "web.cmd_injection"
+    if "smuggl" in text or "desync" in text:
+        return "web.smuggling.detect"
     if "nosql" in text:
         return "web.nosql.detect"
     if "sqli" in text or "sql" in text:
@@ -42,10 +51,10 @@ def action_for_technique(technique: str) -> str:
     if "ssrf" in text:
         return "web.ssrf.oob_detect"
     if "ssti" in text or "template" in text:
-        return "web.ssti.detect"
+        return "web.ssti.rce" if "rce" in text else "web.ssti.detect"
     if ("lfi" in text or "traversal" in text
             or "file inclusion" in text):
-        return "web.lfi.detect"
+        return "web.lfi.rce" if "rce" in text else "web.lfi.detect"
     if "redirect" in text:
         return "web.redirect.probe"
     if ("auth" in text or "access control" in text

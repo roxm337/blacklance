@@ -1198,6 +1198,15 @@ def _severity_for(edge: AttackEdge, evidence: dict,
 
 
 def _category_for(action_id: str) -> str:
+    # Code-execution arms first: their ids contain the class word too
+    # ("ssti.rce", "lfi.rce"), and filing them as "SSTI"/"Path Traversal"
+    # understates what the evidence proves.
+    if ".rce" in action_id or "cmd_injection" in action_id:
+        return "Remote Code Execution"
+    if "deserialize" in action_id:
+        return "Insecure Deserialization"
+    if "smuggling" in action_id:
+        return "HTTP Request Smuggling"
     if "sqli" in action_id or "sqlmap" in action_id:
         return "SQL Injection"
     if "xss" in action_id:
@@ -1251,6 +1260,14 @@ def _remediation_for(action_id: str) -> str:
         "network.tls.cert": "Renew the certificate, present one matching the hostname, and disable TLS 1.0/1.1.",
         "cloud.bucket.list": "Block public access on the bucket and remove anonymous list/read ACLs.",
         "recon.security_headers": "Send HSTS, CSP, X-Content-Type-Options, X-Frame-Options, Referrer-Policy and Permissions-Policy.",
+        "web.cmd_injection": "Never pass request data to a shell; use argument-vector APIs and an allowlist of permitted values.",
+        "web.ssti.rce": "Do not render user input through the template engine, and sandbox the engine without OS access.",
+        "web.lfi.rce": "Resolve user paths against a fixed allowlist, disable remote inclusion, and never write attacker input into an included file.",
+        "web.deserialize.detect": "Do not accept serialized objects from untrusted input; use a signed, schema-validated format.",
+        "web.deserialize.pickle_rce": "Never unpickle untrusted data; use JSON or another data-only format, or a restricted unpickler with an allowlist.",
+        "web.smuggling.detect": "Frame requests the same way at the edge and origin; reject requests carrying both Content-Length and Transfer-Encoding.",
+        "web.lfi.read": "Resolve user paths against a fixed allowlist and reject traversal sequences after canonicalisation.",
+        "web.sqli.extract": "Use parameterised queries and a least-privilege database account.",
     }.get(action_id, "Review the confirmed behaviour and remediate the root cause.")
 
 

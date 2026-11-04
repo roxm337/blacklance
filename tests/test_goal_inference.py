@@ -56,7 +56,7 @@ def test_crlf_aims_its_own_prover():
 
 def test_observation_categories_get_no_proving_edge():
     for category in ("Client-Side Path Traversal", "Information Disclosure",
-                     "File Upload", "HTTP Request Smuggling"):
+                     "File Upload", "Web Cache Deception"):
         graph = _graph(category)
         proving = [e for e in graph.edges
                    if e.action_id or e.target_id.startswith("goal:")]
