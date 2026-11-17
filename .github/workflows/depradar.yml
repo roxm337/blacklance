@@ -1,0 +1,34 @@
+# Scan this repository's dependencies against our self-hosted DepRadar and gate changes.
+# Needs a DEPRADAR_TOKEN repository secret (Settings → Secrets and variables → Actions).
+# The server uses a private certificate authority; .github/depradar-root.crt lets the
+# runner verify it. That file is a public certificate, not a secret.
+name: DepRadar dependency gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  depradar:
+    name: Dependency gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Pull requests from forks get no secrets, so skip rather than fail them.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: roxm337/depradar/integrations/github-action@319eb8fb4e8ecd23367e24a5679dbf5ae2ce21ff
+        with:
+          url: https://72.60.39.60:8443
+          token: ${{ secrets.DEPRADAR_TOKEN }}
+          ca-file: .github/depradar-root.crt
+          create-project: true
+          fail-on: high
