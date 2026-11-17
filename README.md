@@ -5,7 +5,7 @@ external attack surface, enriches discovered assets, records evidence, prioritiz
 findings, and generates reports or attack plans.
 
 [![CI](https://github.com/roxm337/blacklance/actions/workflows/ci.yml/badge.svg)](https://github.com/roxm337/blacklance/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
 ![Modules](https://img.shields.io/badge/modules-85-brightgreen)
 
 ---
@@ -31,7 +31,7 @@ the law and the rules of engagement for the target.
 | **Orchestration** | Deterministic pipeline, LLM-guided module selection, and a risk-tiered multi-agent layer |
 | **Evidence** | Hash-chained operation and mutation ledgers, verified cleanup, evidence manifests + external anchor |
 | **Proof discipline** | Candidates stay unverified; only a seeded canary observed by the forbidden identity becomes a finding |
-| **Compatibility** | Python 3.10–3.12, headless CI matrix plus an offscreen GUI job |
+| **Compatibility** | Python 3.11–3.12, headless CI matrix plus an offscreen GUI job |
 | **Tests** | 1,521 passed, 34 skipped (non-GUI suite, local) |
 
 ---
@@ -184,7 +184,7 @@ sequenceDiagram
 | Gate | Result |
 |---|---|
 | Non-GUI pytest suite | **1,521 passed, 34 skipped** |
-| CI matrix | Python 3.10, 3.11, 3.12 + offscreen GUI job |
+| CI matrix | Python 3.11, 3.12 + offscreen GUI job |
 | Live lab | Browser capture/replay against Juice Shop (localhost) |
 | Twin labs | Authorization, CSPT, ORM/filter, race, WebSocket, MCP, conversation |
 | Evidence checks | Manifest/anchor tamper tests, verified-cleanup gates, redacted exports |
@@ -193,7 +193,7 @@ sequenceDiagram
 
 ## Installation
 
-Requires **Python 3.10+**.
+Requires **Python 3.11+**.
 
 ```bash
 # 1. Clone
@@ -440,7 +440,7 @@ matrices, traffic replay, CSPT, ORM/filter leaks, invariants/races, WebSocket an
 authorization, conversation isolation, credential lifecycle, evidence manifests, and
 the GUI. Run `python -m pytest --collect-only -q` for the current test count.
 
-CI runs the non-GUI suite on Python 3.10, 3.11 and 3.12, plus an offscreen GUI job.
+CI runs the non-GUI suite on Python 3.11 and 3.12, plus an offscreen GUI job.
 The non-GUI job intentionally omits optional browser/desktop packages; driver seams are
 injected in tests so those checks do not depend on Playwright or PySide6 being installed.
 

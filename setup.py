@@ -43,7 +43,6 @@ setup(
     description="BlackLance — LLM-orchestrated reconnaissance and security testing framework",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Intended Audience :: Information Technology",
@@ -55,7 +54,7 @@ setup(
     py_modules=["orchestrator"],
     install_requires=[
         "pyyaml>=6.0",
-        "litellm>=1.60",
+        "litellm>=1.95.0",
         "python-dotenv>=1.0",
         "PySide6>=6.7",
         "gravis==0.1.0",
@@ -63,11 +62,11 @@ setup(
     ],
     extras_require={
         "full": [
-            "aiohttp>=3.8",
-            "dnspython>=2.0",
+            "aiohttp>=3.14.4",
+            "dnspython>=2.9.2",
             "python-whois>=0.8",
             "beautifulsoup4>=4.11",
-            "lxml>=4.9",
+            "lxml>=6.1.0",
             "playwright>=1.45",
             "h2>=4.1",
         ],
@@ -78,5 +77,5 @@ setup(
             "osint-agent-gui=gui.app:main",
         ],
     },
-    python_requires=">=3.10",
+    python_requires=">=3.11",
 )
