@@ -63,6 +63,7 @@ from .response_audit import ResponseAudit
 from .cors_audit import CORSAudit
 from .open_redirect import OpenRedirectScan
 from .http_smuggling import HTTPSmuggling
+from .saml_audit import SamlAudit
 from .cms_deep_scan import CMSDeepScan
 from .tech_playbook import TechPlaybook
 from .oauth_audit import OAuthAudit
@@ -664,6 +665,13 @@ MODULE_REGISTRY = {
         "class": HTTPSmuggling,
         "stage": 5,
         "detectability": "high",
+        "depends_on": ["tech_detection"],
+        "active": True,
+    },
+    "saml_audit": {
+        "class": SamlAudit,
+        "stage": 5,
+        "detectability": "medium",
         "depends_on": ["tech_detection"],
         "active": True,
     },

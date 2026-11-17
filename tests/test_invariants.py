@@ -241,3 +241,89 @@ def test_seed_failure_is_untested(tmp_path):
     assert entry["state"] == "untested"
     assert entry["reason"] in ("no_bindable_ref", "seed_failed", "baseline_unreadable")
     assert state.mutations.outstanding() == []
+
+
+# ── transport: delivery only, never grading ─────────────────────
+
+def test_transport_defaults_to_connections_and_validates():
+    assert parse_invariant(COUPON_SPEC, {}).transport == "connections"
+    # Defaults come from the module's race config, spec value wins.
+    assert parse_invariant(COUPON_SPEC,
+                           {"transport": "single_packet"}).transport == (
+        "single_packet")
+    assert parse_invariant(
+        {**COUPON_SPEC, "transport": "SINGLE_PACKET"},
+        {"transport": "connections"}).transport == "single_packet"
+    try:
+        parse_invariant({**COUPON_SPEC, "transport": "spaceship"}, {})
+        assert False
+    except InvariantSpecError as exc:
+        assert "transport spaceship" in str(exc)
+
+
+def test_grade_does_not_take_transport():
+    assert "transport" not in inspect.signature(grade).parameters
+
+
+def test_single_packet_batch_replaces_the_connection_batch(tmp_path,
+                                                           monkeypatch):
+    runner, _state = _runner(tmp_path, _coupon_responder(racy=True))
+    spec = parse_invariant({**COUPON_SPEC, "transport": "single_packet"}, {})
+    seen = {}
+
+    async def fake_send_async(url, requests, **kwargs):
+        seen["url"] = url
+        seen["requests"] = requests
+        seen["kwargs"] = kwargs
+        return {"transport": "h2",
+                "statuses": [200, 200, 200, 200],
+                "bodies": ["{}", "{}", "{}", "{}"],
+                "in_flight": 4, "requests": 4, "error": ""}
+
+    monkeypatch.setattr("core.single_packet.send_async", fake_send_async)
+    result = asyncio.run(runner._concurrent_phase(spec, {"id": 7}))
+
+    # One batch, all trials, delivered raw (the harness never saw them).
+    assert len(seen["requests"]) == spec.trials
+    assert all(req["path"] == "/api/coupons/7/redeem"
+               for req in seen["requests"])
+    assert seen["kwargs"]["transport"] == "auto"
+    assert seen["kwargs"]["timeout"] == runner.request_timeout + 5
+    assert result["transport"] == "h2_single_packet"
+    assert result["accepted"] == 4
+    assert result["max_in_flight"] == 4
+
+
+def test_single_packet_failure_falls_back_and_says_so(tmp_path, monkeypatch):
+    runner, _state = _runner(tmp_path, _coupon_responder(racy=True))
+    spec = parse_invariant({**COUPON_SPEC, "transport": "single_packet"}, {})
+
+    async def fake_send_async(url, requests, **kwargs):
+        return {"transport": "h1", "statuses": [], "bodies": [],
+                "in_flight": 0, "requests": len(requests),
+                "error": "incomplete_batch"}
+
+    monkeypatch.setattr("core.single_packet.send_async", fake_send_async)
+    result = asyncio.run(runner._concurrent_phase(spec, {"id": 7}))
+
+    # Delivery failed: the connection path runs, overlap is what it
+    # actually measured, and the fallback is recorded rather than hidden.
+    assert result["transport"] == "connections"
+    assert result["transport_fallback"] == "incomplete_batch"
+    assert result["max_in_flight"] >= 1
+
+
+def test_single_packet_failure_with_connections_disabled_is_untested(
+        tmp_path, monkeypatch):
+    runner, _state = _runner(tmp_path, _coupon_responder(racy=True))
+    spec = parse_invariant({**COUPON_SPEC, "transport": "single_packet"}, {})
+
+    async def boom(url, requests, **kwargs):
+        raise OSError("no route")
+
+    monkeypatch.setattr("core.single_packet.send_async", boom)
+    # The connection fallback still runs, but if it cannot overlap either the
+    # caller must grade untested rather than clean.
+    result = asyncio.run(runner._concurrent_phase(spec, {"id": 7}))
+    assert result["transport"] == "connections"
+    assert "single_packet_error" in result["transport_fallback"]

@@ -55,9 +55,11 @@ class HTTPSmuggling(BaseModule):
         if not targets:
             targets = [self.base_url]
 
-        if not tool_available("smuggler"):
-            self.state.skip_module(self.id, "smuggler not installed")
-            return "skipped"
+        # The native oracles (CL.TE/TE.CL, H2, h2c) are our own sockets and
+        # need no binary. Only the candidate sweep does.
+        have_smuggler = tool_available("smuggler")
+        if not have_smuggler:
+            self.log("smuggler not installed — native desync oracles only")
 
         limit = int(cfg.get("max_targets", 0) or 0)
         confirmed = 0
@@ -69,6 +71,9 @@ class HTTPSmuggling(BaseModule):
                          f"({ambiguity_note}) — smuggler would be noise here")
                 if cfg.get("h2", True) and await self._h2_desync(target):
                     confirmed += 1
+                    continue
+                if cfg.get("h2c", True) and await self._h2c_desync(target):
+                    confirmed += 1
                 continue
             if await self._desync_oracle(target, "cl_te"):
                 confirmed += 1
@@ -77,8 +82,36 @@ class HTTPSmuggling(BaseModule):
                     target, "te_cl"):
                 confirmed += 1
                 continue
+            # Same two disagreements, with the Transfer-Encoding line spelled
+            # so one hop parses it and the other does not. Only attempted
+            # after the plain framing failed; capped because each variant is
+            # two more requests per target.
+            # `max_te_variants` counts obfuscations only; 0 means try them all.
+            variant_cap = int(cfg.get("max_te_variants", 0) or 0)
+            order = (http_smuggle.variants(variant_cap + 1)
+                     if variant_cap > 0
+                     else http_smuggle.variants(0))
+            variant_hit = False
+            for variant in order:
+                if variant == "plain":
+                    continue
+                for mode in ("cl_te", "te_cl"):
+                    if await self._desync_oracle(
+                            target, mode, variant=variant):
+                        variant_hit = True
+                        break
+                if variant_hit:
+                    break
+            if variant_hit:
+                confirmed += 1
+                continue
             if cfg.get("h2", True) and await self._h2_desync(target):
                 confirmed += 1
+                continue
+            if cfg.get("h2c", True) and await self._h2c_desync(target):
+                confirmed += 1
+                continue
+            if not have_smuggler:
                 continue
             result = await smuggler_scan(target, timeout=300)
             hits = result.get("results", [])
@@ -149,7 +182,8 @@ class HTTPSmuggling(BaseModule):
     def _smuggle_prefix(mode: str, host: str, path: str, marker: str) -> str:
         return http_smuggle.smuggle_prefix(mode, host, path, marker)
 
-    async def _desync_oracle(self, target: str, mode: str = "cl_te") -> bool:
+    async def _desync_oracle(self, target: str, mode: str = "cl_te",
+                             variant: str = "plain") -> bool:
         """Desync proof on one socket, for one framing disagreement.
 
         Delegates the wire dance to `core.http_smuggle` and keeps the module's
@@ -158,11 +192,14 @@ class HTTPSmuggling(BaseModule):
         """
         proven, note, marker = await http_smuggle.desync_probe(
             target, mode, connect=self._connection,
-            read=self._read_response)
+            read=self._read_response, variant=variant)
         label = "TE.CL" if mode == "te_cl" else "CL.TE"
+        if variant and variant != "plain":
+            label = f"{label}/{variant}"
         evidence_id = self.state.add_evidence(
             self.id, f"{mode}_desync_oracle", target,
-            {"marker": marker, "result": note, "proven": proven},
+            {"marker": marker, "result": note, "proven": proven,
+             "variant": variant},
         )
         if proven:
             self.state.add_finding(
@@ -188,7 +225,8 @@ class HTTPSmuggling(BaseModule):
                 verified=True,
                 verification={"method": f"{mode}_desync_oracle",
                                   "url": target,
-                                  "marker": marker},
+                                  "marker": marker,
+                                  "variant": variant},
             )
             self.log(f"  {label} DESYNC CONFIRMED on {target} ({note})")
         return proven
@@ -216,39 +254,75 @@ class HTTPSmuggling(BaseModule):
                     _asyncio.to_thread(self._h2_probe, target, mode),
                     timeout=45)
             except Exception as exc:
+                # One mode failing (a reset stream, a TLS quirk) says nothing
+                # about the other; keep going instead of abandoning the pair.
                 self.log(f"  {mode} probe failed for {target}: {exc}")
-                return False
+                continue
             if proven:
-                self.state.add_finding(
-                    title=f"HTTP/2 Request Desync Confirmed: {target}",
-                    severity="HIGH",
-                    confidence="CONFIRMED",
-                    category="HTTP Request Smuggling",
-                    description=(
-                        f"An HTTP/2 {mode.upper()} probe against {target} "
-                        "made the response to the next stream carry the "
-                        f"smuggled path ({note}). The H2 front end and the "
-                        "HTTP/1.1 back end disagree on request boundaries, "
-                        "so a request can be smuggled past the edge."
-                    ),
-                    evidence=[f"Target: {target}", f"Mode: {mode}",
-                              f"Oracle: {note}"],
-                    remediation=(
-                        "Reject H2 requests whose content-length does not "
-                        "match the DATA frames and strip Transfer-Encoding "
-                        "on the H2-to-HTTP/1.1 hop; normalise framing in one "
-                        "parser."
-                    ),
-                    verified=True,
-                    verification={"method": f"{mode}_desync_oracle",
-                                  "url": target},
-                )
-                self.log(f"  {mode.upper()} DESYNC CONFIRMED on {target}")
+                self._record_h2_proof(target, mode, note, "HTTP/2")
                 return True
             if note.startswith("no h2"):
                 self.log(f"  {target}: {note}")
                 return False
         return False
+
+    async def _h2c_desync(self, target: str) -> bool:
+        """H2 over cleartext prior knowledge, using the same stream oracle.
+
+        An https target negotiates h2 through ALPN and is already covered by
+        `_h2_desync`; this path exists for http:// targets, where a mesh or a
+        misconfigured edge may still speak HTTP/2 with no ALPN at all.
+        """
+        import asyncio as _asyncio
+
+        if (urlparse(target).scheme or "http").lower() != "http":
+            return False
+        supported, note = await http_smuggle.h2c_supported(target)
+        self.state.add_evidence(
+            self.id, "h2c_supported", target,
+            {"supported": supported, "result": note})
+        if not supported:
+            return False
+        for mode in ("h2_cl", "h2_te"):
+            try:
+                proven, verdict = await _asyncio.wait_for(
+                    _asyncio.to_thread(self._h2_probe, target, mode),
+                    timeout=45)
+            except Exception as exc:
+                self.log(f"  h2c {mode} probe failed for {target}: {exc}")
+                continue
+            if proven:
+                self._record_h2_proof(target, mode, verdict, "HTTP/2 (h2c)")
+                return True
+        return False
+
+    def _record_h2_proof(self, target: str, mode: str, note: str,
+                         label: str) -> None:
+        self.state.add_finding(
+            title=f"{label} Request Desync Confirmed: {target}",
+            severity="HIGH",
+            confidence="CONFIRMED",
+            category="HTTP Request Smuggling",
+            description=(
+                f"An {label} {mode.upper()} probe against {target} "
+                "made the response to the next stream carry the "
+                f"smuggled path ({note}). The HTTP/2 front end and the "
+                "HTTP/1.1 back end disagree on request boundaries, "
+                "so a request can be smuggled past the edge."
+            ),
+            evidence=[f"Target: {target}", f"Mode: {mode}",
+                      f"Oracle: {note}"],
+            remediation=(
+                "Reject H2 requests whose content-length does not "
+                "match the DATA frames and strip Transfer-Encoding "
+                "on the H2-to-HTTP/1.1 hop; normalise framing in one "
+                "parser."
+            ),
+            verified=True,
+            verification={"method": f"{mode}_desync_oracle",
+                          "url": target},
+        )
+        self.log(f"  {label} {mode.upper()} DESYNC CONFIRMED on {target}")
 
     def _h2_probe(self, target: str, mode: str) -> tuple:
         import h2.config

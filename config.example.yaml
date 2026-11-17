@@ -684,12 +684,20 @@ modules:
     enabled: true
     te_cl: true                     # also try the TE.CL framing disagreement
     h2: true                        # H2.CL/H2.TE when ALPN negotiates h2
+    h2c: true                       # ...and over cleartext prior-knowledge h2c
+    max_te_variants: 0              # Transfer-Encoding obfuscations (0 = all)
 
     # Hosts to hand to smuggler. Left empty, URLs from recon are used.
     # Results land as TENTATIVE, never as confirmed findings: smuggling needs a
     # front end and a back end that disagree on request boundaries, which no
     # single-host check can show.
     max_targets: 0
+
+  saml_audit:
+    enabled: true
+    # Metadata and ACS paths probed. Findings are TENTATIVE configuration
+    # observations: metadata says what an SP asks for, not what it enforces.
+    max_endpoints: 0
 
   llm_surface:
     enabled: true

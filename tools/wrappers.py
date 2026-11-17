@@ -271,6 +271,34 @@ def _consume_http_budget() -> None:
         _http_budget.consume_request()
 
 
+def consume_http_budget(requests: int = 1) -> None:
+    """Charge a raw-socket batch to the same budget and wire log as `curl`.
+
+    Single-packet delivery bypasses the pooled engine, so it must account for
+    its requests explicitly or an engagement budget would undercount exactly
+    the module that sends the most requests per second.
+    """
+    count = max(1, int(requests or 1))
+    for _ in range(count):
+        _consume_http_budget()
+    note_wire({"transport": "single_packet", "requests": count})
+
+
+def session_cookies(identity: Optional[str] = None) -> dict:
+    """Cookies currently held for an identity's jar, as name -> value.
+
+    Raw-socket transports cannot borrow the pooled client's cookie handling,
+    so a race batch has to replay the session the harness established. Returns
+    an empty dict when no engine exists yet (nothing has authenticated).
+    """
+    if _engine is None:
+        return {}
+    try:
+        return dict(_engine.cookies_for(identity))
+    except Exception:  # noqa: BLE001 - a jar read must never break a probe
+        return {}
+
+
 def _missing(tool: str) -> bool:
     """True when the binary is absent: callers return their normal shape
     with error="missing: <tool>" instead of a false negative."""

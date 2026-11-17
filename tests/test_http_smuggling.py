@@ -51,7 +51,7 @@ def _run(tool_present=True, results=(), module_cfg=None):
          patch.object(HTTPSmuggling, "_ambiguous",
                       lambda self, target: _always_ambiguous(self, target)), \
          patch.object(HTTPSmuggling, "_desync_oracle",
-                      lambda self, target, mode="cl_te": _never_oracle(self, target)):
+                      lambda self, target, mode="cl_te", variant="plain": _never_oracle(self, target)):
         import asyncio
         status = asyncio.run(module.run())
     return status, state
@@ -115,7 +115,7 @@ def test_each_target_gets_its_own_finding():
          patch.object(HTTPSmuggling, "_ambiguous",
                       lambda self, target: _always_ambiguous(self, target)), \
          patch.object(HTTPSmuggling, "_desync_oracle",
-                      lambda self, target, mode="cl_te": _never_oracle(self, target)):
+                      lambda self, target, mode="cl_te", variant="plain": _never_oracle(self, target)):
         module._targets = lambda: ["https://a.test", "https://b.test"]
         import asyncio
         asyncio.run(module.run())
@@ -150,12 +150,17 @@ def test_a_clean_run_produces_nothing():
 
 # ── Bookkeeping ─────────────────────────────────────────────────
 
-def test_a_missing_tool_is_a_skip_not_a_pass():
-    status, state = _run(tool_present=False)
-    assert status == "skipped"
-    skipped = [e for e in state.module["skipped"]
-               if e.get("module_id") == "http_smuggling"]
-    assert "smuggler" in skipped[0]["reason"]
+def test_a_missing_tool_still_runs_the_native_oracles():
+    """The desync oracles are our own sockets; only the sweep needs the binary."""
+    with patch("modules.http_smuggling.smuggler_scan") as scan:
+        status, state = _run(tool_present=False,
+                             module_cfg={"h2": False, "h2c": False})
+        scan.assert_not_called()
+    assert status == "done"
+    # Nothing was proven against example.test, so nothing is filed.
+    assert state.findings["findings"] == []
+    assert not [e for e in state.module["skipped"]
+                if e.get("module_id") == "http_smuggling"]
 
 
 def test_disabled_means_the_tool_is_never_run():
@@ -180,9 +185,104 @@ def test_the_target_list_is_capped(configured, expected):
          patch.object(HTTPSmuggling, "_ambiguous",
                       lambda self, target: _always_ambiguous(self, target)), \
          patch.object(HTTPSmuggling, "_desync_oracle",
-                      lambda self, target, mode="cl_te": _never_oracle(self, target)):
+                      lambda self, target, mode="cl_te", variant="plain": _never_oracle(self, target)):
         module._targets = lambda: hosts
         import asyncio
         asyncio.run(module.run())
 
     assert scan.call_count == expected
+
+
+# ── TE variants and h2c delivery ────────────────────────────────
+
+def test_te_variant_hit_is_confirmed_and_labelled():
+    from unittest.mock import AsyncMock
+
+    state = StateManager(tempfile.mkdtemp())
+    module = HTTPSmuggling(state, _config())
+    with patch("modules.http_smuggling.http_smuggle.desync_probe",
+               new=AsyncMock(return_value=(True, "ghost answered", "m"))):
+        import asyncio
+        proven = asyncio.run(module._desync_oracle(
+            "https://example.test/", "cl_te", variant="dup_x_chunked"))
+    assert proven is True
+    finding = state.findings["findings"][0]
+    assert finding["verification"]["variant"] == "dup_x_chunked"
+    assert "dup_x_chunked" in finding["title"]
+    assert finding["confidence"] == "CONFIRMED"
+
+
+def test_h2_desync_tries_the_second_mode_after_a_probe_error():
+    state = StateManager(tempfile.mkdtemp())
+    module = HTTPSmuggling(state, _config())
+    calls = []
+
+    def probe(target, mode):
+        calls.append(mode)
+        if mode == "h2_cl":
+            raise OSError("stream reset")
+        return True, "next stream answered with hopefully404"
+
+    with patch.object(HTTPSmuggling, "_h2_probe", side_effect=probe):
+        import asyncio
+        proven = asyncio.run(module._h2_desync("https://example.test/"))
+    assert proven is True
+    assert calls == ["h2_cl", "h2_te"]
+    assert state.findings["findings"][0]["verification"]["method"] == \
+        "h2_te_desync_oracle"
+
+
+def test_h2c_desync_only_runs_on_cleartext_targets():
+    from unittest.mock import AsyncMock
+
+    state = StateManager(tempfile.mkdtemp())
+    module = HTTPSmuggling(state, _config())
+    with patch("modules.http_smuggling.http_smuggle.h2c_supported",
+               new=AsyncMock(return_value=(True, "x"))) as probe:
+        import asyncio
+        assert asyncio.run(
+            module._h2c_desync("https://example.test/")) is False
+    probe.assert_not_called()
+
+
+def test_h2c_desync_confirms_through_the_stream_oracle():
+    from unittest.mock import AsyncMock
+
+    state = StateManager(tempfile.mkdtemp())
+    module = HTTPSmuggling(state, _config())
+    with patch("modules.http_smuggling.http_smuggle.h2c_supported",
+               new=AsyncMock(return_value=(True, "h2c SETTINGS frame"))), \
+         patch.object(HTTPSmuggling, "_h2_probe",
+                      return_value=(True, "hopefully404-deadbeef")):
+        import asyncio
+        proven = asyncio.run(module._h2c_desync("http://example.test/"))
+    assert proven is True
+    finding = state.findings["findings"][0]
+    assert "h2c" in finding["title"].lower()
+    assert finding["category"] == "HTTP Request Smuggling"
+
+
+def test_max_te_variants_caps_the_obfuscation_sweep():
+    state = StateManager(tempfile.mkdtemp())
+    module = HTTPSmuggling(state, _config({"max_te_variants": 1,
+                                           "h2": False, "h2c": False}))
+    seen = []
+
+    async def never(self, target, mode="cl_te", variant="plain"):
+        seen.append((mode, variant))
+        return False
+
+    available = {"available": True, "results": [], "exit_code": 0,
+                 "stdout": "", "stderr": ""}
+    with patch("modules.http_smuggling.tool_available", return_value=True), \
+         patch("modules.http_smuggling.smuggler_scan",
+               return_value=available), \
+         patch.object(HTTPSmuggling, "_ambiguous",
+                      lambda self, target: _always_ambiguous(self, target)), \
+         patch.object(HTTPSmuggling, "_desync_oracle", new=never):
+        import asyncio
+        asyncio.run(module.run())
+
+    # Plain framing first, then exactly one obfuscation (both modes).
+    assert seen[:2] == [("cl_te", "plain"), ("te_cl", "plain")]
+    assert {variant for _mode, variant in seen[2:]} == {"xchunked"}

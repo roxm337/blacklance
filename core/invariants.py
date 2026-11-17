@@ -117,6 +117,10 @@ class InvariantSpec:
     ref: str = ""
     idempotency_key: dict = field(default_factory=dict)
     cleanup: dict = field(default_factory=dict)
+    # Delivery only: `connections` keeps the historical one-request-per-
+    # connection batch. `single_packet` writes every request's final byte in
+    # one TCP segment. Grading never reads this field.
+    transport: str = "connections"
 
 
 def _render(template: str, bindings: dict) -> str:
@@ -180,6 +184,10 @@ def parse_invariant(raw: dict, defaults: dict) -> InvariantSpec:
                  or preset["trials"])
     concurrency = int(raw.get("concurrency")
                       or defaults.get("concurrency") or 4)
+    transport = str(raw.get("transport") or defaults.get("transport")
+                    or "connections").strip().lower()
+    if transport not in ("connections", "single_packet"):
+        raise InvariantSpecError(f"spec_invalid: transport {transport}")
     return InvariantSpec(
         name=name, kind=kind, identity=identity,
         limit_semantics=str(raw.get("limit_semantics") or ""),
@@ -201,6 +209,7 @@ def parse_invariant(raw: dict, defaults: dict) -> InvariantSpec:
         ref=str(raw.get("ref") or ""),
         idempotency_key=dict(idem),
         cleanup=dict(raw.get("cleanup") or {}),
+        transport=transport,
     )
 
 
@@ -444,6 +453,80 @@ class RaceRunner:
 
     async def _concurrent_phase(self, spec: InvariantSpec,
                                 bindings: dict) -> dict:
+        """Deliver the concurrent batch, then shape it for grading.
+
+        Delivery is the only thing `spec.transport` changes. A single-packet
+        batch that could not be delivered falls back to the connection batch
+        and records why; it never reports overlap it did not achieve.
+        """
+        if spec.transport == "single_packet":
+            result, reason = await self._single_packet_phase(spec, bindings)
+            if result is not None:
+                return result
+            batch = await self._task_batch(spec, bindings)
+            batch["transport"] = "connections"
+            batch["transport_fallback"] = reason
+            return batch
+        return await self._task_batch(spec, bindings)
+
+    async def _single_packet_phase(self, spec: InvariantSpec,
+                                   bindings: dict) -> tuple:
+        """One synchronized batch. `(None, reason)` means "fall back"."""
+        from core import single_packet
+        try:
+            from tools.wrappers import consume_http_budget
+        except Exception:  # pragma: no cover - import guard
+            consume_http_budget = lambda *_: None  # type: ignore[assignment]
+        request = self._raw_request(spec.operation, bindings)
+        batch = [dict(request) for _ in range(spec.trials)]
+        # Charge before writing: an engagement budget bounds what we attempt,
+        # and a batch that errors on the wire still spent the requests.
+        consume_http_budget(len(batch))
+        try:
+            result = await single_packet.send_async(
+                self.base_url, batch, transport="auto",
+                timeout=self.request_timeout + 5)
+        except Exception as exc:  # noqa: BLE001 - fall back, never fail hard
+            return None, f"single_packet_error: {type(exc).__name__}: {exc}"
+        if result.get("error") or not result.get("in_flight"):
+            return None, result.get("error") or "batch_not_delivered"
+
+        from core.workflows import _extract
+        statuses = list(result.get("statuses") or [])
+        bodies = list(result.get("bodies") or [])
+        accepted = 0
+        effect_ids = []
+        for index, status in enumerate(statuses):
+            status = int(status or 0)
+            if status in spec.operation.success_status:
+                accepted += 1
+            body = str(bodies[index] if index < len(bodies) else "")
+            for candidate in spec.operation.extract_ids or []:
+                effect_id = _extract(candidate, body)
+                if effect_id:
+                    effect_ids.append(effect_id)
+                    break
+        # Idempotency is judged on DISTINCT effects, exactly like the
+        # connection path: a deduped replay is not a second effect.
+        distinct_effects = len(set(effect_ids))
+        effective_accepts = distinct_effects \
+            if spec.kind == "idempotency" and effect_ids else accepted
+        return {
+            "trials": len(statuses),
+            "accepted": effective_accepts,
+            "accepted_statuses": accepted,
+            "distinct_effects": distinct_effects,
+            "rejected": len(statuses) - accepted,
+            "statuses": statuses,
+            "max_in_flight": int(result.get("in_flight") or 0),
+            "effect_ids": effect_ids,
+            "transport": ("h2_single_packet"
+                          if result.get("transport") == "h2"
+                          else "h1_last_byte"),
+        }, ""
+
+    async def _task_batch(self, spec: InvariantSpec,
+                          bindings: dict) -> dict:
         start = asyncio.Event()
         semaphore = asyncio.Semaphore(spec.concurrency)
         in_flight = {"current": 0, "max": 0}
@@ -502,7 +585,7 @@ class RaceRunner:
                 "distinct_effects": distinct_effects,
                 "rejected": len(results) - accepted, "statuses": statuses,
                 "max_in_flight": in_flight["max"],
-                "effect_ids": effect_ids}
+                "effect_ids": effect_ids, "transport": "connections"}
 
     # ── reads, requests, cleanup ────────────────────────────────
 
@@ -528,6 +611,41 @@ class RaceRunner:
         if identity in ("anonymous", ""):
             return await self.harness.request_anonymous(url, **kwargs)
         return await self.harness.request(identity, url, **kwargs)
+
+    def _raw_request(self, request_spec: RequestSpec, bindings: dict) -> dict:
+        """One request as method/path/headers/body for a raw-socket batch.
+
+        Mirrors `_request` exactly: same URL rendering, same per-request
+        headers, same idempotency key, same identity merge. The only
+        difference is that the identity's session is materialised into
+        headers because a raw socket cannot borrow the pooled cookie jar.
+        """
+        headers = dict(request_spec.headers)
+        idem_key = bindings.get("_idem_key")
+        if idem_key and "Idempotency-Key" not in headers:
+            headers["Idempotency-Key"] = idem_key
+        identity = request_spec.identity
+        if identity not in ("anonymous", ""):
+            ident = getattr(self.harness, "identities", {}).get(identity)
+            if ident is not None and hasattr(ident, "request_headers"):
+                merged = ident.request_headers()
+                try:
+                    from tools.wrappers import session_cookies
+                    cookies = session_cookies(identity)
+                except Exception:  # pragma: no cover - import guard
+                    cookies = {}
+                if cookies and not any(
+                        name.lower() == "cookie" for name in merged):
+                    merged["Cookie"] = "; ".join(
+                        f"{key}={value}" for key, value in cookies.items())
+                merged.update(headers)
+                headers = merged
+        return {
+            "method": request_spec.method,
+            "path": request_spec.url(bindings),
+            "headers": headers,
+            "body": request_spec.body(bindings),
+        }
 
     async def _cleanup_seed(self, mut_id: Optional[str], ref: str,
                             spec: InvariantSpec, entry: dict) -> str:

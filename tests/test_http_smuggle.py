@@ -100,3 +100,103 @@ def test_connect_failure_is_a_negative_not_an_exception():
         "http://t.test/", "cl_te", connect=connect, read=lambda *a, **k: (0, "")))
     assert proven is False
     assert "connect failed" in note
+
+
+# ── TE obfuscation variants ─────────────────────────────────────
+
+def test_plain_variant_is_the_historical_byte_sequence():
+    for mode in ("cl_te", "te_cl"):
+        default = http_smuggle.smuggle_prefix(mode, "t.test", "/", "M")
+        pinned = http_smuggle.smuggle_prefix(mode, "t.test", "/", "M",
+                                             variant="plain")
+        assert default == pinned
+        assert "Transfer-Encoding: chunked\r\n" in default
+
+
+def test_every_te_variant_keeps_the_framing_disagreement():
+    expected_cl = {"cl_te": "Content-Length: 4", "te_cl": "Content-Length: 6"}
+    for variant in http_smuggle.DEFAULT_TE_VARIANTS:
+        if variant == "plain":
+            continue
+        for mode, cl in expected_cl.items():
+            request = http_smuggle.smuggle_prefix(
+                mode, "t.test", "/", "M", variant=variant)
+            assert cl in request
+            assert "GPOST /M HTTP/1.1" in request
+            # The point of the variant: the chunked line is spelled so one
+            # parser accepts it and the other does not.
+            assert request.count("\r\n") > 6
+            assert request != http_smuggle.smuggle_prefix(
+                mode, "t.test", "/", "M")
+
+
+def test_variants_are_capped_before_plain():
+    assert http_smuggle.variants(1) == ["plain"]
+    assert http_smuggle.variants(3) == ["plain", "xchunked",
+                                        "space_before_colon"]
+    assert http_smuggle.variants(0) == list(http_smuggle.DEFAULT_TE_VARIANTS)
+    assert len(http_smuggle.variants(0)) == len(
+        http_smuggle.DEFAULT_TE_VARIANTS)
+
+
+def test_desync_probe_writes_the_variant_it_was_given():
+    outcome, sock = _probe_with_variant("dup_x_chunked")
+    proven, _note, _marker = outcome
+    assert proven is False
+    sent = sock.sent.decode("latin-1")
+    assert "Transfer-Encoding: x\r\n" in sent
+    assert "Transfer-Encoding: chunked\r\n" in sent
+
+
+def _probe_with_variant(variant):
+    sock = FakeSocket()
+
+    def connect(url, timeout=20):
+        return sock, "t.test"
+
+    def read(s, timeout=10):
+        return reads.pop(0) if reads else (0, "")
+
+    reads = [(400, "")]
+    return asyncio.run(http_smuggle.desync_probe(
+        "http://t.test/", "cl_te", connect=connect, read=read,
+        variant=variant)), sock
+
+
+# ── h2c ────────────────────────────────────────────────────────
+
+def test_h2c_probe_skips_tls_without_a_connection(monkeypatch):
+    calls = []
+    monkeypatch.setattr(http_smuggle, "connection",
+                        lambda *a, **k: calls.append(a))
+    assert asyncio.run(http_smuggle.h2c_supported("https://t.test/")) == (
+        False, "not_cleartext")
+    assert calls == []
+
+
+def test_h2c_probe_recognises_a_settings_frame(monkeypatch):
+    sock = FakeSocket([b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(http_smuggle, "connection",
+                        lambda url, timeout=10: (sock, "t.test"))
+    supported, note = asyncio.run(http_smuggle.h2c_supported(
+        "http://t.test/"))
+    assert supported is True
+    assert "SETTINGS" in note
+    assert sock.sent.startswith(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+    assert sock.closed is True
+
+
+def test_h2c_probe_rejects_a_non_settings_frame(monkeypatch):
+    sock = FakeSocket([b"\x00\x00\x00\x03\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(http_smuggle, "connection",
+                        lambda url, timeout=10: (sock, "t.test"))
+    assert asyncio.run(http_smuggle.h2c_supported("http://t.test/")) == (
+        False, "unexpected frame type 3")
+
+
+def test_h2c_probe_reports_a_silent_peer(monkeypatch):
+    sock = FakeSocket([])
+    monkeypatch.setattr(http_smuggle, "connection",
+                        lambda url, timeout=10: (sock, "t.test"))
+    assert asyncio.run(http_smuggle.h2c_supported("http://t.test/")) == (
+        False, "no frame header")
